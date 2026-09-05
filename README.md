@@ -823,3 +823,102 @@ the exact numbers involved) and that it changes nothing at the reference
 fps. Whether it measurably improves the reported clips specifically can
 only be confirmed by testing this build against footage at 24fps with
 rapid movement, on the real detector, which this environment cannot do.
+
+## v11.2.0 — a genuinely new signal: does the frame actually show a face
+
+Asked explicitly for a structural rethink covering looking-away, under
+20% of the face visible, leaving the frame, no detection, and fast
+movement together, after the issue persisted through v11.1.6/v11.1.7's
+fixes. Research finding: four of those five are already handled by
+existing, independently-verified mechanisms - looking away and fast
+movement by `_kps_reliable()` and the motion-consistency veto, leaving
+the frame by the boundary-containment checks in the compositor, no
+detection by the carry/taper/fade system. The one genuinely uncovered
+case is "under 20% visible": **every existing gate reasons about the 5
+keypoints' geometry - none of them look at a single pixel of the frame.**
+
+### The gap
+
+`_kps_reliable()` checks whether 5 points admit any single rigid pose.
+`_frontal_score()`/`_pitch_score()` check where the nose sits relative to
+the eyes. A hand pressed over the mouth and chin, or hair swept across
+one whole side, can leave a detector reporting 5 keypoints that are
+perfectly self-consistent and describe an ordinary frontal pose - they
+just sit ON the occluder's surface, not on skin. That detection clears
+every gate this engine has, at full confidence, while most of what gets
+pasted is the occluder's own shape reprojected as if it were a face. This
+is a distinct failure from "looking away": the pose is fine, the face
+underneath it just is not there.
+
+### First attempt, and why it was wrong
+
+The obvious fix: sample chroma at several fixed anchor points a visible
+face always has skin at (forehead, cheeks, nose bridge, chin, jaw
+corners) in ArcFace's aligned space, and check that they agree with each
+other. Built, then measured directly and found self-defeating for
+exactly the case it exists to catch: an occluder covering the bottom 70%
+of the face makes those anchors agree WITH EACH OTHER, so a same-frame
+majority vote sides with the occluder and calls the one genuinely visible
+anchor the outlier - reporting full visibility for a face that is mostly
+covered. Any check that decides "what is skin" by consensus among the
+CURRENT frame's own samples fails this way once occlusion is the
+majority, by construction - the vote has no way to know which side is
+the occluder. (`skin_confidence()` in swap_engine.py, the engine's
+existing content-aware signal, has the same structural blind spot for
+the same reason - it is the right tool for trimming a mask around a
+small intrusion, a mic or a fingertip, and was never meant for this.)
+
+### The fix: compare against a remembered reference, never the current frame
+
+A fixed, external reference cannot be outvoted by whatever is covering
+the face right now. `_visible_face_fraction()` compares each frame's
+anchor chroma against a reference the pipeline remembers from earlier,
+established-good frames of that SAME identity - never derived from the
+frame being judged. The reference itself is learned once, early in the
+job, from several mutually-consistent frames in a row (the same
+"wait for agreement, then trust it" shape as this engine's own startup
+identity lock), so the bootstrap step has its own, one-time majority
+vote, but every ONGOING judgement afterward is against that fixed
+memory, not against itself.
+
+Scoped to single-face jobs for now: a multi-face job can have several
+distinct identities among a frame's detections before pairing (which
+decides which candidate belongs to which identity) has even run -
+gating on the wrong identity's reference would be worse than not gating
+at all.
+
+### Verified
+
+* Direct, isolated test of the mechanism (bypassing the synthetic
+  harness's color-contour detector, whose bbox naturally shrinks with
+  occlusion and would have hidden whether this code path did anything):
+  a fully-visible reference face scores 1.00; the same face with the
+  bottom 70% painted a different color - the majority of anchors, the
+  exact case that broke the first attempt - correctly scores 0.29, not
+  masked by the occluder; a severe occlusion leaving only a forehead
+  sliver scores 0.14 (rejected, matching "under 20%"); a minor corner
+  occlusion (fingertip-scale) correctly stays at 1.00 (accepted, not a
+  false positive).
+* Full existing regression suite (`t_final`, `t_e2e`, `t_modes`,
+  `t_exit`, `t_confused_kps`, `t_confused_2face`, `t_pair`, `t_reentry`,
+  `t_hair_confusion`, `verify_gate`, `repro_ghost`, `verify_geom_cases`,
+  `t_extended_lookaway`, `t_never_returns`) - byte-for-byte unchanged
+  from the v11.1.8 baseline, including every legitimate profile-to-yaw-0.9
+  and lying-down pose `verify_gate.py` checks, none of which this new
+  gate touches.
+
+### Honest caveat
+
+Same limitation as the fps work: the synthetic test harness's detector
+finds faces by color-contour, so its own reported bbox shrinks with any
+occlusion drawn into the source frame, which would exercise the
+ALREADY-EXISTING size-based gates rather than this new content-based
+one - confirmed directly (identical results with and without this fix,
+on that specific test shape) before switching to the isolated,
+function-level verification above, which decouples "what the detector
+reports" from "what the frame actually shows" the way a real detector's
+own bbox regression can. That isolated test is a genuine, direct check
+of this code's logic, not an inference from something else - but it is
+still not the real detector on real footage. Confirming this measurably
+helps the reported clips needs that test, which this environment cannot
+run.

@@ -1923,6 +1923,130 @@ def _kps_reliable(f) -> bool:
         return False
 
 
+def _face_anchor_samples(frame_bgr, f):
+    """Chroma at 7 fixed canonical-space anchors a visible face always has
+    skin at (forehead, cheeks, nose bridge, chin, jaw corners). None,
+    or a short list, on any missing input / computation error."""
+    try:
+        kps = getattr(f, "kps", None)
+        if kps is None or len(kps) < 5 or frame_bgr is None:
+            return None
+        M = _E.estimate_norm(kps, 128)
+        if M is None:
+            return None
+        aligned = cv2.warpAffine(frame_bgr, M, (128, 128), flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_REPLICATE)
+        ycc = cv2.cvtColor(aligned, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        anchors = [(64, 25), (35, 60), (93, 60), (64, 55), (64, 100), (25, 90), (103, 90)]
+        r = 6
+        samples = []
+        for (ax, ay) in anchors:
+            patch = ycc[max(0, ay - r):ay + r, max(0, ax - r):ax + r]
+            if patch.size == 0:
+                continue
+            samples.append((float(np.median(patch[:, :, 1])), float(np.median(patch[:, :, 2]))))
+        return samples if len(samples) >= 4 else None
+    except Exception:
+        return None
+
+
+def _visible_face_fraction(frame_bgr, f, ref_chroma=None) -> float:
+    """0..1: how much of the expected face area is actually visible skin,
+    independent of pose.
+
+    Every existing gate reasons about the 5 keypoints' GEOMETRY -
+    _kps_reliable() checks whether they admit any single rigid pose,
+    _frontal_score()/_pitch_score() check where the nose sits relative to
+    the eyes. None of them look at a single pixel. A hand pressed over the
+    mouth and chin, or hair swept across one whole side, can leave the
+    detector reporting 5 keypoints that are perfectly self-consistent and
+    describe an ordinary frontal pose - they just sit ON the occluder's
+    surface, not on skin. That detection sails through every gate this
+    engine has, at full confidence, while most of what will actually get
+    pasted is the occluder's own shape reprojected as if it were a face.
+    This is a distinct failure from "looking away": the pose is fine, the
+    face underneath it just is not there to work with.
+
+    Deliberately not a repeat of skin_confidence() (swap_engine.py): that
+    function measures every pixel's agreement with the MEDIAN chroma of
+    its own crop's core - a fast, cheap check that is exactly right for
+    trimming a mask around a SMALL intrusion (a mic, a fingertip), but
+    self-defeating for a SEVERE one: once the occluder covers more than
+    half the sampled area, it IS the "core" reference. The first version
+    of this function made the same mistake one level up - sampling several
+    FIXED anchors instead of one core region, but still deciding "visible"
+    by majority vote AMONG THEM. Measured directly: an occluder covering
+    the bottom 70% of the face (6 of 7 anchors) makes those 6 agree WITH
+    EACH OTHER, so the vote sides with the occluder and calls the one
+    genuinely visible anchor the outlier - reporting full visibility for
+    a face that is mostly covered, the exact case this exists to catch.
+    Anything that decides "what is skin" by consensus among the CURRENT
+    frame's own samples fails the same way once occlusion is the
+    majority, by construction - the vote has no way to know which side is
+    the occluder.
+
+    Fixed by comparing against ``ref_chroma`` - a reference the CALLER
+    remembers from earlier, established-good frames for this identity,
+    never from the current, possibly-occluded one. A fixed, external
+    reference cannot be outvoted by whatever is covering the face right
+    now. Returns 1.0 (fully visible - do not block) when no reference
+    exists yet (nothing to compare against - the caller is responsible
+    for only trusting the result once it has one) or on any computation
+    error: this is a new, narrower signal layered on top of already-tuned
+    pose/geometry gates, not a replacement for them, and its failure mode
+    should be "did not catch an occlusion", never "wrongly held a
+    legitimately visible face".
+    """
+    try:
+        if ref_chroma is None:
+            return 1.0
+        samples = _face_anchor_samples(frame_bgr, f)
+        if samples is None:
+            return 1.0
+        arr = np.array(samples, dtype=np.float32)
+        ref = np.asarray(ref_chroma, dtype=np.float32)
+        d = np.linalg.norm(arr - ref[None, :], axis=1)
+        return float(np.sum(d < 18.0)) / float(len(arr))
+    except Exception:
+        return 1.0
+
+
+def _bootstrap_visible_ref(frame_bgr, f, buf, min_frames=3):
+    """Learn one identity's reference anchor chroma from a short run of
+    mutually-consistent early frames - the same "wait for agreement across
+    several frames before trusting it" shape as this engine's own
+    startup identity lock (_locked_emb / _startup_confirm), applied to
+    chroma instead of an embedding.
+
+    Majority-vote-among-this-frame's-own-anchors is exactly the trap
+    _visible_face_fraction's docstring warns against for judging an
+    ONGOING frame - but for BOOTSTRAPPING, it is the right tool: at this
+    point there is no reference yet at all, the video has presumably just
+    started, and requiring near-unanimous agreement (6 of 7 anchors) across
+    several separate frames before locking anything is a real, if
+    imperfect, safeguard against seeding the reference from an already-
+    occluded opening frame. `buf` is the caller's own persistent list for
+    this identity; returns the locked reference once enough qualifying
+    frames accumulate, else None (unresolved, caller keeps not gating yet).
+    """
+    samples = _face_anchor_samples(frame_bgr, f)
+    if samples is None:
+        return None
+    arr = np.array(samples, dtype=np.float32)
+    n = len(arr)
+    agree = np.zeros(n, dtype=int)
+    for i in range(n):
+        d = np.linalg.norm(arr - arr[i], axis=1)
+        agree[i] = int(np.sum(d < 18.0))
+    majority = agree >= max(2, (n * 6) // 7)
+    if np.sum(majority) < n - 1:
+        return None  # this frame itself looks partly occluded - do not seed from it
+    buf.append(arr[majority].mean(axis=0))
+    if len(buf) < min_frames:
+        return None
+    return np.mean(np.stack(buf[-min_frames:], axis=0), axis=0)
+
+
 def _face_swap_allowed(f) -> bool:
     """Balanced gate.
 
@@ -2430,6 +2554,13 @@ def swap_image(target, s1, s2, s3, s4, quality, refs):
         # exists - it is the case behind the "face pasted at the wrong angle
         # when looking away" report.
         faces = [f for f in faces if _kps_reliable(f)]
+        # No occlusion gate here: _visible_face_fraction() needs a reference
+        # chroma remembered from earlier, established-good frames of this
+        # SAME identity - a single still image has no "earlier" to learn
+        # one from, and a reference guessed from this one frame's own
+        # anchors falls into exactly the majority-vote trap that function's
+        # docstring documents (an occluder covering most of the face gets
+        # voted "correct"). Pose/geometry gates only, here.
         if not faces: return None, "❌ No reliably-aligned face detected"
         pairs = _pairs_for_frame(faces, smap, refs or [], frame_bgr=work)
         for f, src in pairs:
@@ -2664,6 +2795,13 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         _det_cache, _det_counter = [], [0]
         _no_face_streak = [0]
+        # Reference chroma for _visible_face_fraction(), keyed by slot.
+        # Locked once from a short run of mutually-consistent early frames
+        # (the same "wait for agreement, then trust it" shape as
+        # _startup_confirm/_locked_emb below), never re-derived from a
+        # single, possibly-occluded frame later on.
+        _visible_ref = {}
+        _visible_ref_buf = {}
         _kps_veto_streak = [0]
         _last_gray = [None]
         _last_gray_full = [None]
@@ -3135,6 +3273,46 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     faces = [f for f in faces if _kps_reliable(f)]
                     if len(faces) < _n_before_kps_gate:
                         stats["kps_rejected"] = stats.get("kps_rejected", 0) + (_n_before_kps_gate - len(faces))
+
+                    # Occlusion gate: a self-consistent, correctly-posed
+                    # detection can still be sitting on a hand, hair, or
+                    # another object covering most of the actual face - see
+                    # _visible_face_fraction()'s docstring for why neither
+                    # _kps_reliable nor the frontal/pitch scores can see
+                    # this. A rejected identity falls into the SAME
+                    # existing "no detection this frame" path as a kps
+                    # rejection - hold the last good geometry through a
+                    # bounded gap, never paint the occluder's own shape.
+                    #
+                    # Single-face jobs only for now: this needs a reference
+                    # chroma keyed to a SPECIFIC identity, learned over
+                    # several earlier frames of that same identity. A
+                    # single-face job has exactly one identity in the whole
+                    # video, so slot 0's reference applies to every
+                    # candidate here, before pairing has even run. A multi-
+                    # face job can have several distinct identities among
+                    # `faces` at this same point, with pairing (which
+                    # decides which candidate belongs to which identity)
+                    # still a step away - gating on the wrong identity's
+                    # reference here would be worse than not gating at all,
+                    # so this is deliberately scoped to what can be done
+                    # correctly right now rather than guessed at.
+                    if not multi_face_safe and faces:
+                        _vbuf = _visible_ref_buf.setdefault(0, [])
+                        _n_before_vis_gate = len(faces)
+                        _kept = []
+                        for _f in faces:
+                            _ref = _visible_ref.get(0)
+                            if _ref is None:
+                                _ref = _bootstrap_visible_ref(frm, _f, _vbuf)
+                                if _ref is not None:
+                                    _visible_ref[0] = _ref
+                                _kept.append(_f)  # never reject during bootstrap
+                            elif _visible_face_fraction(frm, _f, ref_chroma=_ref) >= 0.20:
+                                _kept.append(_f)
+                        faces = _kept
+                        if len(faces) < _n_before_vis_gate:
+                            stats["occlusion_rejected"] = stats.get("occlusion_rejected", 0) + (_n_before_vis_gate - len(faces))
 
                     stats["detector_calls"] += 1
                     stats["det_times"].append((time.perf_counter() - t_det0) * 1000)
