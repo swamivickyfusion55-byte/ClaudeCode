@@ -772,6 +772,41 @@ def _pad_bbox(bbox, h, w, pad=_FACE_ROI_PAD):
 # essentially free; it is the ONNX forward pass that is expensive, and that is
 # the only thing still restricted to key frames.
 # ---------------------------------------------------------------------------
+def _touches_frame_edge(bbox, shape, margin_frac: float = 0.012) -> bool:
+    """True if the box is in contact with a frame border.
+
+    Containment alone does not catch someone walking out of shot: the detector
+    reports the visible SLIVER of the face, which is a small box sitting
+    entirely inside the frame, so it scores ~1.0 containment right up until the
+    person is gone. Contact with the border is the signal that actually tracks
+    "this face is on its way out".
+    """
+    if bbox is None or shape is None:
+        return False
+    try:
+        H, W = int(shape[0]), int(shape[1])
+        m = max(1.0, margin_frac * min(W, H))
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        return bool(x1 <= m or y1 <= m or x2 >= W - m or y2 >= H - m)
+    except Exception:
+        return False
+
+
+def _frame_containment(bbox, shape) -> float:
+    """Fraction of ``bbox`` that lies inside the frame, 0..1."""
+    if bbox is None or shape is None:
+        return 1.0
+    try:
+        H, W = int(shape[0]), int(shape[1])
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        area = max(1.0, (x2 - x1) * (y2 - y1))
+        ix = max(0.0, min(x2, W) - max(x1, 0.0))
+        iy = max(0.0, min(y2, H) - max(y1, 0.0))
+        return float(max(0.0, min(1.0, (ix * iy) / area)))
+    except Exception:
+        return 1.0
+
+
 def _geom_record(face, track, alpha, guard, src, lmk=None):
     """Freeze the geometry a face will be RENDERED with, at detection time.
 
@@ -802,6 +837,11 @@ def _geom_record(face, track, alpha, guard, src, lmk=None):
         "guard": float(np.clip(guard, 0.0, 1.0)),
         "src": src,
         "track": track,
+        # The last box the detector actually reported for this identity. The
+        # smoothed/predicted bbox lags and stalls, so it is useless for asking
+        # "was this face on its way out of frame?" - this is not.
+        "hit_bbox": (None if track is None or getattr(track, "last_hit_bbox", None) is None
+                     else np.asarray(track.last_hit_bbox, np.float32).copy()),
         # True when this came from a real detection rather than from the
         # tracker predicting forward. _geom_for_frame() prefers to interpolate
         # between two real observations: between them, interpolation is exact
@@ -826,6 +866,7 @@ def _geom_lerp(a, b, t):
     out["src"] = b["src"] if t >= 0.5 else a["src"]
     out["track"] = b["track"] if t >= 0.5 else a["track"]
     out["det"] = bool(a.get("det")) and bool(b.get("det"))
+    out["hit_bbox"] = b.get("hit_bbox") if t >= 0.5 else a.get("hit_bbox")
     return out
 
 
@@ -866,7 +907,12 @@ def _geom_for_frame(timeline, g, taper):
     if taper > 0 and dist > taper:
         return None
     rec = dict(side[1])
-    if taper > 0 and dist > 0:
+    if dist > 0:
+        # Anchored on one side only: this is an extrapolation, whatever the
+        # anchor was. Leaving det=True here (inherited from a real detection
+        # several frames back) made every downstream "is this observed?" check
+        # silently pass for held geometry.
+        rec["det"] = False
         rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (dist / float(taper)) ** 2))
     return rec if rec["alpha"] > 0.02 else None
 
@@ -1751,6 +1797,12 @@ def _face_swap_allowed(f) -> bool:
     # rejecting early caused original-face fallback flicker.
     if _bbox_drift_too_far(getattr(f, "bbox", None), anchor, limit=0.72):
         return False
+    # A predicted box that has largely left the frame is not a face any more.
+    # Without this the tracker happily extrapolates someone who walked out of
+    # shot, and the compositor paints them onto the frame edge.
+    shape = getattr(f, "_frame_shape", None)
+    if shape is not None and _frame_containment(getattr(f, "bbox", None), shape) < 0.55:
+        return False
     return True
 
 
@@ -2203,7 +2255,17 @@ def _adaptive_swap_gap(base_gap, motion_class, quality):
         return 1
     # Head turns read as MEDIUM/HIGH motion. Forcing gap >= base made the
     # swap too sparse and the original face flashed through on profile.
-    mult = {"STATIC": 1.6, "LOW": 1.2, "MEDIUM": 0.75, "HIGH": 0.50}.get(motion_class, 1.0)
+    #
+    # STATIC and LOW no longer stretch the gap PAST the base. They used to
+    # (x1.6 and x1.2), and that is the one place this trade goes wrong: the
+    # motion estimate is a whole-frame grey difference at 160x90, so a talking
+    # head in front of a locked-off camera reads STATIC while the mouth is
+    # moving. Stretching a 5-frame cadence to 8 there is a third of a second of
+    # stale mouth on exactly the shot where lip movement is most watched.
+    # Shortening on motion is still free, so MEDIUM/HIGH keep their multipliers.
+    # This also makes the "Swap every N" control mean what it says: N is a
+    # ceiling the adaptive logic may tighten, never loosen.
+    mult = {"STATIC": 1.0, "LOW": 1.0, "MEDIUM": 0.75, "HIGH": 0.50}.get(motion_class, 1.0)
     return max(1, min(10, int(round(base * mult))))
 
 def _fit_box(box_wh, W, H):
@@ -2321,12 +2383,30 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 except Exception:
                     base_det_int = 1
 
-        # Multi-person scenes require correctness over temporal shortcuts. A skipped
-        # detection can otherwise interpolate/hold a face across an occlusion and
-        # paste it onto the other person. Single-face mode keeps the fast path.
+        # Two cadences, deliberately separate:
+        #
+        #   skip_n / base_det_int  -> how often DETECTION and tracking run. This
+        #       is the identity-critical one: association, the crossing lock and
+        #       the per-slot embedding all depend on it. Multi-face still runs it
+        #       every single frame, exactly as before.
+        #
+        #   swap_gap_base          -> how often the SWAP NETWORK runs. This one
+        #       is not identity-critical any more. Since v11.1.0 every output
+        #       frame is composited from the cached aligned crop using its own
+        #       interpolated keypoints, mask, background and lighting, so a wider
+        #       swap gap costs expression freshness and nothing else.
+        #
+        # These used to be the same number, which is why a two-face job ran the
+        # ONNX forward pass twice on every frame. The original comment here said
+        # multi-face "requires correctness over temporal shortcuts" because the
+        # old fill path stamped a face ROI copied from a neighbouring frame and
+        # could land it on the other person. That path no longer exists.
+        swap_gap_base = skip_n
         if multi_face_safe:
             skip_n = 1
             base_det_int = 1
+            # Best/Ultra map to 1 here, so those tiers keep swapping every frame.
+            swap_gap_base = int(SKIP_N.get(quality, 1) or 1)
 
         fps = cfg['fps']
         cpu_n = os.cpu_count() or 4
@@ -2580,7 +2660,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         _persist_job(jid)
                 u(p, msg)
 
-        u(12, f"Processing {ow}×{oh} · skip={skip_n} · det≤{DET_MAX_W}px · Phoenix CPU Speed V3 · adaptive AI cadence · CPU-only · profiled ETA…")
+        u(12, f"Processing {ow}×{oh} · det={skip_n} · swap≈{swap_gap_base} · det≤{DET_MAX_W}px · Phoenix CPU Speed V3 · adaptive AI cadence · CPU-only · profiled ETA…")
 
         FRAME_Q_MAX = max(48, min(chunk_n * 2, 240))
         RESULT_Q_MAX = max(48, min(chunk_n * 2, 240))
@@ -2966,7 +3046,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # face may be predicted for; stacking a further ~0.8 s of held
             # geometry on top of it is how a face ends up painted on a body
             # after its owner has left the shot.
-            taper = int(max(3, min(2 * max(1, skip_n), 12)))
+            taper = int(max(3, min(2 * max(1, skip_n, swap_gap_base), 12)))
 
             def _records_at(g):
                 """Every slot's geometry for output frame ``g``."""
@@ -2986,7 +3066,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 if not any(visible.get(sl) for sl in _records_at(gidx[k])):
                     continue
                 mclass = key_motion_map.get(k, "MEDIUM")
-                gap = _adaptive_swap_gap(skip_n, mclass, quality)
+                gap = _adaptive_swap_gap(swap_gap_base, mclass, quality)
                 g = gidx[k]
                 if g < initial_force_until or last_swap_g[0] <= -10**8 or (g - last_swap_g[0]) >= gap:
                     selected.append(k)
@@ -3238,6 +3318,46 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 any_ok = False
                 for slot in order:
                     rec = records[slot]
+                    # A face the detector can still SEE is swapped wherever it
+                    # is, including half out of shot - the detector vouches for
+                    # it. A face that is only being HELD or predicted is a
+                    # different matter: once someone walks out of frame the
+                    # detector stops reporting them, the tracker keeps
+                    # extrapolating, and the paste ends up pinned against the
+                    # frame edge on top of whatever is there. Require a held
+                    # face to still be substantially inside the frame, and ramp
+                    # its opacity down rather than letting it pop.
+                    if not rec.get("det"):
+                        # This face is being HELD, not seen. Two very different
+                        # situations produce that, and they need opposite
+                        # treatment:
+                        #
+                        #   occluded mid-frame (a hand, a turn) -> hold, which
+                        #       is exactly what stops the original face
+                        #       flashing back;
+                        #   walked out of shot -> stop, because the detector
+                        #       will never report them again and the tracker
+                        #       will happily extrapolate a face onto whatever
+                        #       is left behind.
+                        #
+                        # The last REAL detection tells them apart: if it was
+                        # already in contact with a frame border, the subject
+                        # was on their way out. The smoothed bbox cannot be
+                        # used for this - it lags the subject and then stalls
+                        # short of the edge, which is precisely how a face ends
+                        # up painted mid-frame over an empty background.
+                        if _touches_frame_edge(rec.get("hit_bbox"), frm.shape):
+                            continue
+                        if _touches_frame_edge(rec["bbox"], frm.shape):
+                            continue
+                        keep = _frame_containment(rec["bbox"], frm.shape)
+                        if keep < 0.60:
+                            continue
+                        if keep < 0.85:
+                            rec = dict(rec)
+                            rec["alpha"] *= (keep - 0.60) / 0.25
+                            if rec["alpha"] <= 0.02:
+                                continue
                     rivals = _rival_landmarks(records, slot)
                     cached = _nearest_aligned(slot, g)
                     if cached is not None:
@@ -3272,7 +3392,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 # Drop aligned crops that no later frame can still be nearest
                 # to, so peak memory stays a few crops rather than one per
                 # swapped frame in the chunk.
-                horizon = g - 2 * max(1, skip_n)
+                horizon = g - 2 * max(1, skip_n, swap_gap_base)
                 for _sl, _h in _aligned_hist.items():
                     if len(_h) > 2:
                         _aligned_hist[_sl] = [e for e in _h if e[0] >= horizon] or _h[-1:]

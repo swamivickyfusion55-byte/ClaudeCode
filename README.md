@@ -69,6 +69,77 @@ swap — which is exactly what identified the fill path as the cause.
   frame, so enhanced and unenhanced frames no longer alternate at the swap
   cadence.
 
+## v11.1.1 — efficiency pass, and two seam fixes
+
+### Faces leaving the frame
+
+A subject walking out of shot left a face pasted against the frame edge for
+~17 frames. The detector stops reporting them, the tracker keeps
+extrapolating, and the smoothed box *lags and then stalls short of the border*
+— so neither "is it outside the frame?" nor "is it touching the edge?" catches
+it; the box sits comfortably inside the frame painting a face onto the
+background. The test that works is the **last real detection**: if that was
+already in contact with a border, the subject was on their way out, and held
+geometry for them is not painted. A face occluded mid-frame is unaffected and
+still holds (verified: an 18-frame dropout still yields 0 original-face
+frames).
+
+### The mask had a hard edge
+
+The canonical template is centred at `cy=0.545` with `ry=0.495`, so it reaches
+1.04 — it runs off the bottom of the aligned crop, and measured **0.881 at the
+bottom border** (top 0.250, sides 0.111). That is a hard edge in the
+composite, not a feathered one. It normally hides because the chin edge lands
+on a neck, but it is what turned any mis-placed paste into a visible
+straight-edged rectangle. A border rolloff (`mask_border`, applied either side
+of the Gaussian feather, since the feather smears interior weight back out)
+brings the border to 0.014 with chin coverage intact.
+
+### Two cadences, not one
+
+`skip_n` and the swap cadence used to be the same number, so a two-face job ran
+the ONNX forward pass twice on *every* frame. They are now separate:
+detection/tracking cadence (identity-critical, unchanged) and swap-network
+cadence (no longer identity-critical, since every frame is composited from the
+cached aligned crop regardless). The adaptive gap may now only *tighten* below
+the preset's cadence, never stretch past it — the whole-frame motion estimate
+is blind to a moving mouth, so a locked-off talking head read STATIC and
+stretched a 5-frame cadence to 8.
+
+Measured at 720p with inswapper at 80 ms/call, detector at 50 ms/call:
+
+| | before | after |
+|---|---|---|
+| per-frame composite cost | 4.70 ms | **3.11 ms** (−34%) |
+| 2-face Optimized, 120 frames | 32.3 s | **22.6 s** (−30%) |
+| 2-face swap-network calls | 240 | **126** (−47%) |
+| 1-face Optimized, 150 frames | 14.1 s | **13.0 s** (−7%) |
+| frames painting a face after the subject left | 17 | **0** |
+| mask value at the crop border | 0.881 | **0.014** |
+
+Quality cost of the 2-face cadence change, same clip: identity retention
+120/120 and both-faces-present 120/120 (unchanged); placement error 1.0 → 1.1
+px; area step p99 2.07% → 2.15%; luma step p99 0.84 → 0.96 (of 255). The one
+real trade is **expression freshness**: the face texture is now up to 3 frames
+old (mean 0.65) where it was up to 1, bounded at 4 frames / 133 ms in the
+worst case (locked-off camera). Geometry, mask, lighting and identity remain
+per-frame.
+
+### Things tried and rejected
+
+Kept here because they look like obvious wins and are not:
+
+* **Packing the face and mask into one 4-channel warp.** Forces a single border
+  mode. The face needs `BORDER_REPLICATE` (see the mask edge above) or black
+  blends in under the chin at ~0.9 alpha.
+* **Vectorising `_masked_stats` over channels.** 5x *slower* (1.69 ms vs 0.34
+  ms) — it allocates two full HxWx3 float arrays and reduces over a
+  non-contiguous axis. Same for the colour transform: 2.6x slower vectorised.
+* **Gathering colour statistics at half resolution.** Saves 0.1 ms and
+  area-averaging destroys variance: per-channel std came out ~15 LAB levels
+  low. std drives the contrast-matching term whose mis-scaling produced the
+  original flat "brown patch".
+
 ### Known limits
 
 * Beyond roughly 70 degrees of yaw the ArcFace 5-point fit is close to
