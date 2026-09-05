@@ -1,0 +1,150 @@
+"""Swamitech Phoenix v11.0.4 "SoftStable" configuration (Seamless-CPU base)."""
+from __future__ import annotations
+import os
+from dataclasses import dataclass
+from typing import Dict, Tuple
+
+ENV_DEFAULTS = {
+    "GRADIO_ANALYTICS_ENABLED": "False",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1",
+    "GRADIO_TEMP_DIR": "/tmp/gradio",
+}
+for _k, _v in ENV_DEFAULTS.items():
+    os.environ.setdefault(_k, _v)
+
+DET_MAX_W = 720
+DET_SIZE = (640, 640)
+# CPU-only speed tiers: smaller detector input for the common single-face path.
+DET_SIZE_BALANCED = (512, 512)
+DET_SIZE_BEST = (640, 640)
+FACE_MODEL_NAME = os.environ.get("PHOENIX_FACE_MODEL", "buffalo_l").strip() or "buffalo_l"
+ENABLE_HI_DET_PROBE = os.environ.get("PHOENIX_HI_DET_PROBE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# Detector acceptance threshold. InsightFace defaults to 0.5; profile and
+# distant faces routinely score 0.3-0.5 and are therefore never returned at the
+# default. A missed detection used to trigger a revert to the original face,
+# which is far more visible than a weak detection the tracker then rejects.
+DET_THRESH = 0.32
+
+# ========================= CPU EFFICIENCY TUNING ===========================
+#
+# These settings are deliberately conservative. Speed depends on the selected
+# output resolution, source FPS, model provider and enhancer; benchmark before
+# changing them for a particular Space.
+#
+# INPUT_MAX_W: historical decode cap. v11.0.2 reader resizes once to the
+# chosen output size (ow×oh) — an extra pre-downscale to this width caused
+# crush→upscale on 720p+ outputs. Kept for docs/compat; pipeline no longer
+# applies it as an intermediate scale.
+INPUT_MAX_W = 720
+
+# Maximum concurrent Python frame workers. Keep at 1 on HF CPU so ORT/OpenCV/
+# x264 native threads are not thrashing. Override with PHOENIX_VIDEO_WORKERS≤2.
+VIDEO_WORKERS = 1
+
+# DET_SKIP_INTERVAL: default detector cadence ONLY when det_n/det_int is Auto.
+# Do NOT use this as a hard floor over explicit preset/user values (that bug
+# forced re-detect every ≥3 keyframes even when Stable set det_n=1 → flicker).
+# Set to 1 = detect every keyframe when Auto (least flicker, more CPU).
+# Higher values (e.g. 3) are a speed default for Auto on constrained CPU.
+DET_SKIP_INTERVAL = 1
+FACE_ROI_PAD = 0.22
+FACE_EMA_ALPHA = 0.40
+COLOR_MATCH_SCALE = 0.25
+# Reference cadence table (Auto swap_n). Best/Ultra stay at 1 so Stable /
+# HQ presets never silently skip every other AI swap frame.
+SKIP_N = {"Fast": 6, "Balanced": 4, "Optimized": 5, "Best": 1, "Ultra": 1}
+
+RES: Dict[str, Tuple[int, int]] = {
+    "540p (Fastest)": (960, 540),
+    "640p (Fast)": (1136, 640),
+    "680p": (1208, 680),
+    "720p (HD)": (1280, 720),
+    "900p (HD+)": (1600, 900),
+    "1080p (Full HD)": (1920, 1080),
+}
+
+RETAIN_SEC = 10800  # completed server outputs retained for 3 hours
+ORPHAN_SEC = 86400
+SESSION_TTL_SEC = 86400
+SESSION_DIR = "/tmp/swamitech_session"
+SESSION_JSON = "/tmp/swamitech_session.json"
+
+AUTO_SAVE_ENABLED = True
+AUTO_SAVE_DIR = "/tmp/.swamitech_autosave"
+AUTO_SAVE_RETAIN_SEC = 10800
+HF_OUTPUT_REPO = os.environ.get("SWAMITECH_HF_OUTPUT_REPO", "").strip()
+HF_UPLOAD_ENABLED = bool(os.environ.get("HF_TOKEN")) and bool(HF_OUTPUT_REPO)
+
+# Authoritative server-side result storage. Attach an HF Storage Bucket to /data
+# for persistence across Space restarts; the app writes completed outputs to
+# this directory before marking a job done. Override with an environment variable
+# when using a different mounted persistent volume.
+PERSISTENT_OUTPUT_DIR = os.environ.get("PHOENIX_PERSISTENT_OUTPUT_DIR", "/data/phoenix_outputs").strip() or "/data/phoenix_outputs"
+PERSISTENT_JOB_STATE_DIR = os.environ.get("PHOENIX_PERSISTENT_JOB_STATE_DIR", "/data/phoenix_jobs").strip() or "/data/phoenix_jobs"
+SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
+
+DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+FPS = [15, 24, 30, 40, 50, 60]
+
+VERSION = "v11.0.4"
+BUILD = "SoftStable · brightness-only · Seamless-CPU base (no hold-everywhere)"
+VERSION_FULL = f"{VERSION} ({BUILD})"
+
+@dataclass
+class Settings:
+    det_max_w: int = DET_MAX_W
+    det_size: Tuple[int, int] = DET_SIZE
+    version: str = VERSION_FULL
+
+SETTINGS = Settings()
+
+
+# ---------------------------------------------------------------------------
+# v11 engine tunables (swap_engine.AlignedCompositor / MultiFaceTracker).
+# These are the dials worth touching if output needs adjusting; everything is
+# applied at import time via swap_engine.configure(**ENGINE_TUNABLES).
+# ---------------------------------------------------------------------------
+ENGINE_TUNABLES = {
+    # --- mask shape, defined in the pose-normalised aligned crop -----------
+    # Because the crop is pose-normalised, one shape fits every head angle.
+    # That is what makes it flicker-free: nothing about it varies per frame.
+    "mask_rx":          0.435,   # half-width  (fraction of crop). Larger = more coverage
+    "mask_ry":          0.495,   # half-height. Raise if the chin/forehead is clipped
+    "mask_feather":     0.16,    # edge softness. Raise if you can see the seam
+    "hull_dilate":      0.085,   # landmark-hull dilation
+    "hull_floor":       0.30,    # hull can never remove more than 70% of the template
+    "mask_ema":         0.36,    # SoftStable: keep 0.36 (do not raise like ProStable 0.40)
+
+    # --- colour transfer ---------------------------------------------------
+    # cm_std_lo is the important one. The v10.9.3 bug was effectively a hard
+    # 0.20 contrast ratio, which flattened the face into the brown patch.
+    # Never set cm_std_lo below ~0.65.
+    # SoftStable: gentler luma / tighter shift / delta clamp — brightness only.
+    "cm_strength_ab":   0.85,    # chroma follows the scene strongly
+    "cm_strength_l":    0.45,    # SoftStable: was 0.55 — less luma pulse
+    "cm_std_lo":        0.72,    # floor on the contrast ratio
+    "cm_std_hi":        1.45,
+    "cm_ema":           0.18,    # SoftStable: was 0.28 — steadier deflicker
+    "cm_max_shift":     20.0,    # SoftStable: was 26 — tighter LAB mean cap
+    "cm_delta_clamp":   5.0,     # SoftStable: max |dmean| step vs prior smoothed
+
+    # --- occlusion guard (hug / kiss / hand across the face) ---------------
+    "occl_min_keep":    0.35,    # lower = trims intruding pixels harder
+
+    # --- multi-face association -------------------------------------------
+    "trk_gate_new":     0.30,    # identity similarity needed to CREATE a binding
+    "trk_gate_hold":    0.10,    # ...and to KEEP an established one (deliberately low)
+    "trk_lock_hits":    4,       # frames before a track counts as established
+    "trk_cross_iou":    0.12,    # tracks this close are "crossing" -> embeddings frozen
+    "trk_flip_margin":  0.14,    # identity margin needed to justify a label flip
+    "trk_flip_frames":  5,       # ...sustained for this many consecutive frames
+    "trk_max_missed":   24,      # carry-through budget before the track gives up
+    "trk_alpha":        0.42,    # bbox smoothing on update
+    # One-Euro landmark smoothing (keys must exist in swap_engine._P to apply)
+    "kps_min_cutoff":   0.06,
+    "kps_beta":         0.015,
+}
