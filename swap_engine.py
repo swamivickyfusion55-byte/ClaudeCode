@@ -59,7 +59,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.2.0-continuous"
+ENGINE_VERSION = "aequus-1.2.2-solid-face"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -89,14 +89,14 @@ _P = {
     "mask_ema": 0.36,        # SoftStable: match config (0.36)
     # colour transfer (SoftStable brightness-only)
     "cm_strength_ab": 0.85,  # chroma follows the target scene strongly
-    "cm_strength_l": 0.45,   # SoftStable: was 0.55
+    "cm_strength_l": 0.42,   # CinemaQA: steadier than SoftStable 0.45
     "cm_std_lo": 0.72,       # contrast ratio clamp - never crush face contrast
     "cm_std_hi": 1.45,
-    "cm_ema": 0.18,          # SoftStable: was 0.28
+    "cm_ema": 0.15,          # CinemaQA: steadier than SoftStable 0.18
     "cm_max_shift": 20.0,    # SoftStable: was 26
-    "cm_delta_clamp": 5.0,   # SoftStable: max |dmean| step vs prior smoothed
+    "cm_delta_clamp": 4.0,   # CinemaQA: tighter than SoftStable 5.0
     # occlusion guard (off by default)
-    "occl_min_keep": 0.35,
+    "occl_min_keep": 0.45,  # SolidFace: keep center opaque under marginal occl_guard
     # Occlusion strength is a CONTINUOUS weight in [0,1], not a boolean.
     # A binary guard changed the mask area by several percent from one frame
     # to the next every time it toggled, and the mask is what the colour
@@ -460,7 +460,9 @@ class TrackState:
                  "emb", "hits", "missed", "mask_ema", "cm_dmean", "cm_ratio",
                  "flip_votes", "crossing", "last_face", "det_score", "last_hit_bbox",
                  "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps",
-                 "fake", "fake_corr", "fake_size", "fake_frame")
+                 "fake", "fake_corr", "fake_size", "fake_frame",
+                 "_frame_wh", "_paste_frozen", "_reacquired",
+                 "confirm_hits", "_confirm_ease")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -494,6 +496,13 @@ class TrackState:
         self.fake_corr = None     # aligned-space correction for this build
         self.fake_size = 0
         self.fake_frame = -10 ** 9
+        # Last known frame size (W, H) from core assign/bind — used to freeze
+        # constant-velocity prediction once the face has mostly left the shot.
+        self._frame_wh = None
+        self._paste_frozen = False  # True: stop advancing; dead for paste
+        self._reacquired = False    # set by update() for core geom-stub clear
+        self.confirm_hits = 0       # v11.1.10: reliable hits needed after reacquire
+        self._confirm_ease = 0      # v11.2.1: neutralized (was CinemaQA soft ease-in)
 
     # -- geometry -------------------------------------------------------
     @property
@@ -529,19 +538,26 @@ class TrackState:
         detection cadence, so the carried face trailed the real one during
         every fast movement and then snapped forward on the next detection.
         That snap is visible as a flick.
+
+        v11.1.9 ReentrySafe: once the bbox is mostly outside the last known
+        frame, stop advancing and mark paste-dead. Constant-velocity carry
+        while off-screen compounds into empty-space / body paste on return.
         """
         n = max(0.0, float(n_frames))
         if n <= 0.0:
             return self.bbox
         steps = max(1, int(round(n)))
+        m0 = self.missed
+        self.missed = m0 + steps
+        # Already left the frame — count the miss but do not keep coasting.
+        if self._paste_frozen:
+            return self.bbox
         # Confidence in an extrapolation decays per FRAME advanced, so the
         # damping has to be summed over the frames being covered. Applying the
         # end-of-interval damping factor to the whole interval at once (n * damp)
         # under-advances a multi-frame catch-up badly - a 5-frame advance moved
         # about 2.2 frames' worth - which shows up as the carried face trailing
         # the real one and then snapping forward on the next detection.
-        m0 = self.missed
-        self.missed = m0 + steps
         step = float(sum(0.85 ** min(m0 + i, 12) for i in range(1, steps + 1)))
         if self.bbox is not None:
             self.bbox = (self.bbox + self.vel_bbox * step).astype(np.float32)
@@ -549,9 +565,23 @@ class TrackState:
             self.obs_bbox = (self.obs_bbox + self.vel_bbox * step).astype(np.float32)
         if self.kps is not None and self.vel_kps is not None:
             self.kps = (self.kps + self.vel_kps * step).astype(np.float32)
+        # Freeze when mostly outside the last known frame (set by core).
+        if self._frame_wh is not None and self.bbox is not None:
+            try:
+                W, H = float(self._frame_wh[0]), float(self._frame_wh[1])
+                x1, y1, x2, y2 = [float(v) for v in self.bbox]
+                area = max(1.0, (x2 - x1) * (y2 - y1))
+                ix = max(0.0, min(x2, W) - max(x1, 0.0))
+                iy = max(0.0, min(y2, H) - max(y1, 0.0))
+                contain = float(max(0.0, min(1.0, (ix * iy) / area)))
+                if contain < 0.70:
+                    self._paste_frozen = True
+                    self.confirm_hits = 0  # v11.1.10: must re-confirm on return
+            except Exception:
+                pass
         return self.bbox
 
-    def update(self, face, update_embedding=True, dt_frames: float = 1.0):
+    def update(self, face, update_embedding=True, dt_frames: float = 1.0, kps_ok: bool = True):
         a = float(_P["trk_alpha"])
         dt = max(1.0, float(dt_frames or 1.0))
         self.last_dt = dt
@@ -560,6 +590,93 @@ class TrackState:
         # counted yet.
         elapsed = max(1.0, float(self.missed) + dt)
         bb = np.asarray(face.bbox, np.float32).reshape(4).copy()
+
+        # --- v11.1.9 ReentrySafe: reacquire snap ---------------------------
+        # After a long miss / off-screen / round-trip, EMA-blending the new
+        # detection toward the stale *predicted* bbox (and deriving velocity
+        # from (new - last_hit)/elapsed across the gap) paints the first
+        # returned frames in the wrong place. Snap hard instead.
+        # Prevents off-screen carry → wrong-place paste on return.
+        # --- v11.1.10 HairGate: keep _paste_frozen until confirm_hits >= 2
+        # reliable frames so a hair/skull/neck first-hit cannot paint.
+        reacquire = False
+        if self.last_hit_bbox is not None:
+            lh = np.asarray(self.last_hit_bbox, np.float32).reshape(4)
+            lw = max(1.0, float(lh[2] - lh[0]))
+            lhgt = max(1.0, float(lh[3] - lh[1]))
+            cx0 = 0.5 * (float(lh[0]) + float(lh[2]))
+            cy0 = 0.5 * (float(lh[1]) + float(lh[3]))
+            cx1 = 0.5 * (float(bb[0]) + float(bb[2]))
+            cy1 = 0.5 * (float(bb[1]) + float(bb[3]))
+            # v11.2.2: judge displacement against where this track's OWN
+            # tracked velocity says it should be after `elapsed` frames, not
+            # against the raw last-hit position. The un-scaled version
+            # (comparing raw consecutive-detection IOU/distance regardless of
+            # how many frames separated them) fired on ordinary continuous
+            # motion across a sparse detector cadence - a subject crossing a
+            # whole box-width between two detector calls (normal at
+            # Fast/Optimized SKIP_N with real movement) looked identical to a
+            # genuine re-acquisition elsewhere, snapping velocity to zero and
+            # re-freezing paste on exactly the "fast movement" footage this
+            # project has been trying to fix. Verified directly: the
+            # project's own regression suite (t_final.py) caught this -
+            # constant 10px/frame motion at a 10-frame detector cadence was
+            # being LEARNED AS ZERO velocity because every update reacquired.
+            exp_cx, exp_cy = cx0, cy0
+            if self.vel_bbox is not None:
+                exp_cx += 0.5 * (float(self.vel_bbox[0]) + float(self.vel_bbox[2])) * elapsed
+                exp_cy += 0.5 * (float(self.vel_bbox[1]) + float(self.vel_bbox[3])) * elapsed
+            cdist = float(math.hypot(cx1 - exp_cx, cy1 - exp_cy))
+            if (int(self.missed) >= 8
+                    or cdist > 0.75 * max(lw, lhgt)):
+                reacquire = True
+        # v11.2.0 CinemaQA: sticky until core wipes geom timeline.
+        # Previously `= reacquire` cleared the flag on the confirming update
+        # *before* _record_geometry could scrub stubs → exit/return ghost glide.
+        if reacquire:
+            self._reacquired = True
+
+        if reacquire:
+            self.vel_bbox = np.zeros(4, np.float32)
+            self.obs_bbox = bb.copy()
+            self.last_hit_bbox = bb.copy()
+            self.bbox = bb.copy()
+            kps = getattr(face, "kps", None)
+            if kps is not None:
+                kp = np.asarray(kps, np.float32).copy()
+                self.kps = kp
+                self.vel_kps = np.zeros_like(kp)
+                self.last_hit_kps = kp.copy()
+            lmk = getattr(face, "landmark_2d_106", None)
+            if lmk is not None:
+                self.lmk = np.asarray(lmk, np.float32).copy()
+            if update_embedding:
+                e = getattr(face, "normed_embedding", None)
+                if e is not None:
+                    e = np.asarray(e, np.float32)
+                    n = float(np.linalg.norm(e)) + 1e-6
+                    e = e / n
+                    if self.emb is None:
+                        self.emb = e
+                    else:
+                        sim = float(np.dot(self.emb, e))
+                        # Keep emb if sim OK else refresh (no slow EMA from stale).
+                        if sim < 0.35:
+                            self.emb = e
+            self.det_score = float(getattr(face, "det_score", 0.5) or 0.5)
+            self.last_face = face
+            self.hits += 1
+            self.missed = 0
+            # HairGate: this frame counts as confirm_hits=1, but stay frozen
+            # until a second reliable update. Bad/unreliable: reset to 0.
+            if kps_ok:
+                self.confirm_hits = 1
+            else:
+                self.confirm_hits = 0
+            self._paste_frozen = True
+            self._confirm_ease = 0
+            return
+
         if self.last_hit_bbox is None:
             self.vel_bbox = np.zeros(4, np.float32)
         else:
@@ -629,6 +746,23 @@ class TrackState:
         self.last_face = face
         self.hits += 1
         self.missed = 0
+        # v11.1.10 HairGate: while paste-frozen (exit or reacquire), require
+        # confirm_hits >= 2 reliable updates before allowing paste again.
+        if self._paste_frozen:
+            if kps_ok:
+                self.confirm_hits = int(getattr(self, "confirm_hits", 0) or 0) + 1
+                if self.confirm_hits >= 2:
+                    self._paste_frozen = False
+                    # v11.2.1 SolidFace: binary paste at full strength — no soft
+                    # ease / no alpha_ema reseed to 0.70 (that made original bleed).
+                    self._confirm_ease = 0
+                    self.alpha_ema = 1.0
+            else:
+                self.confirm_hits = 0
+                # keep _paste_frozen True
+        else:
+            if kps_ok:
+                self.confirm_hits = max(int(getattr(self, "confirm_hits", 0) or 0), 2)
 
     def predicted_face(self):
         """A stand-in face object usable by inswapper on a skipped frame."""
@@ -671,16 +805,22 @@ class TrackState:
         return self.occl_w
 
     def smooth_alpha(self, target: float) -> float:
-        """EMA the composite opacity.
+        """Composite opacity EMA — snap-up to full strength, slow fade-out only.
 
-        det_score wobbles by several hundredths between consecutive frames on
-        a profile turn. Driving alpha straight from it made the replacement
-        fade partly back toward the real face and out again, several times a
-        second - seen as brightness flicker and as the original face
-        'showing through'. Opacity now moves smoothly or not at all.
+        v11.2.1 SolidFace: when gates say YES the swap must sit at ~1.0, not
+        linger half-transparent via a slow 0.72/0.28 climb. Prefer snap-up
+        toward 1.0; use the slower EMA only when intentionally fading out.
         """
         t = float(np.clip(target, 0.0, 1.0))
-        self.alpha_ema = float(self.alpha_ema * 0.72 + t * 0.28)
+        cur = float(self.alpha_ema)
+        if t >= 0.94:
+            # Snap-up / fast catch-up — never cap below full during stable track.
+            self.alpha_ema = max(cur, float(cur * 0.45 + t * 0.55), t)
+        elif t < cur:
+            # Intentional fade-out (exit / miss budget) — keep slower EMA.
+            self.alpha_ema = float(cur * 0.72 + t * 0.28)
+        else:
+            self.alpha_ema = float(cur * 0.45 + t * 0.55)
         return self.alpha_ema
 
     def cache_fake(self, fake, corr, frame_ord):
@@ -758,8 +898,14 @@ class PredictedFace:
     # call sites are inside try/except - so a carried face reached the renderer
     # with no slot and was dropped. The effect was that key frames where the
     # detector was deliberately skipped contributed no geometry at all.
+    # v11.2.2: `_frame_shape` added for the same reason `_slot` was above -
+    # core_pipeline.py's ReentrySafe containment check tags carried faces
+    # with it (`pf._frame_shape = ...`), and the assignment was silently
+    # swallowed by the same try/except pattern, falling back to (correct,
+    # but only by luck of a second code path existing) TrackState._frame_wh.
     __slots__ = ("bbox", "kps", "landmark_2d_106", "normed_embedding",
-                 "det_score", "predicted", "_track", "_slot", "_occlusion_guard")
+                 "det_score", "predicted", "_track", "_slot", "_occlusion_guard",
+                 "_frame_shape")
 
     def __init__(self, bbox, kps, lmk=None, emb=None, det_score=0.5):
         self.bbox = np.asarray(bbox, np.float32).reshape(4).copy()
@@ -1401,7 +1547,11 @@ class MultiFaceTracker:
             if tr.emb is None and not tr.crossing:
                 good = True
 
-            tr.update(f, update_embedding=good, dt_frames=dt_frames)
+            # v11.2.0: fail-closed if landmarks missing (core usually pre-filters
+            # with _kps_reliable; this is defense-in-depth for HairGate confirm).
+            _kps = getattr(f, "kps", None)
+            _kps_ok = _kps is not None and len(_kps) >= 5
+            tr.update(f, update_embedding=good, dt_frames=dt_frames, kps_ok=_kps_ok)
             if changed:
                 tr.reset_appearance()
             result[s] = f
@@ -1413,7 +1563,8 @@ class MultiFaceTracker:
                 self.tracks[s].emb = keep_emb
         return result
 
-    def bind(self, slot, face, update_embedding=True, dt_frames: float = 1.0):
+    def bind(self, slot, face, update_embedding=True, dt_frames: float = 1.0,
+             kps_ok: bool = True):
         """Attach a detection to a slot without running association.
 
         Used by the single-face path, which has its own well-tested pairing
@@ -1425,7 +1576,8 @@ class MultiFaceTracker:
         if tr is None:
             tr = self.tracks[slot] = TrackState(slot)
         tr.crossing = False
-        tr.update(face, update_embedding=update_embedding, dt_frames=dt_frames)
+        tr.update(face, update_embedding=update_embedding, dt_frames=dt_frames,
+                  kps_ok=kps_ok)
         return tr
 
     # ------------------------------------------------------------------
@@ -1450,6 +1602,9 @@ class MultiFaceTracker:
             if not tr.established:
                 continue
             if tr.missed > _P["trk_max_missed"]:
+                continue
+            # v11.1.9: frozen after leaving frame — do not offer for paste.
+            if getattr(tr, "_paste_frozen", False):
                 continue
             pf = tr.predicted_face()
             if pf is not None:

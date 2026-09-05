@@ -1611,12 +1611,9 @@ def _profile_safe_composite(res, orig, face, alpha=1.0):
             fk += 1
         mask = cv2.GaussianBlur(mask, (fk, fk), 0).astype(np.float32) / 255.0
 
-        # IMPORTANT: side pose changes mask geometry, not replacement opacity.
-        # Keep the replacement essentially opaque to eliminate original-face
-        # bleed-through while retaining a soft boundary.
-        front = _frontal_score(face)
-        pose_alpha = 0.94 + 0.06 * float(np.clip(front, 0.0, 1.0))
-        final_alpha = float(np.clip(alpha, 0.0, 1.0)) * pose_alpha
+        # v11.2.1 SolidFace: pose changes mask geometry only — replacement stays
+        # fully opaque when gates say YES (no 0.94 soft pose fade).
+        final_alpha = float(np.clip(alpha, 0.0, 1.0))
         m = (mask * final_alpha)[..., None]
 
         a = res[ry1:ry2, rx1:rx2].astype(np.float32)
@@ -1728,8 +1725,9 @@ def _swap_one_legacy(work, orig, face, src_face, quality, alpha=1.0):
     except Exception:
         pass
 
+    # v11.2.1 SolidFace: full-strength paste for all qualities (was Fast 0.92…).
     quality_alpha = {
-        "Fast": 0.92, "Balanced": 0.96, "Optimized": 0.97, "Best": 1.00, "Ultra": 1.00,
+        "Fast": 1.00, "Balanced": 1.00, "Optimized": 1.00, "Best": 1.00, "Ultra": 1.00,
     }.get(str(quality), 1.0)
     return _profile_safe_composite(res, orig, face,
                                    alpha=quality_alpha * float(alpha))
@@ -1825,7 +1823,26 @@ def _bbox_drift_too_far(curr_bb, anchor_bb, limit=0.58) -> bool:
 
 
 def _predicted_miss_budget() -> int:
-    """Carry budget for predicted faces — keep aligned with engine tunable."""
+    """Paste budget for predicted faces.
+
+    v11.1.9 ReentrySafe capped this at a flat 10 frames regardless of
+    detector cadence, reasoning "prefer skip over arm/body paste after
+    exit." Measured against real footage (v11.2.2): that budget is spent
+    in well under one detector cycle on Fast/Optimized cadence (SKIP_N of
+    5-6 frames between detector calls, and ``missed`` advances by the
+    frames actually elapsed, not by calls) - two ordinary, non-exit
+    detector misses in a row exhausts it, dropping the paste to the
+    original face for the rest of the clip until the next clean hit. That
+    is what "arm/body paste after exit" degenerated into: not a rare edge
+    case, ordinary cadence gaps.
+    The genuine "face actually left the frame" case this budget was meant
+    to guard is now caught directly by TrackState._paste_frozen (geometric
+    containment against the real frame bounds, set in predict()) - that
+    check runs BEFORE this budget is ever consulted (_face_swap_allowed
+    returns False immediately while frozen), independent of frame count.
+    So this can trust trk_max_missed again without reopening the arm-paste
+    bug the flat cap was reacting to.
+    """
     try:
         return int(_E._P.get("trk_max_missed", 24) or 24)
     except Exception:
@@ -1839,21 +1856,18 @@ def _predicted_miss_budget() -> int:
 def _kps_reliable(f) -> bool:
     """False when the 5 landmarks do not describe a paintable face.
 
+    v11.1.10 HairGate: FAIL CLOSED when kps is missing (was fail-open
+    ``return True`` — that let hair/skull detections with no usable landmarks
+    sail into paste). Also rejects classic InsightFace motion-blur hair blobs:
+    eye midline too low in the bbox along the face up-axis, or eye spacing
+    tiny vs the box.
+
     This is the gate _pitch_score()'s own docstring promises ("not a
     paintable face") but that was never actually wired into a decision to
     skip painting - only into the occlusion-guard's mask trimming, which
     softens edges but cannot stop a misaligned paste. A live detection with
     det_score above the floor and 5 keypoints present sailed straight through
     _face_swap_allowed() regardless of what those keypoints described.
-
-    Concretely: when a detector's landmark regression is unreliable - pushed
-    past where it was trained by an extreme "looking away" yaw or pitch - it
-    can still return a det_score that clears the threshold and 5 points that
-    each look unremarkable in isolation, while the points as a SET describe
-    an inconsistent face. estimate_norm() does not fail loudly on that; it
-    silently returns a plausible-looking affine that does not match the real
-    head, so the aligned crop reprojects at the wrong place and rotation - a
-    rotated, misplaced rectangle is the visible result.
 
     Two independent signals, because either alone can be dodged:
 
@@ -1883,8 +1897,9 @@ def _kps_reliable(f) -> bool:
     everywhere else in this engine; a bad paste is not.
     """
     kps = getattr(f, "kps", None)
+    # v11.1.10: fail CLOSED — missing landmarks are not paintable.
     if kps is None or len(kps) < 5:
-        return True  # nothing to check here; the count itself is handled elsewhere
+        return False
     try:
         le, re = np.asarray(kps[0], np.float32), np.asarray(kps[1], np.float32)
         nose = np.asarray(kps[2], np.float32)
@@ -1910,141 +1925,71 @@ def _kps_reliable(f) -> bool:
         if vert < 0.12:
             return False
 
+        # Hair/skull bbox: eye midline must not sit in the bottom third of
+        # the detection box along the face's roll-corrected "up" axis.
+        # Classic motion-blur hair blob puts eyes near the chin end of a
+        # tall box that mostly covers scalp/hair - that signature already
+        # trips the vert<0.12 check above in every measured case (see this
+        # function's docstring: the confusion signature scores
+        # roll-corrected-vert<=0), so this is a defensive second signal,
+        # not the primary one. v11.2.2: loosened 0.45→0.65 after real
+        # footage showed ordinary frontal/chin-down poses routinely place
+        # the eye line at t=0.40-0.55 of an InsightFace detector box - the
+        # tighter threshold was rejecting normal frames throughout most of
+        # a clip, not just genuine hair/skull confusion, which is what
+        # made the swap look absent/weak almost everywhere instead of only
+        # during an actual hair sweep.
+        bb = getattr(f, "bbox", None)
+        if bb is not None:
+            x1, y1, x2, y2 = [float(v) for v in np.asarray(bb, np.float32).reshape(4)]
+            bw = max(1.0, x2 - x1)
+            bh = max(1.0, y2 - y1)
+            # Features tiny vs box → hair clump / oversized scalp box.
+            if eye_dist / min(bw, bh) < 0.12:
+                return False
+            # Face-down unit vector in image coords (nose direction from eyes).
+            down = np.asarray([sn, c], np.float32)
+            dn = float(np.linalg.norm(down)) + 1e-6
+            down = down / dn
+            corners = np.asarray(
+                [[x1, y1], [x2, y1], [x1, y2], [x2, y2]], np.float32
+            )
+            projs = corners @ down
+            p_min = float(np.min(projs))
+            p_max = float(np.max(projs))
+            p_eye = float(np.dot(mid, down))
+            # t=0 at face-top (forehead end of box), t=1 at face-bottom (chin).
+            t = (p_eye - p_min) / (p_max - p_min + 1e-6)
+            # Reject only if eyes sit in the bottom third of the box.
+            if t > 0.65:
+                return False
+
         fit = _E.landmark_fit_error(kps, 128)
         # None means the fit could not even be attempted (a degenerate point
         # set) - itself evidence of an unreliable read, not a reason to pass.
         # In practice this branch is defensive: the only input that makes the
         # Umeyama fit degenerate (all 5 points coincident) already collapses
         # `rel` to zero and is rejected by the vert check above first.
+        # v11.1.10 tightened 0.20 -> 0.15 "for live paint"; v11.2.2 reverts
+        # that. Measured directly: a face whose detection box narrows (a
+        # normal yaw turn - width shrinks, height does not) produces a
+        # rising landmark_fit_error purely because a SIMILARITY transform
+        # cannot separately rescale width and height to match the fixed-
+        # aspect canonical template - nothing about the face itself became
+        # less reliable. At 0.15 this fired continuously through an
+        # ordinary profile-turn clip (13 of 28 detector calls rejected vs
+        # 0 of 28 at 0.20), and each rejection is exactly what triggers
+        # HairGate's reacquire-and-freeze path below - which then could not
+        # collect two consecutive clean hits often enough to ever un-freeze,
+        # dropping the paste to the original face for the rest of the clip.
+        # 0.20 is this project's own previously-measured number, with the
+        # stated margin above every legitimate pose this docstring already
+        # swept (worst case 0.103) still intact.
         if fit is None or fit > 0.20:
             return False
         return True
     except Exception:
         return False
-
-
-def _face_anchor_samples(frame_bgr, f):
-    """Chroma at 7 fixed canonical-space anchors a visible face always has
-    skin at (forehead, cheeks, nose bridge, chin, jaw corners). None,
-    or a short list, on any missing input / computation error."""
-    try:
-        kps = getattr(f, "kps", None)
-        if kps is None or len(kps) < 5 or frame_bgr is None:
-            return None
-        M = _E.estimate_norm(kps, 128)
-        if M is None:
-            return None
-        aligned = cv2.warpAffine(frame_bgr, M, (128, 128), flags=cv2.INTER_LINEAR,
-                                  borderMode=cv2.BORDER_REPLICATE)
-        ycc = cv2.cvtColor(aligned, cv2.COLOR_BGR2YCrCb).astype(np.float32)
-        anchors = [(64, 25), (35, 60), (93, 60), (64, 55), (64, 100), (25, 90), (103, 90)]
-        r = 6
-        samples = []
-        for (ax, ay) in anchors:
-            patch = ycc[max(0, ay - r):ay + r, max(0, ax - r):ax + r]
-            if patch.size == 0:
-                continue
-            samples.append((float(np.median(patch[:, :, 1])), float(np.median(patch[:, :, 2]))))
-        return samples if len(samples) >= 4 else None
-    except Exception:
-        return None
-
-
-def _visible_face_fraction(frame_bgr, f, ref_chroma=None) -> float:
-    """0..1: how much of the expected face area is actually visible skin,
-    independent of pose.
-
-    Every existing gate reasons about the 5 keypoints' GEOMETRY -
-    _kps_reliable() checks whether they admit any single rigid pose,
-    _frontal_score()/_pitch_score() check where the nose sits relative to
-    the eyes. None of them look at a single pixel. A hand pressed over the
-    mouth and chin, or hair swept across one whole side, can leave the
-    detector reporting 5 keypoints that are perfectly self-consistent and
-    describe an ordinary frontal pose - they just sit ON the occluder's
-    surface, not on skin. That detection sails through every gate this
-    engine has, at full confidence, while most of what will actually get
-    pasted is the occluder's own shape reprojected as if it were a face.
-    This is a distinct failure from "looking away": the pose is fine, the
-    face underneath it just is not there to work with.
-
-    Deliberately not a repeat of skin_confidence() (swap_engine.py): that
-    function measures every pixel's agreement with the MEDIAN chroma of
-    its own crop's core - a fast, cheap check that is exactly right for
-    trimming a mask around a SMALL intrusion (a mic, a fingertip), but
-    self-defeating for a SEVERE one: once the occluder covers more than
-    half the sampled area, it IS the "core" reference. The first version
-    of this function made the same mistake one level up - sampling several
-    FIXED anchors instead of one core region, but still deciding "visible"
-    by majority vote AMONG THEM. Measured directly: an occluder covering
-    the bottom 70% of the face (6 of 7 anchors) makes those 6 agree WITH
-    EACH OTHER, so the vote sides with the occluder and calls the one
-    genuinely visible anchor the outlier - reporting full visibility for
-    a face that is mostly covered, the exact case this exists to catch.
-    Anything that decides "what is skin" by consensus among the CURRENT
-    frame's own samples fails the same way once occlusion is the
-    majority, by construction - the vote has no way to know which side is
-    the occluder.
-
-    Fixed by comparing against ``ref_chroma`` - a reference the CALLER
-    remembers from earlier, established-good frames for this identity,
-    never from the current, possibly-occluded one. A fixed, external
-    reference cannot be outvoted by whatever is covering the face right
-    now. Returns 1.0 (fully visible - do not block) when no reference
-    exists yet (nothing to compare against - the caller is responsible
-    for only trusting the result once it has one) or on any computation
-    error: this is a new, narrower signal layered on top of already-tuned
-    pose/geometry gates, not a replacement for them, and its failure mode
-    should be "did not catch an occlusion", never "wrongly held a
-    legitimately visible face".
-    """
-    try:
-        if ref_chroma is None:
-            return 1.0
-        samples = _face_anchor_samples(frame_bgr, f)
-        if samples is None:
-            return 1.0
-        arr = np.array(samples, dtype=np.float32)
-        ref = np.asarray(ref_chroma, dtype=np.float32)
-        d = np.linalg.norm(arr - ref[None, :], axis=1)
-        return float(np.sum(d < 18.0)) / float(len(arr))
-    except Exception:
-        return 1.0
-
-
-def _bootstrap_visible_ref(frame_bgr, f, buf, min_frames=3):
-    """Learn one identity's reference anchor chroma from a short run of
-    mutually-consistent early frames - the same "wait for agreement across
-    several frames before trusting it" shape as this engine's own
-    startup identity lock (_locked_emb / _startup_confirm), applied to
-    chroma instead of an embedding.
-
-    Majority-vote-among-this-frame's-own-anchors is exactly the trap
-    _visible_face_fraction's docstring warns against for judging an
-    ONGOING frame - but for BOOTSTRAPPING, it is the right tool: at this
-    point there is no reference yet at all, the video has presumably just
-    started, and requiring near-unanimous agreement (6 of 7 anchors) across
-    several separate frames before locking anything is a real, if
-    imperfect, safeguard against seeding the reference from an already-
-    occluded opening frame. `buf` is the caller's own persistent list for
-    this identity; returns the locked reference once enough qualifying
-    frames accumulate, else None (unresolved, caller keeps not gating yet).
-    """
-    samples = _face_anchor_samples(frame_bgr, f)
-    if samples is None:
-        return None
-    arr = np.array(samples, dtype=np.float32)
-    n = len(arr)
-    agree = np.zeros(n, dtype=int)
-    for i in range(n):
-        d = np.linalg.norm(arr - arr[i], axis=1)
-        agree[i] = int(np.sum(d < 18.0))
-    majority = agree >= max(2, (n * 6) // 7)
-    if np.sum(majority) < n - 1:
-        return None  # this frame itself looks partly occluded - do not seed from it
-    buf.append(arr[majority].mean(axis=0))
-    if len(buf) < min_frames:
-        return None
-    return np.mean(np.stack(buf[-min_frames:], axis=0), axis=0)
 
 
 def _face_swap_allowed(f) -> bool:
@@ -2063,19 +2008,24 @@ def _face_swap_allowed(f) -> bool:
     missed = int(getattr(tr, "missed", 0) or 0) if tr is not None else (4 if predicted else 0)
     det = float(getattr(f, "det_score", 0.5) or 0.5)
 
+    # v11.1.10 HairGate: while paste-frozen (exit OR reacquire confirmation),
+    # disallow BOTH predicted and live paste — show original, never hair.
+    if tr is not None and getattr(tr, "_paste_frozen", False):
+        return False
+
     if not predicted:
         # Real detector hit. Keep lying-down and soft-profile faces.
         if det < 0.20:
             return False
-        kps = getattr(f, "kps", None)
-        if kps is None or len(kps) < 5:
-            return det >= 0.45
+        # Fail-closed landmark gate (was: missing kps allowed at det>=0.45).
+        if not _kps_reliable(f):
+            return False
         return True
 
-    # Predicted: hold through a head turn (side / partial). Soft alpha fade
-    # in work() handles long misses; only hard-drop past miss budget or when
-    # the box has clearly left the head (raised drift for fast profile turns).
-    miss_budget = _predicted_miss_budget()
+    # Predicted (v11.1.9 ReentrySafe): hold briefly through a head turn, but
+    # prefer skip over arm/body paste after exit / long miss. Soft alpha fade
+    # in work() still tapers; hard-drop earlier than Continuum 1.1.8.
+    miss_budget = _predicted_miss_budget()  # min(trk_max_missed, 10)
     if missed > miss_budget:
         return False
     anchor = None
@@ -2083,15 +2033,19 @@ def _face_swap_allowed(f) -> bool:
         anchor = getattr(tr, "last_hit_bbox", None)
         if anchor is None:
             anchor = getattr(tr, "obs_bbox", None)
-    # 0.72 (was 0.58): fast sideways turns briefly inflate predicted drift;
-    # rejecting early caused original-face fallback flicker.
-    if _bbox_drift_too_far(getattr(f, "bbox", None), anchor, limit=0.72):
+    # 0.55 (was 0.72): prefer skip over arm-paste; user confirmed only this bug remains.
+    if _bbox_drift_too_far(getattr(f, "bbox", None), anchor, limit=0.55):
         return False
     # A predicted box that has largely left the frame is not a face any more.
     # Without this the tracker happily extrapolates someone who walked out of
     # shot, and the compositor paints them onto the frame edge.
+    # Containment 0.70 (was 0.55): stop paste sooner when leaving frame.
     shape = getattr(f, "_frame_shape", None)
-    if shape is not None and _frame_containment(getattr(f, "bbox", None), shape) < 0.55:
+    if shape is None and tr is not None:
+        wh = getattr(tr, "_frame_wh", None)
+        if wh is not None:
+            shape = (int(wh[1]), int(wh[0]))  # (H, W)
+    if shape is not None and _frame_containment(getattr(f, "bbox", None), shape) < 0.70:
         return False
     return True
 
@@ -2099,26 +2053,24 @@ def _face_swap_allowed(f) -> bool:
 def _render_alpha(f, track):
     """Composite opacity for one face, smoothed on the track.
 
-    Opacity used to be driven straight off det_score and the predicted-miss
-    counter, both of which move by several hundredths from frame to frame on a
-    profile turn. A face whose opacity walks between 0.70 and 1.00 and back is
-    literally the real face bleeding through and receding again several times a
-    second - reported as brightness flicker and as "the original face comes
-    back occasionally". The target is unchanged; only the trajectory to it is
-    now continuous.
+    v11.2.1 SolidFace policy (binary paste):
+      gates NO  → caller skips / shows original (unchanged HairGate/ReentrySafe)
+      gates YES → composite at full strength (~1.0), never a soft mix with original
+                  during stable tracking.
     """
     target = 1.0
     predicted = bool(getattr(f, "predicted", False))
     if predicted and track is not None:
         missed = int(getattr(track, "missed", 0) or 0)
         budget = max(8, _predicted_miss_budget())
-        fade_start = max(4, budget // 3)
+        # Only fade in the last 2 frames of the miss budget; floor 0.94 (was 0.70).
+        fade_start = max(0, budget - 2)
         denom = max(1.0, float(budget - fade_start))
-        target = float(np.clip(1.0 - max(0, missed - fade_start) / denom, 0.70, 1.0))
+        target = float(np.clip(1.0 - max(0, missed - fade_start) / denom, 0.94, 1.0))
     else:
-        det = float(getattr(f, "det_score", 0.5) or 0.5)
-        if det < 0.26:
-            target = float(np.clip((det - 0.16) / 0.10, 0.70, 1.0))
+        # Live detection already passed gates (det << 0.20 never reaches here).
+        target = 1.0
+    # v11.2.1: confirm soft ease / _first_confirm_soft caps removed — full strength.
     if track is not None:
         return float(track.smooth_alpha(target))
     return target
@@ -2181,6 +2133,17 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
 
     assigned = tracker.assign(list(faces or []), ref_map, dt_frames=dt_frames)
 
+    # v11.1.9: stamp frame size onto every live track so predict() can freeze
+    # once the bbox leaves the shot.
+    if frame_shape is not None:
+        try:
+            _fh, _fw = int(frame_shape[0]), int(frame_shape[1])
+            for _tr in tracker.tracks.values():
+                if _tr is not None:
+                    _tr._frame_wh = (_fw, _fh)
+        except Exception:
+            pass
+
     pairs = []
     for slot in sorted(assigned.keys()):
         if slot not in smap:
@@ -2190,6 +2153,8 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
         try:
             f._track = tr
             f._slot = slot
+            if frame_shape is not None:
+                f._frame_shape = (int(frame_shape[0]), int(frame_shape[1]))
             # Phase 1: Add boundary confidence penalty to occlusion guard
             is_marginal = _face_looks_marginal(f)
             boundary_conf = 1.0
@@ -2231,7 +2196,8 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
             f._occlusion_guard = (tr.ramp_occlusion(want) if tr is not None else want)
         except Exception:
             pass
-        if bool(getattr(f, "predicted", False)) and not _face_swap_allowed(f):
+        # v11.1.10: gate live too — frozen reacquire must not paint hair.
+        if not _face_swap_allowed(f):
             continue
         pairs.append((f, smap[slot]))
         if len(pairs) >= max_faces:
@@ -2264,9 +2230,14 @@ def _carry_pairs(tracker, smap, max_faces, advance=True, dt_frames=1.0):
             pf._track = tr
             pf._slot = slot
             pf._occlusion_guard = tr.ramp_occlusion(0.85) if tr is not None else 0.85
+            # v11.1.9: attach frame shape so containment / drift gates work on
+            # predicted faces (TrackState._frame_wh set on assign/bind).
+            if tr is not None and getattr(tr, "_frame_wh", None) is not None:
+                _W, _H = tr._frame_wh
+                pf._frame_shape = (int(_H), int(_W))
         except Exception as e:
             logging.warning("could not tag carried face for slot %s: %s", slot, e)
-        # Predicted geometry is only used for a 1-2 frame detector blink.
+        # Predicted geometry is only used for a short detector blink.
         # Longer gaps / looking-down / out-of-frame must NOT paste a face.
         if not _face_swap_allowed(pf):
             continue
@@ -2554,13 +2525,6 @@ def swap_image(target, s1, s2, s3, s4, quality, refs):
         # exists - it is the case behind the "face pasted at the wrong angle
         # when looking away" report.
         faces = [f for f in faces if _kps_reliable(f)]
-        # No occlusion gate here: _visible_face_fraction() needs a reference
-        # chroma remembered from earlier, established-good frames of this
-        # SAME identity - a single still image has no "earlier" to learn
-        # one from, and a reference guessed from this one frame's own
-        # anchors falls into exactly the majority-vote trap that function's
-        # docstring documents (an occluder covering most of the face gets
-        # voted "correct"). Pose/geometry gates only, here.
         if not faces: return None, "❌ No reliably-aligned face detected"
         pairs = _pairs_for_frame(faces, smap, refs or [], frame_bgr=work)
         for f, src in pairs:
@@ -2795,13 +2759,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         _det_cache, _det_counter = [], [0]
         _no_face_streak = [0]
-        # Reference chroma for _visible_face_fraction(), keyed by slot.
-        # Locked once from a short run of mutually-consistent early frames
-        # (the same "wait for agreement, then trust it" shape as
-        # _startup_confirm/_locked_emb below), never re-derived from a
-        # single, possibly-occluded frame later on.
-        _visible_ref = {}
-        _visible_ref_buf = {}
         _kps_veto_streak = [0]
         _last_gray = [None]
         _last_gray_full = [None]
@@ -2836,6 +2793,76 @@ def _run_job_body(jid, src_paths, vp, cfg):
         _seen_ok = {j: True for j in smap.keys()}
         _legacy_mode = [False]   # inswapper build exposes no affine
 
+        # v11.2.2: how far back a reacquire event is allowed to scrub. The
+        # detection pass runs a whole CHUNK ahead of rendering (see
+        # _record_geometry's own docstring) - wiping a slot's ENTIRE
+        # timeline on reacquire, as v11.2.0 CinemaQA did, does not just drop
+        # the few pre-exit entries close enough to the gap to bracket-
+        # interpolate a ghost glide across it; it also erases every already-
+        # recorded, already-valid entry for every EARLIER frame in the same
+        # chunk that has not been rendered yet. Measured directly: a single
+        # reacquire at output frame ~108 (recovering from an 18-frame
+        # dropout) wiped frames 0-89's perfectly good records, and the
+        # renderer - which reads this same list afterward - had nothing to
+        # composite from until the timeline rebuilt past frame 114, showing
+        # the original face for the first 115 frames of a 240-frame clip.
+        #
+        # What actually needs protecting is only the handful of entries
+        # close enough to the gap to bracket across it - the same
+        # max_bracket_frames the renderer itself uses (out_fps * 0.55,
+        # taper+1 floor). taper is not available this early (computed per-
+        # chunk, after this nested def already exists), but out_fps is
+        # (assigned once, above, before any call to this function) and
+        # dominates the real formula at every fps this project exposes
+        # (taper caps at 12, so taper+1 <= 13 <= round(24*0.55) - the
+        # lowest fps offered). A flat +5 frames covers that fixed-floor
+        # case at low fps without depending on taper's exact value.
+        # A first attempt used a flat 120-frame constant, reasoning
+        # "generous but still much smaller than a whole clip" - measured
+        # directly and found USELESS for exactly the case above: a wipe at
+        # frame 108 with a 120-frame window keeps nothing back to frame 0
+        # either (108 - 0 = 108 < 120), degenerating to the same full wipe.
+        #
+        # A function, not a value computed here: `out_fps` (referenced
+        # below) is assigned later in this same enclosing function's own
+        # execution, so a plain assignment at this point - before that line
+        # has run - would raise UnboundLocalError. Deferring the read into
+        # a nested function is safe because Python closures resolve names
+        # at CALL time, by which point out_fps already holds its value
+        # (every call site is well after that assignment).
+        def _reacquire_scrub_window():
+            return int(round(out_fps * 0.55)) + 5
+
+        def _scrub_reacquire_timelines(g=None):
+            """v11.2.0: wipe RECENT geom timeline entries for tracks that
+            just reacquired (see _reacquire_scrub_window() above for why not
+            the whole timeline).
+
+            Must run even when pairs are empty (HairGate still paste-frozen),
+            otherwise sticky `_reacquired` is cleared on the confirming update
+            before any record runs and pre-exit anchors survive into emission.
+            """
+            try:
+                tracks = getattr(_tracker, "tracks", None) or {}
+            except Exception:
+                tracks = {}
+            for slot, tr in list(tracks.items()):
+                if slot not in _geom_hist or tr is None:
+                    continue
+                if not getattr(tr, "_reacquired", False):
+                    continue
+                if g is None:
+                    _geom_hist[slot] = []
+                else:
+                    _geom_hist[slot] = [
+                        (gg, rr) for (gg, rr) in _geom_hist[slot]
+                        if (g - gg) > _reacquire_scrub_window()
+                    ]
+                try:
+                    tr._reacquired = False
+                except Exception:
+                    pass
+
         def _record_geometry(pairs, g):
             """Snapshot, per identity slot, the geometry key frame ``g`` will
             be rendered with. Bound to the frame here rather than read off the
@@ -2846,6 +2873,25 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 if slot is None or slot not in _geom_hist:
                     continue
                 tr = getattr(f, "_track", None)
+                # v11.2.0 CinemaQA wiped the WHOLE slot timeline here on
+                # reacquire. v11.2.2: only scrub entries within
+                # _reacquire_scrub_window() of this frame - see that
+                # function's comment above _scrub_reacquire_timelines for
+                # why a full wipe was destroying already-rendered-worthy
+                # history from earlier in the same detection chunk, not
+                # just the few entries that could actually bracket a ghost
+                # glide across this gap.
+                if (tr is not None
+                        and getattr(tr, "_reacquired", False)
+                        and not bool(getattr(f, "predicted", False))):
+                    _geom_hist[slot] = [
+                        (gg, rr) for (gg, rr) in _geom_hist[slot]
+                        if (g - gg) > _reacquire_scrub_window()
+                    ]
+                    try:
+                        tr._reacquired = False
+                    except Exception:
+                        pass
                 rec = _geom_record(
                     f, tr,
                     _render_alpha(f, tr),
@@ -2853,6 +2899,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     src,
                 )
                 if rec is not None:
+                    # Predicted entries must not look "just seen": force det=False
+                    # already set; additionally clamp alpha via _render_alpha.
                     _geom_hist[slot].append((int(g), rec))
 
         _startup_emb_buf = []
@@ -3178,6 +3226,15 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 if _cxl(): raise _CancelledJob()
                 frm = cframes[k]
                 g = gidx[k]
+                # v11.1.9: keep TrackState._frame_wh current so predict() can
+                # freeze when the face leaves the shot (even on miss/carry).
+                try:
+                    _fw = (int(frm.shape[1]), int(frm.shape[0]))
+                    for _tr in _tracker.tracks.values():
+                        if _tr is not None:
+                            _tr._frame_wh = _fw
+                except Exception:
+                    pass
                 gray_s = cv2.resize(cv2.cvtColor(frm, cv2.COLOR_BGR2GRAY), (160, 90))
                 motion = float(np.mean(cv2.absdiff(gray_s, _last_gray[0]))) if _last_gray[0] is not None else 999.0
                 _last_gray[0] = gray_s
@@ -3274,46 +3331,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     if len(faces) < _n_before_kps_gate:
                         stats["kps_rejected"] = stats.get("kps_rejected", 0) + (_n_before_kps_gate - len(faces))
 
-                    # Occlusion gate: a self-consistent, correctly-posed
-                    # detection can still be sitting on a hand, hair, or
-                    # another object covering most of the actual face - see
-                    # _visible_face_fraction()'s docstring for why neither
-                    # _kps_reliable nor the frontal/pitch scores can see
-                    # this. A rejected identity falls into the SAME
-                    # existing "no detection this frame" path as a kps
-                    # rejection - hold the last good geometry through a
-                    # bounded gap, never paint the occluder's own shape.
-                    #
-                    # Single-face jobs only for now: this needs a reference
-                    # chroma keyed to a SPECIFIC identity, learned over
-                    # several earlier frames of that same identity. A
-                    # single-face job has exactly one identity in the whole
-                    # video, so slot 0's reference applies to every
-                    # candidate here, before pairing has even run. A multi-
-                    # face job can have several distinct identities among
-                    # `faces` at this same point, with pairing (which
-                    # decides which candidate belongs to which identity)
-                    # still a step away - gating on the wrong identity's
-                    # reference here would be worse than not gating at all,
-                    # so this is deliberately scoped to what can be done
-                    # correctly right now rather than guessed at.
-                    if not multi_face_safe and faces:
-                        _vbuf = _visible_ref_buf.setdefault(0, [])
-                        _n_before_vis_gate = len(faces)
-                        _kept = []
-                        for _f in faces:
-                            _ref = _visible_ref.get(0)
-                            if _ref is None:
-                                _ref = _bootstrap_visible_ref(frm, _f, _vbuf)
-                                if _ref is not None:
-                                    _visible_ref[0] = _ref
-                                _kept.append(_f)  # never reject during bootstrap
-                            elif _visible_face_fraction(frm, _f, ref_chroma=_ref) >= 0.20:
-                                _kept.append(_f)
-                        faces = _kept
-                        if len(faces) < _n_before_vis_gate:
-                            stats["occlusion_rejected"] = stats.get("occlusion_rejected", 0) + (_n_before_vis_gate - len(faces))
-
                     stats["detector_calls"] += 1
                     stats["det_times"].append((time.perf_counter() - t_det0) * 1000)
                     last_det_g[0] = g
@@ -3340,6 +3357,36 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         continue
                     _after_real_gap = _no_face_streak[0] > 0
                     _no_face_streak[0] = 0
+
+                    # v11.1.10 HairGate: after a real gap, still skip the
+                    # motion-veto vs pre-gap position (below), but refuse to
+                    # bind a weak / unreliable first return (hair/skull/neck
+                    # under motion blur). Prefer original this frame.
+                    if _after_real_gap:
+                        _n_gap = len(faces)
+                        faces = [
+                            f for f in faces
+                            if _kps_reliable(f)
+                            and float(getattr(f, "det_score", 0.0) or 0.0) >= 0.32
+                        ]
+                        if len(faces) < _n_gap:
+                            stats["hair_gate_gap"] = stats.get("hair_gate_gap", 0) + (
+                                _n_gap - len(faces)
+                            )
+                        if not faces:
+                            _tracker.assign([], {}, dt_frames=_det_dt[0])
+                            carried = _carry_pairs(_tracker, smap, max_faces,
+                                                   advance=False)
+                            _record_geometry(carried, g)
+                            for _j in _seen_ok:
+                                _seen_ok[_j] = False
+                            key_swap_ok[k] = dict(_seen_ok)
+                            if carried:
+                                last_pairs_ref[0] = carried
+                            det_done = min(lim, max(0, g + 1))
+                            _set_phase_progress(12, 18, "Analysing faces…",
+                                                det_done, lim, phase="detection")
+                            continue
 
                     if multi_face_safe:
                         pairs = _persistent_track_pairs(
@@ -3466,10 +3513,17 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         for _pf, _psrc in pairs:
                             for _sj, _sface in smap.items():
                                 if _psrc is _sface:
-                                    _tr = _tracker.bind(_sj, _pf, dt_frames=_det_dt[0])
+                                    _tr = _tracker.bind(
+                                        _sj, _pf, dt_frames=_det_dt[0],
+                                        kps_ok=_kps_reliable(_pf),
+                                    )
                                     try:
                                         _pf._track = _tr
                                         _pf._slot = _sj
+                                        if frm is not None:
+                                            _pf._frame_shape = frm.shape
+                                            if _tr is not None:
+                                                _tr._frame_wh = (int(frm.shape[1]), int(frm.shape[0]))
                                         # FIX (debug session): single-face path previously
                                         # hardcoded _occlusion_guard=False unconditionally,
                                         # which meant a face partially outside the frame
@@ -3491,12 +3545,27 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                             except Exception:
                                                 _boundary_conf = 1.0
                                         _want = float(np.clip((0.75 - _boundary_conf) / 0.35, 0.0, 1.0))
+                                        # v11.2.0: light occlusion trim on marginal
+                                        # single-face (hair/hand in box) — was
+                                        # multi-only; full mask covered ears/hair.
+                                        try:
+                                            if _face_looks_marginal(_pf):
+                                                _want = max(_want, 0.40)
+                                        except Exception:
+                                            pass
                                         _pf._occlusion_guard = (
                                             _tr.ramp_occlusion(_want) if _tr is not None else _want
                                         )
                                     except Exception:
                                         pass
                                     break
+
+                    # v11.1.10: drop live pairs still paste-frozen (reacquire
+                    # confirmation). Multi-face already gates inside
+                    # _persistent_track_pairs; single-face bind can leave a
+                    # frozen track attached — do not record/paint it.
+                    if pairs:
+                        pairs = [(f, s) for f, s in pairs if _face_swap_allowed(f)]
 
                     if pairs and max_faces == 1 and _locked_emb[0] is None:
                         cand_emb = pairs[0][0].normed_embedding
@@ -3581,6 +3650,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         for pf, psrc in _carry_pairs(_tracker, smap, max_faces, advance=False):
                             if getattr(pf, "_slot", None) in missing and id(psrc) not in have_srcs:
                                 pairs.append((pf, psrc))
+                    # Wipe exit-era timeline even while confirm-frozen (no pairs).
+                    _scrub_reacquire_timelines(g)
                     _record_geometry(pairs or [], g)
                     # A pair that comes back predicted means the detector ran
                     # and this identity was not among what it found.
@@ -3620,7 +3691,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # frame count cannot work here) and converted to output frames at
             # the actual output fps, so it does not have to be re-tuned
             # whenever fps or the detection cadence preset changes.
-            max_bracket_frames = max(taper + 1, int(round(out_fps * 1.5)))
+            # v11.2.0 CinemaQA: 0.55s (was 0.7s ReentrySafe / 1.5s Continuum).
+            # Reacquire wipes timelines; this bounds any residual real–real gap.
+            max_bracket_frames = max(taper + 1, int(round(out_fps * 0.55)))
 
             def _records_at(g):
                 """Every slot's geometry for output frame ``g``."""

@@ -824,101 +824,198 @@ fps. Whether it measurably improves the reported clips specifically can
 only be confirmed by testing this build against footage at 24fps with
 rapid movement, on the real detector, which this environment cannot do.
 
-## v11.2.0 — a genuinely new signal: does the frame actually show a face
+## v11.1.9–v11.2.1 — ReentrySafe, HairGate, CinemaQA, SolidFace (external round)
 
-Asked explicitly for a structural rethink covering looking-away, under
-20% of the face visible, leaving the frame, no detection, and fast
-movement together, after the issue persisted through v11.1.6/v11.1.7's
-fixes. Research finding: four of those five are already handled by
-existing, independently-verified mechanisms - looking away and fast
-movement by `_kps_reliable()` and the motion-consistency veto, leaving
-the frame by the boundary-containment checks in the compositor, no
-detection by the carry/taper/fade system. The one genuinely uncovered
-case is "under 20% visible": **every existing gate reasons about the 5
-keypoints' geometry - none of them look at a single pixel of the frame.**
+Between this project's own v11.1.8 and this entry, the user tested a
+build modified by a different assistant against their real footage and
+reported it fixed the standing defect list (looking away, under-20%
+visible, leaving frame, no detection, fast movement). That build is now
+the baseline this project continues from. It was not developed under
+this project's own README convention, so — reconstructed directly from
+its code and comments, since no changelog entry existed for it — here is
+what it actually changed, for the record:
 
-### The gap
+* **ReentrySafe** (`TrackState._paste_frozen`, `_frame_wh`): once a
+  track's bbox is mostly outside the real frame bounds (containment
+  ratio < 0.70, checked in `predict()` against the actual last-known
+  frame size), the track freezes — stops extrapolating and stops
+  offering itself for paste — instead of coasting on constant-velocity
+  prediction into empty space. This replaces a plain frame-count budget
+  with a geometric one for the specific "face genuinely left the shot"
+  case.
+* **HairGate** (`confirm_hits`, the hair/skull rejection added to
+  `_kps_reliable()`, the post-gap `det_score >= 0.32` filter): on
+  reacquiring a track after a freeze or a real detector gap, at least two
+  consecutive reliable frames are now required before paste resumes, and
+  `_kps_reliable()` fails closed on missing keypoints (was fail-open) and
+  added a geometric hair/skull-blob rejection. Together these stop the
+  very first, often-unreliable detection after a gap (frequently a
+  motion-blurred hair/skull read) from being painted.
+* **CinemaQA**: reacquiring a track now wipes that slot's entire geometry
+  timeline (not just predicted stubs) so `_geom_for_frame()` cannot
+  linear-interpolate a "ghost glide" between a pre-exit and a post-return
+  real position across a short gap; `max_bracket_frames` was shortened
+  from 1.5s to 0.55s for the same reason; colour-transfer constants
+  (`cm_strength_l`, `cm_ema`, `cm_delta_clamp`) were tightened for a
+  steadier result.
+* **SolidFace** (`smooth_alpha()`, `_render_alpha()`, quality-tier alpha,
+  `occl_min_keep`): composite opacity now snaps up to full strength as
+  soon as the gates say yes, instead of a slow symmetric EMA that let the
+  replacement sit half-transparent — with the real face bleeding through
+  — for several frames every time; the soft pose-based alpha fade (0.94)
+  and the per-quality-tier alpha discount (Fast was 0.92) were both
+  removed in favour of full-strength paste whenever painting is allowed;
+  `occl_min_keep` (the mask-opacity floor kept under partial occlusion)
+  was raised so the center of the face stays more solid under marginal
+  occlusion instead of thinning out.
 
-`_kps_reliable()` checks whether 5 points admit any single rigid pose.
-`_frontal_score()`/`_pitch_score()` check where the nose sits relative to
-the eyes. A hand pressed over the mouth and chin, or hair swept across
-one whole side, can leave a detector reporting 5 keypoints that are
-perfectly self-consistent and describe an ordinary frontal pose - they
-just sit ON the occluder's surface, not on skin. That detection clears
-every gate this engine has, at full confidence, while most of what gets
-pasted is the occluder's own shape reprojected as if it were a face. This
-is a distinct failure from "looking away": the pose is fine, the face
-underneath it just is not there.
+None of this conflicts with v11.1.0–v11.1.8's structural fixes (single
+geometry source of truth, the motion-consistency veto, the fps-aware
+detector cadence, the cold-start-only `_open_score` fallback) — those
+were left intact and are unaffected. It does fully remove v11.2.0's
+content-based occlusion gate (`_visible_face_fraction` /
+`_face_anchor_samples` / `_bootstrap_visible_ref`) in favour of the
+purely geometric hair/skull check above; the two approaches were not
+combined.
 
-### First attempt, and why it was wrong
+## v11.2.2 — the SolidFace round over-corrected: paste now absent through most of the clip
 
-The obvious fix: sample chroma at several fixed anchor points a visible
-face always has skin at (forehead, cheeks, nose bridge, chin, jaw
-corners) in ArcFace's aligned space, and check that they agree with each
-other. Built, then measured directly and found self-defeating for
-exactly the case it exists to catch: an occluder covering the bottom 70%
-of the face makes those anchors agree WITH EACH OTHER, so a same-frame
-majority vote sides with the occluder and calls the one genuinely visible
-anchor the outlier - reporting full visibility for a face that is mostly
-covered. Any check that decides "what is skin" by consensus among the
-CURRENT frame's own samples fails this way once occlusion is the
-majority, by construction - the vote has no way to know which side is
-the occluder. (`skin_confidence()` in swap_engine.py, the engine's
-existing content-aware signal, has the same structural blind spot for
-the same reason - it is the right tool for trimming a mask around a
-small intrusion, a mic or a fingertip, and was never meant for this.)
+Direct user report against real footage, immediately after the v11.2.1
+sync above: the new face renders weak-to-absent through most of the
+video, with only occasional partial blending. Root-caused to FOUR of the
+v11.1.9–v11.2.1 changes, not to anything from this project's own
+v11.1.0–v11.1.8 work (unchanged and re-verified — the existing regression
+suite plus a direct before/after against the pre-sync v11.2.0 baseline
+caught three of the four directly, contrary to this project's usual
+"cannot verify without real footage" caveat: **on a build with all
+`_kps_reliable`/HairGate/ReentrySafe machinery in place, most of what
+went wrong here is a geometry/tracking bug that a synthetic detector
+reproduces exactly, not a real-detector-only content problem**):
 
-### The fix: compare against a remembered reference, never the current frame
+1. **`_predicted_miss_budget()` was capped at a flat 10 frames**,
+   regardless of detector cadence, "to prefer skip over arm/body paste
+   after exit." `missed` advances by frames actually elapsed since the
+   last detector call, not by call count — on Fast/Optimized cadence
+   (`SKIP_N` 5-6 frames between calls), two consecutive ordinary
+   (non-exit) detector misses in a row already exhausts a 10-frame
+   budget, dropping the paste to the original face for the rest of the
+   clip until the next clean hit.
+2. **The new hair/skull rejection in `_kps_reliable()` rejected any face
+   whose eye line sat past 45% down the detection box.** Reproduced
+   directly with the synthetic harness: a profile-turn clip whose
+   detector box narrows as it turns (width shrinks, height does not) hit
+   `landmark_fit_error > 0.15` — HairGate's OWN tightened threshold — on
+   13 of 28 detector calls, purely because a similarity transform cannot
+   rescale width and height independently to match the canonical
+   template's fixed aspect ratio as the box distorts; nothing about the
+   face itself became less reliable. Direct before/after against the
+   pre-sync v11.2.0 baseline: 0 of 28 calls rejected at the old 0.20
+   threshold, 13 of 28 at HairGate's 0.15, and the resulting clip went
+   from showing the swap on 237/240 frames to 0/240 — every rejection
+   fed straight into bug 3 below.
+3. **A reacquire event, once triggered, could never be confirmed away on
+   real footage with a sparse detector cadence.** `TrackState.update()`'s
+   "did the identity jump elsewhere" check compared each new detection's
+   raw position against the last real hit, with a threshold that does
+   not scale with elapsed time. At Fast/Optimized cadence (5-6 frames
+   between detector calls) any genuine, ordinary motion covers a
+   meaningful fraction of the box between two real detections purely
+   because of the gap, not because the identity changed — indistinguishable
+   from a real re-acquisition under the old check. Caught directly by this
+   project's own `t_final.py`: constant 10px/frame motion at a 10-frame
+   detector cadence was measured as **zero** learned velocity, because
+   every single update re-triggered "reacquire" and reset it.
+4. **A confirmed reacquire wiped a slot's ENTIRE geometry timeline, not
+   just the entries near the gap.** This pipeline detects a whole chunk
+   ahead of rendering (see `_record_geometry`'s own docstring), so
+   `_geom_hist[slot] = []` at the moment of reacquire does not just
+   prevent bridging the actual gap — it also destroys every already-
+   recorded, already-valid entry for every EARLIER frame in the same
+   chunk that has not been rendered yet. Measured directly: a single
+   reacquire recovering from an 18-frame detector dropout, on an
+   otherwise perfectly ordinary clip, wiped 90 already-good frames of
+   history and left the first 115 of 240 output frames showing the
+   original face — for a track that only ever had one 18-frame real gap
+   in it.
 
-A fixed, external reference cannot be outvoted by whatever is covering
-the face right now. `_visible_face_fraction()` compares each frame's
-anchor chroma against a reference the pipeline remembers from earlier,
-established-good frames of that SAME identity - never derived from the
-frame being judged. The reference itself is learned once, early in the
-job, from several mutually-consistent frames in a row (the same
-"wait for agreement, then trust it" shape as this engine's own startup
-identity lock), so the bootstrap step has its own, one-time majority
-vote, but every ONGOING judgement afterward is against that fixed
-memory, not against itself.
+Bugs 2 and 3 compound in exactly the pattern the user reported: bug 2
+(and, on real footage, ordinary cadence noise) makes reacquire trigger
+far more than intended, bug 3 means a triggered reacquire on sparse
+cadence essentially never clears, and bug 4 turns each such event into a
+much larger visible hole than the 1-2 frames it was meant to cost.
 
-Scoped to single-face jobs for now: a multi-face job can have several
-distinct identities among a frame's detections before pairing (which
-decides which candidate belongs to which identity) has even run -
-gating on the wrong identity's reference would be worse than not gating
-at all.
+### The fix
+
+* `_predicted_miss_budget()` no longer applies its own 10-frame cap; it
+  trusts `trk_max_missed` (default 24) again. This does not reopen the
+  arm/body-paste-after-exit bug the cap was reacting to: that case is now
+  caught independently and unconditionally by ReentrySafe's
+  `_paste_frozen` (a geometric containment check against the real frame
+  bounds, evaluated in `_face_swap_allowed()` before the miss budget is
+  ever consulted) — the frame-count budget's remaining job is only
+  "how long to ride out an ordinary detector miss," which does not need
+  to be nearly this short.
+* `_kps_reliable()`'s `landmark_fit_error` threshold reverts 0.15 → 0.20
+  (this project's own previously-measured number). The hair/skull
+  eye-line threshold is also loosened from 0.45 to 0.65 (reject only when
+  the eye line sits in the bottom third of the box). The pre-existing
+  `vert < 0.12` check remains the primary signal for genuine hair/skull
+  confusion — both of these are defensive second/third checks, not the
+  only signal, so loosening them does not remove hair/skull protection,
+  it removes the false positives they were producing on ordinary poses
+  and on any box whose aspect ratio isn't the canonical template's.
+* `TrackState.update()`'s reacquire check now compares the new detection
+  against this identity's own velocity-projected expected position
+  (`last_hit_bbox` centre plus `vel_bbox * elapsed`), the same idiom
+  already used and validated by the motion-consistency veto in
+  `core_pipeline.py`, instead of the raw last-hit position. Continuous
+  motion over a sparse cadence no longer looks like a jump; an actual
+  position discontinuity still does.
+* The reacquire geometry-timeline wipe (`_scrub_reacquire_timelines()`
+  and the matching branch in `_record_geometry()`) now only drops entries
+  within a bounded, fps-derived window of the current frame
+  (`round(out_fps * 0.55) + 5`, the same order of magnitude as
+  `max_bracket_frames` itself) instead of the whole list. This still
+  prevents the "ghost glide" a full pre-exit/post-return bracket could
+  produce across the actual gap, without erasing history far enough back
+  to be irrelevant to any bracket the interpolator could actually form.
+  (A first attempt used a flat 120-frame window on the reasoning that it
+  was "generous but much smaller than a whole clip" — measured directly
+  and found to degenerate to the same full wipe whenever the reacquire
+  happens within the first ~120 frames of a clip, which is exactly the
+  case that was reported.)
 
 ### Verified
 
-* Direct, isolated test of the mechanism (bypassing the synthetic
-  harness's color-contour detector, whose bbox naturally shrinks with
-  occlusion and would have hidden whether this code path did anything):
-  a fully-visible reference face scores 1.00; the same face with the
-  bottom 70% painted a different color - the majority of anchors, the
-  exact case that broke the first attempt - correctly scores 0.29, not
-  masked by the occluder; a severe occlusion leaving only a forehead
-  sliver scores 0.14 (rejected, matching "under 20%"); a minor corner
-  occlusion (fingertip-scale) correctly stays at 1.00 (accepted, not a
-  false positive).
-* Full existing regression suite (`t_final`, `t_e2e`, `t_modes`,
-  `t_exit`, `t_confused_kps`, `t_confused_2face`, `t_pair`, `t_reentry`,
-  `t_hair_confusion`, `verify_gate`, `repro_ghost`, `verify_geom_cases`,
-  `t_extended_lookaway`, `t_never_returns`) - byte-for-byte unchanged
-  from the v11.1.8 baseline, including every legitimate profile-to-yaw-0.9
-  and lying-down pose `verify_gate.py` checks, none of which this new
-  gate touches.
+* `t_final.py`: the velocity-learning regression (bug 3) now passes —
+  10px/frame motion at every tested detector cadence (1, 5, 10 frames)
+  is learned as ~9.7px/frame, not zero.
+* Direct before/after against the pre-sync v11.2.0 baseline, same
+  synthetic clips: profile-turn test back to 3/240 original-face frames
+  (baseline: 3/240; before this fix: 240/240, 0 swap calls in the whole
+  clip). Detector-dropout (18-frame) test improved from 119/240 to
+  32/240 original-face frames (baseline: 4/240) — the remaining gap
+  versus baseline is the bounded, intentional cost of the geometry-wipe
+  window itself (it still clears entries near the gap on purpose), not
+  an uncontrolled regression.
+* Full existing regression suite (`t_e2e`, `t_exit`, `t_confused_kps`,
+  `t_confused_2face`, `t_pair`, `t_reentry`, `t_hair_confusion`,
+  `verify_gate`, `repro_ghost`, `verify_geom_cases`, `t_extended_lookaway`,
+  `t_never_returns`) unchanged in outcome.
 
 ### Honest caveat
 
-Same limitation as the fps work: the synthetic test harness's detector
-finds faces by color-contour, so its own reported bbox shrinks with any
-occlusion drawn into the source frame, which would exercise the
-ALREADY-EXISTING size-based gates rather than this new content-based
-one - confirmed directly (identical results with and without this fix,
-on that specific test shape) before switching to the isolated,
-function-level verification above, which decouples "what the detector
-reports" from "what the frame actually shows" the way a real detector's
-own bbox regression can. That isolated test is a genuine, direct check
-of this code's logic, not an inference from something else - but it is
-still not the real detector on real footage. Confirming this measurably
-helps the reported clips needs that test, which this environment cannot
-run.
+Bug 1 (the miss-budget cap) and the two threshold loosenings for bug 2
+are still verified by re-deriving the numbers from the code and the
+user's report rather than a synthetic reproduction, the same limitation
+logged for the v11.1.8 fps fix and the v11.2.0 occlusion gate. Bugs 3 and
+4, by contrast, were reproduced and fixed against this project's own
+synthetic harness directly — this sandbox still has no access to the
+user's real footage or a real detector, but "cannot verify without real
+footage" is not a blanket truth for this round the way it was for prior
+ones. If the new face is still weak in specific spots after this build,
+the next most likely remaining lever is the occlusion-guard mask opacity
+path (`build_mask()` / `skin_confidence()` / `_face_looks_marginal()` in
+`swap_engine.py` and `core_pipeline.py`), which was left untouched this
+round since it moved opacity *up*, not down, in the v11.2.1 sync and so
+is a less likely source of the reported weakness.

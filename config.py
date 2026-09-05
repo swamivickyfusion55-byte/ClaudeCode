@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.1.0 "Continuum" configuration (Seamless-CPU base)."""
+"""Swamitech Phoenix v11.2.2 "SolidFace" configuration (CinemaQA + full-strength paste)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -97,8 +97,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.0"
-BUILD = "Continuum · content-based occlusion gate · learned skin reference"
+VERSION = "v11.2.2"
+BUILD = "SolidFace · fixed reacquire velocity + geometry wipe over-trigger"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass
@@ -132,15 +132,15 @@ ENGINE_TUNABLES = {
     # Never set cm_std_lo below ~0.65.
     # SoftStable: gentler luma / tighter shift / delta clamp — brightness only.
     "cm_strength_ab":   0.85,    # chroma follows the scene strongly
-    "cm_strength_l":    0.45,    # SoftStable: was 0.55 — less luma pulse
+    "cm_strength_l":    0.42,    # CinemaQA: steadier than SoftStable 0.45
     "cm_std_lo":        0.72,    # floor on the contrast ratio
     "cm_std_hi":        1.45,
-    "cm_ema":           0.18,    # SoftStable: was 0.28 — steadier deflicker
+    "cm_ema":           0.15,    # CinemaQA: steadier than SoftStable 0.18
     "cm_max_shift":     20.0,    # SoftStable: was 26 — tighter LAB mean cap
-    "cm_delta_clamp":   5.0,     # SoftStable: max |dmean| step vs prior smoothed
+    "cm_delta_clamp":   4.0,     # CinemaQA: tighter than SoftStable 5.0
 
     # --- occlusion guard (hug / kiss / hand across the face) ---------------
-    "occl_min_keep":    0.35,    # lower = trims intruding pixels harder
+    "occl_min_keep":    0.45,    # SolidFace: center stays opaque under marginal occl
     # The guard is a CONTINUOUS weight, not an on/off flag. A flag changed the
     # mask silhouette - and so the colour statistics weighted by that mask - in
     # a single frame every time it flipped, moving outline and brightness at

@@ -48,7 +48,7 @@ from core_pipeline import (  # noqa: F401
 try:
     from config import VERSION_FULL, DUR as _DUR, FPS as _FPS, RES as _RES
 except Exception:
-    VERSION_FULL = "v11.1.0 (Continuum · every frame composited)"
+    VERSION_FULL = "v11.2.2 (SolidFace)"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -369,7 +369,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
     img_refs = gr.State([None, None, None, None])
     vid_refs = gr.State([None, None, None, None])
 
-    gr.HTML('<div class="app-hdr"><h1>🎬 Swamitech Phoenix</h1><p>Aligned-space compositing · Every-frame reuse · Phoenix v11.1.0 (Continuum)</p></div>')
+    gr.HTML('<div class="app-hdr"><h1>🎬 Swamitech Phoenix</h1><p>Aligned-space compositing · Every-frame reuse · Phoenix v11.2.2 (SolidFace)</p></div>')
 
     with gr.Tabs():
         with gr.Tab("Image"):
@@ -464,7 +464,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
             v_res = gr.Dropdown(list(RES.keys()), value="720p (HD)", label="Resolution")
             v_q = gr.Radio(["Fast","Balanced","Optimized","Best","Ultra"], value="Optimized", label="Quality")
             gr.HTML('''<div class="hint">
-💡 <b>Optimized</b> — HF Pro CPU default (v11.1.0 Continuum): the swap network runs every ~5th frame, but <b>every</b> output frame is still composited from the cached aligned result using its own geometry, mask and lighting. Raising the skip interval costs expression freshness, not face presence or placement.
+💡 <b>Optimized</b> — HF Pro CPU default (v11.2.2 SolidFace): the swap network runs every ~5th frame, but <b>every</b> output frame is still composited from the cached aligned result using its own geometry, mask and lighting. Raising the skip interval costs expression freshness, not face presence or placement.
 </div>''')
             gr.HTML('<span class="sec-lbl">Speed settings</span>')
             v_settings_summary = gr.HTML(
@@ -693,7 +693,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
         api_name="swap_image",
     )
 
-    gr.HTML('<div class="app-ftr">Swamitech Phoenix v11.1.0 “Continuum” · Every frame composited · Occlusion-aware tracking · CPU throughput</div>')
+    gr.HTML('<div class="app-ftr">Swamitech Phoenix v11.2.2 “SolidFace” · Every frame composited · Occlusion-aware tracking · CPU throughput</div>')
 
     # Events
     im_detect.click(detect_image, [im_tgt], [im_prev, im_st, img_refs, im_df1, im_df2, im_df3, im_df4], api_name=False)
