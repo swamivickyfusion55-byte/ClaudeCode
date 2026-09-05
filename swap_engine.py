@@ -50,6 +50,7 @@ import numpy as np
 __all__ = [
     "AlignedCompositor",
     "estimate_norm",
+    "landmark_fit_error",
     "ARCFACE_DST",
     "TrackState",
     "MultiFaceTracker",
@@ -58,7 +59,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.1.1-continuous"
+ENGINE_VERSION = "aequus-1.1.2-continuous"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -267,6 +268,16 @@ def _umeyama(src: np.ndarray, dst: np.ndarray):
     return M
 
 
+def _arcface_dst(image_size: int):
+    if image_size % 112 == 0:
+        ratio = float(image_size) / 112.0
+        diff_x = 0.0
+    else:
+        ratio = float(image_size) / 128.0
+        diff_x = 8.0 * ratio
+    return ARCFACE_DST * ratio + np.array([diff_x, 0.0], np.float32)
+
+
 def estimate_norm(kps, image_size: int = 128):
     """Image-space -> aligned-crop affine for 5-point ArcFace keypoints."""
     try:
@@ -276,15 +287,54 @@ def estimate_norm(kps, image_size: int = 128):
     if lmk.shape[0] < 5:
         return None
     lmk = lmk[:5]
-    if image_size % 112 == 0:
-        ratio = float(image_size) / 112.0
-        diff_x = 0.0
-    else:
-        ratio = float(image_size) / 128.0
-        diff_x = 8.0 * ratio
-    dst = ARCFACE_DST * ratio
-    dst = dst + np.array([diff_x, 0.0], np.float32)
+    dst = _arcface_dst(image_size)
     return _umeyama(lmk, dst)
+
+
+def landmark_fit_error(kps, image_size: int = 128):
+    """0..~1+ : how badly the 5 keypoints disagree with ANY single rigid pose.
+
+    A real face's 5 landmarks - however extreme the pose - come from one rigid
+    structure, so a similarity transform (rotation+scale+translation) can
+    always be found that lands them close to the ArcFace canonical template.
+    When a detector's landmark regression is unreliable - pushed past where it
+    was trained by an extreme yaw/pitch, an eye guessed from hair, a mouth
+    placed by the shape prior rather than the image - the 5 points stop being
+    mutually consistent with any single pose, and the BEST-FIT residual spikes
+    even though det_score and each individual coordinate can look
+    unremarkable in isolation. That is exactly the failure this measures, and
+    exactly what malforms compositing: fitting an affine to inconsistent
+    points does not fail loudly, it silently returns a plausible-looking M
+    that does not match the real head, so the aligned crop reprojects onto
+    the wrong place at the wrong rotation and scale - a rotated, misplaced
+    rectangle is the visible result.
+
+    Unlike _frontal_score/_pitch_score (heuristics on where individual points
+    sit), this is a direct geometric consistency check, so it also catches
+    configurations that do not trip either heuristic's simple thresholds.
+
+    Returns None if a transform cannot even be attempted (e.g. degenerate
+    points that make the source covariance singular) - that is itself a
+    reliability failure and should be treated as maximally unreliable by the
+    caller.
+    """
+    try:
+        lmk = np.asarray(kps, np.float32).reshape(-1, 2)[:5]
+    except Exception:
+        return None
+    if lmk.shape[0] < 5:
+        return None
+    dst = _arcface_dst(image_size)
+    M = _umeyama(lmk, dst)
+    if M is None:
+        return None
+    try:
+        proj = lmk @ M[:, :2].T + M[:, 2]
+        err = np.linalg.norm(proj - dst, axis=1)
+        eye_dist = float(np.linalg.norm(dst[0] - dst[1])) + 1e-6
+        return float(np.mean(err) / eye_dist)
+    except Exception:
+        return None
 
 
 def _as3x3(M):

@@ -1757,6 +1757,93 @@ def _predicted_miss_budget() -> int:
             return 24
 
 
+def _kps_reliable(f) -> bool:
+    """False when the 5 landmarks do not describe a paintable face.
+
+    This is the gate _pitch_score()'s own docstring promises ("not a
+    paintable face") but that was never actually wired into a decision to
+    skip painting - only into the occlusion-guard's mask trimming, which
+    softens edges but cannot stop a misaligned paste. A live detection with
+    det_score above the floor and 5 keypoints present sailed straight through
+    _face_swap_allowed() regardless of what those keypoints described.
+
+    Concretely: when a detector's landmark regression is unreliable - pushed
+    past where it was trained by an extreme "looking away" yaw or pitch - it
+    can still return a det_score that clears the threshold and 5 points that
+    each look unremarkable in isolation, while the points as a SET describe
+    an inconsistent face. estimate_norm() does not fail loudly on that; it
+    silently returns a plausible-looking affine that does not match the real
+    head, so the aligned crop reprojects at the wrong place and rotation - a
+    rotated, misplaced rectangle is the visible result.
+
+    Two independent signals, because either alone can be dodged:
+
+      * _pitch_score()'s lowest bucket (<=0.10) is its own documented
+        "looking down/away, box is hair or skull" case;
+      * landmark_fit_error() is a direct geometric consistency check (do the
+        5 points admit ANY single rigid pose), not a heuristic on where
+        individual points sit, so it also catches configurations that do not
+        trip the pitch/frontal thresholds.
+
+    Thresholds were set with margin below the legitimate ceiling: swept over
+    profile turns to yaw 0.9 and lying-down poses to +-95 degrees roll (every
+    roll tested, since the vertical check below is roll-corrected), the
+    worst legitimate case measured roll-corrected-vert=0.357 and
+    fit_error=0.103. A synthetic "looking down" detector-confusion signature -
+    the nose collapsed to/above the eye line, which is the actual failure
+    reported: a rotated, misplaced patch specifically when the subject looks
+    away - scored roll-corrected-vert<=0 and fit_error 0.47-0.59 at every
+    severity and every roll tested, comfortably on the reject side of both
+    thresholds (0.12 and 0.20 respectively).
+
+    Fails toward REJECT on error, not toward "trust it": unlike most gates in
+    this module (which fail open, because their failure mode is an
+    unnecessary hold), a computation error here has the opposite failure
+    mode - risking the exact visible corruption this function exists to
+    prevent. A spurious hold is the already-accepted, designed-for fallback
+    everywhere else in this engine; a bad paste is not.
+    """
+    kps = getattr(f, "kps", None)
+    if kps is None or len(kps) < 5:
+        return True  # nothing to check here; the count itself is handled elsewhere
+    try:
+        le, re = np.asarray(kps[0], np.float32), np.asarray(kps[1], np.float32)
+        nose = np.asarray(kps[2], np.float32)
+        eye_vec = re - le
+        eye_dist = float(np.linalg.norm(eye_vec)) + 1e-6
+
+        # Roll-corrected vertical pitch signal. _pitch_score() computes this
+        # along the IMAGE y-axis, which only means "up/down on the face" when
+        # roll is near zero. At a genuine ~90 degree roll (lying down - a
+        # pose this engine explicitly supports and was verified against) the
+        # face's own vertical axis IS the image's horizontal axis, so the
+        # image-axis version collapses toward zero and misreads a perfectly
+        # good lying-down pose as "looking down, box is hair/skull". This is
+        # the same class of blind spot the engine's own mask/enhancer
+        # orientation code elsewhere already had to correct for with the
+        # measured head roll - re-derived here from the eye line rather than
+        # importing that machinery, to keep this check self-contained.
+        roll = float(np.arctan2(eye_vec[1], eye_vec[0]))
+        mid = (le + re) * 0.5
+        rel = nose - mid
+        c, sn = float(np.cos(-roll)), float(np.sin(-roll))
+        vert = (rel[0] * sn + rel[1] * c) / eye_dist
+        if vert < 0.12:
+            return False
+
+        fit = _E.landmark_fit_error(kps, 128)
+        # None means the fit could not even be attempted (a degenerate point
+        # set) - itself evidence of an unreliable read, not a reason to pass.
+        # In practice this branch is defensive: the only input that makes the
+        # Umeyama fit degenerate (all 5 points coincident) already collapses
+        # `rel` to zero and is rejected by the vert check above first.
+        if fit is None or fit > 0.20:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _face_swap_allowed(f) -> bool:
     """Balanced gate.
 
@@ -2225,6 +2312,14 @@ def swap_image(target, s1, s2, s3, s4, quality, refs):
         orig = work if quality == "Fast" else work.copy()
         faces = _fa.get(work)
         if not faces: return None, "❌ No face detected"
+        # Same reliability gate as the video path: a face whose 5 keypoints do
+        # not describe a paintable pose is left as the original rather than
+        # swapped, since a still image has no "hold the last good frame"
+        # fallback to fall back to. See _kps_reliable() for why this check
+        # exists - it is the case behind the "face pasted at the wrong angle
+        # when looking away" report.
+        faces = [f for f in faces if _kps_reliable(f)]
+        if not faces: return None, "❌ No reliably-aligned face detected"
         pairs = _pairs_for_frame(faces, smap, refs or [], frame_bgr=work)
         for f, src in pairs:
             work, _ = _swap_one(work, orig, f, src, quality)
@@ -2428,7 +2523,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             "detector_calls": 0, "tracker_hits": 0, "gfpgan_calls": 0,
             "swap_calls": 0, "swap_skips": 0, "frames_in": 0, "frames_out": 0,
             "det_times": [], "swap_times": [],
-            "frames_filled": 0,
+            "frames_filled": 0, "kps_rejected": 0,
             "encode_seconds": 0.0, "processing_seconds": 0.0,
         }
 
@@ -2881,6 +2976,22 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         except Exception as e:
                             logging.debug("high-resolution detector probe skipped: %s", e)
                     faces, _face_ema = _smooth_faces(faces, _face_ema)
+
+                    # Reject detections whose own 5 keypoints do not describe a
+                    # paintable face (see _kps_reliable). This runs AFTER the
+                    # hi-res probe rescue above, so a real face that is merely
+                    # small or partly turned still gets its second chance
+                    # first; only genuinely inconsistent reads are dropped
+                    # here. A rejected identity falls straight into the
+                    # existing "no detection this frame" path below, which
+                    # already holds the last good geometry through a bounded
+                    # gap instead of painting - exactly the behaviour wanted
+                    # here, reused rather than reinvented.
+                    _n_before_kps_gate = len(faces)
+                    faces = [f for f in faces if _kps_reliable(f)]
+                    if len(faces) < _n_before_kps_gate:
+                        stats["kps_rejected"] = stats.get("kps_rejected", 0) + (_n_before_kps_gate - len(faces))
+
                     stats["detector_calls"] += 1
                     stats["det_times"].append((time.perf_counter() - t_det0) * 1000)
                     last_det_g[0] = g
@@ -3484,11 +3595,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # "local variable 'res' referenced before assignment".
         res = final
         logging.info(
-            "Done in %.1fs — frames=%d; detector_calls=%d; swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d",
+            "Done in %.1fs — frames=%d; detector_calls=%d; swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d",
             time.time() - t0, stats["frames_out"], stats["detector_calls"], stats["swap_calls"],
             (sum(stats["det_times"]) / len(stats["det_times"])) if stats["det_times"] else 0.0,
             (sum(stats["swap_times"]) / len(stats["swap_times"])) if stats["swap_times"] else 0.0,
-            stats["encode_seconds"], stats["frames_filled"],
+            stats["encode_seconds"], stats["frames_filled"], stats["kps_rejected"],
         )
 
         pw = (cfg.get('password') or "").strip()

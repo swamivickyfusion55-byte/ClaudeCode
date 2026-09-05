@@ -140,6 +140,82 @@ Kept here because they look like obvious wins and are not:
   low. std drives the contrast-matching term whose mis-scaling produced the
   original flat "brown patch".
 
+## v11.1.2 — the actual "looking away" paste bug
+
+Reported: a face pasted at the wrong angle and place specifically when the
+subject looks away, distinct from the "walked out of frame" case fixed in
+v11.1.1 - this one happens mid-frame, subject still in shot.
+
+### Root cause
+
+`_pitch_score()`'s own docstring says its lowest bucket means "looking
+down/away, box is hair or skull... not a paintable face." Nothing actually
+enforced that. It fed only `_face_looks_marginal()`, which softens the
+occlusion mask - it cannot stop a misaligned paste, only blur its edges.
+`_face_swap_allowed()`, the function that actually decides whether to paint a
+LIVE detection, checked only `det_score` and that 5 keypoints exist - never
+what those keypoints described.
+
+When a detector's landmark regression is pushed past where it was trained -
+an extreme "looking away" yaw or pitch - it can still return a det_score
+that clears the floor and 5 points that each look unremarkable in isolation,
+while the points AS A SET describe an inconsistent face. `estimate_norm()`
+does not fail loudly on that: it silently returns a plausible-looking affine
+that does not match the real head, so the aligned crop reprojects at the
+wrong place and rotation. A rotated, misplaced rectangle is the visible
+result - exactly the reported defect.
+
+### The fix: two independent geometric-consistency checks
+
+`_kps_reliable()` gates every live detection before it can be painted, using
+two signals chosen because either alone can be dodged:
+
+* a **roll-corrected** vertical pitch check. The engine's own `_pitch_score()`
+  measures this along the image y-axis, which only means "up/down on the
+  face" when roll is near zero - at a genuine ~90 degree roll (this engine's
+  own supported lying-down pose) that axis collapses toward zero and
+  misreads a perfectly good pose as "looking down". Re-deriving pitch in the
+  face's own rotated frame (from the eye-line angle) fixed a real regression
+  this introduced during development: lying-down poses at 85-95 degrees roll
+  were initially misflagged as unreliable until the check was made
+  roll-invariant.
+* `landmark_fit_error()` (new, `swap_engine.py`): fits the same
+  similarity transform `estimate_norm()` will use and scores the residual.
+  A real face's 5 points - however extreme the pose - come from one rigid
+  structure, so *some* rigid transform always fits them closely. Points that
+  are not mutually consistent with any single pose are a direct sign the
+  detector's read is unreliable, independent of where any individual point
+  sits - so it also catches configurations that dodge the pitch check.
+
+A rejected detection is not shown as-is and not discarded either: it is
+routed into the SAME "no detection this frame" path already built and
+verified for genuine detector misses, so it holds the last good geometry
+through the bad read rather than painting it. Reused infrastructure, not new
+behaviour to trust.
+
+### Verified
+
+* 13 legitimate poses (frontal, profile to yaw 0.9, lying-down at every roll
+  from -85 to 180 degrees, small/far faces) - all still swap. This is what
+  caught the roll-blindness bug above before it shipped.
+* 34 synthetic "looking away" detector-confusion signatures (5 severities x
+  5 rolls, plus degenerate hair/skull-blob reads) - all correctly rejected.
+* Integration reproduction: injecting the confusion signature mid-video
+  measured **126.7px mean / 514.8px max** placement error with the gate
+  disabled (reproducing the report), and **0.8px mean / 4.8px max** with it
+  enabled - a held frame is invisible; the metric moves because a genuinely
+  static synthetic face has near-zero baseline error.
+* Two-face isolation: confusing one identity's detections leaves the other
+  identity's placement error at 0.9px mean, 0 missing frames - a bad read on
+  one slot does not disrupt the other or the tracker's state after it clears.
+* Full existing regression suite (fast pan, profile turns, detector dropout,
+  two faces in contact, walking out of frame, Stable preset, enhancer) -
+  unchanged.
+* The v11.1.1 efficiency work is untouched: 2-face Optimized still measures
+  ~22.5s against the pre-cadence-fix ~32.0s baseline; the new gate itself
+  costs ~220 microseconds per detected face per detector call (~50ms total
+  over a 120-frame two-face job).
+
 ### Known limits
 
 * Beyond roughly 70 degrees of yaw the ArcFace 5-point fit is close to
