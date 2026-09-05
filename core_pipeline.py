@@ -719,28 +719,6 @@ _FACE_ROI_PAD = 0.22
 _FACE_FEATHER = 0.32
 _FACE_EMA_ALPHA = 0.40
 
-# Last observed head roll in degrees. _frontal_score() only measures YAW and is
-# completely blind to ROLL, so a head tilted 40 degrees still scored ~1.0
-# "frontal" and every upright-ellipse code path ran at full strength on it.
-_ROLL_STATE = [0.0]
-
-
-def _face_roll_deg(face):
-    """In-plane head rotation from the two eye keypoints, in degrees."""
-    try:
-        kps = getattr(face, "kps", None)
-        if kps is None or len(kps) < 2:
-            return 0.0
-        le, re = np.asarray(kps[0], np.float32), np.asarray(kps[1], np.float32)
-        return float(np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0])))
-    except Exception:
-        return 0.0
-
-def _ema_bbox(prev, curr, alpha=_FACE_EMA_ALPHA):
-    if prev is None:
-        return curr.astype(np.float32).copy()
-    return prev.astype(np.float32) * (1.0 - alpha) + curr.astype(np.float32) * alpha
-
 def _smooth_faces(faces, ema_state):
     """Deliberately a pass-through in v11.
 
@@ -771,320 +749,150 @@ def _pad_bbox(bbox, h, w, pad=_FACE_ROI_PAD):
     return x1, y1, x2, y2
 
 
-def _bbox_lerp(b0, b1, t):
-    b0 = np.asarray(b0, dtype=np.float32).reshape(-1)[:4]
-    b1 = np.asarray(b1, dtype=np.float32).reshape(-1)[:4]
-    return (1.0 - t) * b0 + t * b1
+# ---------------------------------------------------------------------------
+# Per-output-frame geometry.
+#
+# Detection and the swap network run on key frames; the frames in between used
+# to be filled by copying a face ROI out of a NEIGHBOURING frame and stamping
+# it onto the current one. That is the origin of most of the visible defects:
+#
+#   * the stamped ROI carries the neighbour's head position, so during fast
+#     movement the face lags the body and snaps forward on the next key frame;
+#   * it also carries the neighbour's background inside the ellipse, and its
+#     own exposure, so every transition between a real swap frame and a filled
+#     one is a brightness step;
+#   * two of the fill branches cross-faded whole FRAMES, which ghosts the
+#     entire image whenever the camera or the subject moves;
+#   * and several branches simply returned the untouched original frame, which
+#     is the real face appearing for one to four frames.
+#
+# Instead, geometry is interpolated between key frames per identity slot, and
+# every output frame is composited for real from the cached aligned swap - see
+# swap_engine.AlignedCompositor.reuse(). Interpolating five keypoints is
+# essentially free; it is the ONNX forward pass that is expensive, and that is
+# the only thing still restricted to key frames.
+# ---------------------------------------------------------------------------
+def _geom_record(face, track, alpha, guard, src, lmk=None):
+    """Freeze the geometry a face will be RENDERED with, at detection time.
 
-
-def _feather_ellipse_mask(h, w, soft=0.45, angle=None):
-    """Feathered ellipse, oriented to the head roll rather than always upright.
-
-    An upright ellipse over a rolled head either clips the face or spills onto
-    hair and background; both are visible, and the spill is what made the
-    processed region legible as a patch.
+    Reading ``track.bbox`` / ``track.kps`` at swap time instead - which is what
+    the pipeline used to do - reads shared, mutable tracker state that the
+    detection loop has already advanced to the END of the chunk, because the
+    whole chunk is detected before any swap runs. Every swapped frame in a
+    chunk therefore rendered at the last key frame's head position. Snapshotting
+    here binds the geometry to the frame it belongs to.
     """
-    mask = np.zeros((h, w), np.uint8)
-    cy, cx = h // 2, w // 2
-    axes = (max(1, int(w * 0.38)), max(1, int(h * 0.44)))
-    ang = float(_ROLL_STATE[0]) if angle is None else float(angle)
-    cv2.ellipse(mask, (cx, cy), axes, ang, 0, 360, 255, -1)
-    k = max(5, int(min(h, w) * soft) | 1)
-    if k % 2 == 0:
-        k += 1
-    mask = cv2.GaussianBlur(mask, (k, k), 0)
-    mask = np.where(mask < 12, 0, mask).astype(np.uint8)
-    return mask
+    kps = getattr(track, "kps", None) if track is not None else None
+    if kps is None:
+        kps = getattr(face, "kps", None)
+    bbox = getattr(track, "bbox", None) if track is not None else None
+    if bbox is None:
+        bbox = getattr(face, "bbox", None)
+    if lmk is None:
+        lmk = getattr(track, "lmk", None) if track is not None else None
+        if lmk is None:
+            lmk = getattr(face, "landmark_2d_106", None)
+    if kps is None or bbox is None:
+        return None
+    return {
+        "kps": np.asarray(kps, np.float32).copy(),
+        "bbox": np.asarray(bbox, np.float32).reshape(4).copy(),
+        "lmk": None if lmk is None else np.asarray(lmk, np.float32).copy(),
+        "alpha": float(np.clip(alpha, 0.0, 1.0)),
+        "guard": float(np.clip(guard, 0.0, 1.0)),
+        "src": src,
+        "track": track,
+        # True when this came from a real detection rather than from the
+        # tracker predicting forward. _geom_for_frame() prefers to interpolate
+        # between two real observations: between them, interpolation is exact
+        # for any motion the tracker can model, whereas extrapolation trails
+        # the subject and then snaps at the next detection.
+        "det": not bool(getattr(face, "predicted", False)),
+    }
 
 
-def _match_roi_color(patch_bgr, dest_bgr, mask_u8, strength=0.35):
-    if patch_bgr is None or dest_bgr is None or mask_u8 is None:
-        return patch_bgr
-    if strength <= 0 or patch_bgr.shape[:2] != dest_bgr.shape[:2]:
-        return patch_bgr
-    m = mask_u8.astype(np.float32) / 255.0
-    m3 = m[..., None] if m.ndim == 2 else m
-    wsum = float(m.sum())
-    if wsum < 8:
-        return patch_bgr
-    p = patch_bgr.astype(np.float32)
-    d = dest_bgr.astype(np.float32)
-    for c in range(3):
-        mp = float((p[:, :, c] * m).sum() / wsum)
-        md = float((d[:, :, c] * m).sum() / wsum)
-        shift = (md - mp) * float(strength)
-        p[:, :, c] = p[:, :, c] + shift * m
-    return np.clip(p, 0, 255).astype(np.uint8)
-
-
-def _blend_face_roi(out, face_bgr, x1, y1, x2, y2, soft=0.45, color_match=True):
-    th, tw = y2 - y1, x2 - x1
-    if th < 8 or tw < 8:
-        return out
-    if face_bgr.shape[0] != th or face_bgr.shape[1] != tw:
-        face_bgr = cv2.resize(face_bgr, (tw, th), interpolation=cv2.INTER_LINEAR)
-    dest = out[y1:y2, x1:x2]
-    mask = _feather_ellipse_mask(th, tw, soft=soft)
-    if color_match:
-        face_bgr = _match_roi_color(face_bgr, dest, mask, strength=0.30)
-    # v11 FIX. This used cv2.bitwise_and(..., mask=mask), which treats the mask
-    # as BINARY (any non-zero pixel = fully opaque). The Gaussian feather built
-    # one line above was therefore computed and then thrown away, and every hold
-    # / paste path produced a hard-edged ellipse. Use a real alpha blend.
-    m = (mask.astype(np.float32) / 255.0)[..., None]
-    out[y1:y2, x1:x2] = (face_bgr.astype(np.float32) * m +
-                         dest.astype(np.float32) * (1.0 - m)).astype(np.uint8)
+def _geom_lerp(a, b, t):
+    """Blend two geometry records. ``t`` in [0,1], 0 = a, 1 = b."""
+    t = float(np.clip(t, 0.0, 1.0))
+    out = dict(a)
+    out["kps"] = (a["kps"] * (1.0 - t) + b["kps"] * t).astype(np.float32)
+    out["bbox"] = (a["bbox"] * (1.0 - t) + b["bbox"] * t).astype(np.float32)
+    if a["lmk"] is not None and b["lmk"] is not None and a["lmk"].shape == b["lmk"].shape:
+        out["lmk"] = (a["lmk"] * (1.0 - t) + b["lmk"] * t).astype(np.float32)
+    else:
+        out["lmk"] = b["lmk"] if t >= 0.5 else a["lmk"]
+    out["alpha"] = float(a["alpha"] * (1.0 - t) + b["alpha"] * t)
+    out["guard"] = float(a["guard"] * (1.0 - t) + b["guard"] * t)
+    out["src"] = b["src"] if t >= 0.5 else a["src"]
+    out["track"] = b["track"] if t >= 0.5 else a["track"]
+    out["det"] = bool(a.get("det")) and bool(b.get("det"))
     return out
 
 
-def _extract_face_patch(img, bbox, pad=0.40):
-    if img is None or bbox is None:
-        return None, None
-    h, w = img.shape[:2]
-    roi = _pad_bbox(bbox, h, w, pad=pad)
-    if roi is None:
-        return None, None
-    x1, y1, x2, y2 = roi
-    patch = img[y1:y2, x1:x2]
-    if patch.size < 100:
-        return None, None
-    return patch, roi
+def _geom_for_frame(timeline, g, taper):
+    """Geometry for output frame ``g`` from a slot's key-frame timeline.
 
-
-def _temporal_fill_frame(orig, results, key_pos, key_bbox_map, k):
-    j = bisect.bisect_left(key_pos, k)
-    prevk = key_pos[j - 1] if j > 0 else None
-    nextk = key_pos[j] if j < len(key_pos) else None
-
-    prev_sw = results.get(prevk) if prevk is not None else None
-    next_sw = results.get(nextk) if nextk is not None else None
-    prev_bb = key_bbox_map.get(prevk) if prevk is not None else None
-    next_bb = key_bbox_map.get(nextk) if nextk is not None else None
-
-    if prevk is not None and nextk is not None and nextk > prevk:
-        t = (k - prevk) / float(nextk - prevk)
-        gap = nextk - prevk
-    elif prevk is not None:
-        t, gap = 0.0, 99
-    else:
-        t, gap = 1.0, 99
-    t = float(np.clip(t, 0.0, 1.0))
-
-    if prev_sw is not None and next_sw is not None and gap <= 2:
-        return cv2.addWeighted(prev_sw, 1.0 - t, next_sw, t, 0)
-
-    nearest_sw, nearest_bb = None, None
-    if prev_sw is not None and next_sw is not None:
-        nearest_sw, nearest_bb = (prev_sw, prev_bb) if t < 0.5 else (next_sw, next_bb)
-    elif prev_sw is not None:
-        nearest_sw, nearest_bb = prev_sw, prev_bb
-    elif next_sw is not None:
-        nearest_sw, nearest_bb = next_sw, next_bb
-
-    if nearest_sw is None:
-        return orig
-
-    if orig is None or orig.shape[:2] != nearest_sw.shape[:2]:
-        return orig
-
-    # Only copy a swapped face ROI when the box is still the same face
-    # in nearly the same place. Interpolating a box while the subject
-    # looks down / walks out of frame is how a face landed on an arm.
-    stable = False
-    try:
-        if prev_bb is not None and next_bb is not None and gap < 8:
-            iou = _bbox_iou(prev_bb, next_bb)
-            ah = max(8.0, float((prev_bb[3]-prev_bb[1] + next_bb[3]-next_bb[1]) * 0.5))
-            cy0 = (float(prev_bb[1])+float(prev_bb[3])) * 0.5
-            cy1 = (float(next_bb[1])+float(next_bb[3])) * 0.5
-            stable = iou >= 0.22 or abs(cy0 - cy1) / ah < 0.55
-        elif nearest_bb is not None and gap <= 3:
-            stable = True
-    except Exception:
-        stable = False
-    if not stable:
-        # Head is turning / ROI unstable: NEVER flash the full original face
-        # if we still have a recent swapped neighbour. Prefer soft crossfade
-        # or a same-person hold warp over an original-face blink (v11.0.1).
-        if nearest_sw is not None and gap <= 12 and orig is not None and orig.shape[:2] == nearest_sw.shape[:2]:
-            try:
-                # Prefer ROI hold when we have a usable current/nearest box.
-                hold_bb = None
-                if prev_bb is not None and next_bb is not None and gap < 99:
-                    hold_bb = _bbox_lerp(prev_bb, next_bb, t)
-                elif nearest_bb is not None:
-                    hold_bb = nearest_bb
-                if hold_bb is not None:
-                    held = _safe_hold_same_person(orig, hold_bb)
-                    if held is not None:
-                        return held
-            except Exception:
-                pass
-            # SoftStable: soft crossfade ONLY when neighbour bbox IoU with
-            # prev ≥ 0.22 (0.08 orig / 0.92 swap). Else nearest_sw alone if
-            # IoU still ok (≥0.15), else original — never paste onto body.
-            _nb_iou = 0.0
-            try:
-                if prev_bb is not None and next_bb is not None:
-                    _nb_iou = float(_bbox_iou(prev_bb, next_bb))
-            except Exception:
-                _nb_iou = 0.0
-            if _nb_iou >= 0.22:
-                return cv2.addWeighted(orig, 0.08, nearest_sw, 0.92, 0)
-            if nearest_sw is not None and _nb_iou >= 0.15:
-                return nearest_sw
-            return orig
-        # Truly no usable prior swap within gap — only then return original.
-        return orig
-
-    if nearest_bb is not None:
-        try:
-            out = orig.copy()
-            h, w = out.shape[:2]
-            bb = _bbox_lerp(prev_bb, next_bb, t) if (prev_bb is not None and next_bb is not None and gap < 99) else nearest_bb
-            roi = _pad_bbox(bb, h, w, pad=0.32)
-            if roi is not None:
-                x1, y1, x2, y2 = roi
-                patch = nearest_sw[y1:y2, x1:x2]
-                if patch.size >= 100:
-                    # FIX (debug session): color_match was hardcoded False here,
-                    # so a patch borrowed from a DIFFERENT frame (different
-                    # ambient/exposure moment) was pasted with its brightness
-                    # frozen at capture time. Every transition between a real
-                    # AI-swapped frame and one of these interpolated frames
-                    # then showed a visible brightness step — the flicker
-                    # complaint. Re-matching toward the current destination's
-                    # own local statistics removes that step.
-                    out = _blend_face_roi(out, patch, x1, y1, x2, y2, soft=0.52, color_match=True)
-                    return out
-        except Exception:
-            pass
-
-    # SoftStable fallback: gated crossfade / nearest / orig (no hold-everywhere).
-    if nearest_sw is not None and orig is not None and orig.shape[:2] == nearest_sw.shape[:2] and gap <= 12:
-        _nb_iou = 0.0
-        try:
-            if prev_bb is not None and next_bb is not None:
-                _nb_iou = float(_bbox_iou(prev_bb, next_bb))
-        except Exception:
-            _nb_iou = 0.0
-        if _nb_iou >= 0.22:
-            return cv2.addWeighted(orig, 0.08, nearest_sw, 0.92, 0)
-        if _nb_iou >= 0.15:
-            return nearest_sw
-        return orig
-    return orig
-
-
-def _safe_hold_same_person(frm, curr_bb):
-    """Hold last good swap only if curr_bb still overlaps same person."""
-    prev = _last_swapped[0]
-    bbs = list(_last_swap_bboxes) if _last_swap_bboxes else []
-    if prev is None or not bbs or curr_bb is None:
+    ``timeline`` is an ordered list of ``(global_frame_index, record)``. A slot
+    that is only anchored on one side (the face has just entered, or has just
+    been lost) holds its last known geometry and fades out over ``taper``
+    frames rather than disappearing between one frame and the next.
+    """
+    if not timeline:
         return None
-    if prev.shape[:2] != frm.shape[:2]:
+
+    def _bracket(entries):
+        lo = hi = None
+        for gi, rec in entries:
+            if gi <= g:
+                lo = (gi, rec)
+            elif hi is None:
+                hi = (gi, rec)
+                break
+        return lo, hi
+
+    # Prefer a bracket made of real detections. A predicted anchor sitting
+    # between two real ones only drags the interpolation toward the tracker's
+    # lag; the real pair on either side describes the motion better.
+    observed = [e for e in timeline if e[1].get("det")]
+    lo, hi = _bracket(observed)
+    if lo is None or hi is None:
+        lo, hi = _bracket(timeline)
+    if lo is not None and hi is not None:
+        span = float(hi[0] - lo[0])
+        t = 0.0 if span <= 0 else (g - lo[0]) / span
+        return _geom_lerp(lo[1], hi[1], t)
+    side = lo if lo is not None else hi
+    dist = abs(g - side[0])
+    if taper > 0 and dist > taper:
         return None
-    best_bb, best_iou = None, 0.0
-    for bb in bbs:
-        try:
-            iou = _bbox_iou(bb, curr_bb)
-        except Exception:
-            iou = 0.0
-        if iou > best_iou:
-            best_iou, best_bb = iou, bb
-    # SoftStable: prefer original over wrong-place paste (was 0.15).
-    if best_bb is None or best_iou < 0.25:
-        return None
-    try:
-        out = frm.copy()
-        h, w = out.shape[:2]
-        src_roi = _pad_bbox(best_bb, h, w, pad=0.28)
-        dst_roi = _pad_bbox(curr_bb, h, w, pad=0.28)
-        if src_roi is None or dst_roi is None:
-            return _paste_faces_from_prev(frm, prev, [curr_bb])
-        sx1, sy1, sx2, sy2 = src_roi
-        dx1, dy1, dx2, dy2 = dst_roi
-        if sx2 <= sx1 or sy2 <= sy1 or dx2 <= dx1 or dy2 <= dy1:
-            return None
-        patch = prev[sy1:sy2, sx1:sx2]
-        if patch.size < 100:
-            return None
-        patch = cv2.resize(patch, (dx2 - dx1, dy2 - dy1), interpolation=cv2.INTER_LINEAR)
-        # FIX (debug session): see _temporal_fill_frame — same stale-brightness
-        # cause, same fix (re-match toward current local statistics).
-        out = _blend_face_roi(out, patch, dx1, dy1, dx2, dy2, soft=0.50, color_match=True)
-        if not _face_region_ok(out, curr_bb):
-            return None
+    rec = dict(side[1])
+    if taper > 0 and dist > 0:
+        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (dist / float(taper)) ** 2))
+    return rec if rec["alpha"] > 0.02 else None
+
+
+def _rival_landmarks(records, slot):
+    """Landmarks of the faces painted AFTER ``slot`` (i.e. nearer the camera).
+
+    During a kiss or a hug the nearer person's cheek lands inside this face's
+    aligned crop. Their chroma is essentially identical, so the skin-confidence
+    guard cannot separate them - but their own landmarks can, and they project
+    into this crop through the same affine.
+    """
+    out = []
+    me = records.get(slot)
+    if me is None:
         return out
-    except Exception:
-        return None
-
-
-def _safe_hold_multi(frm, face_bboxes):
-    """Per-slot hold for couple scenes — each face held independently."""
-    prev = _last_swapped[0]
-    bbs = list(_last_swap_bboxes) if _last_swap_bboxes else []
-    if prev is None or not bbs or not face_bboxes:
-        return None
-    if prev.shape[:2] != frm.shape[:2]:
-        return None
-    out = frm.copy()
-    held_any = False
-    used_prev = set()
-    for curr_bb in face_bboxes:
-        best_j, best_iou = -1, 0.0
-        for j, bb in enumerate(bbs):
-            if j in used_prev:
-                continue
-            try:
-                iou = _bbox_iou(bb, curr_bb)
-            except Exception:
-                iou = 0.0
-            if iou > best_iou:
-                best_iou, best_j = iou, j
-        # SoftStable: same IoU floor as _safe_hold_same_person (was 0.12).
-        if best_j < 0 or best_iou < 0.25:
+    my_area = float(max(1.0, (me["bbox"][2] - me["bbox"][0]) * (me["bbox"][3] - me["bbox"][1])))
+    for s2, r2 in records.items():
+        if s2 == slot or r2 is None or r2.get("lmk") is None:
             continue
-        used_prev.add(best_j)
-        try:
-            h, w = out.shape[:2]
-            src_roi = _pad_bbox(bbs[best_j], h, w, pad=0.26)
-            dst_roi = _pad_bbox(curr_bb, h, w, pad=0.26)
-            if src_roi is None or dst_roi is None:
-                continue
-            sx1, sy1, sx2, sy2 = src_roi
-            dx1, dy1, dx2, dy2 = dst_roi
-            patch = prev[sy1:sy2, sx1:sx2]
-            if patch.size < 100:
-                continue
-            patch = cv2.resize(patch, (dx2 - dx1, dy2 - dy1), interpolation=cv2.INTER_LINEAR)
-            # FIX (debug session): see _temporal_fill_frame — same fix.
-            trial = _blend_face_roi(out, patch, dx1, dy1, dx2, dy2, soft=0.48, color_match=True)
-            if _face_region_ok(trial, curr_bb):
-                out = trial
-                held_any = True
-        except Exception:
+        area2 = float(max(1.0, (r2["bbox"][2] - r2["bbox"][0]) * (r2["bbox"][3] - r2["bbox"][1])))
+        if area2 <= my_area:
+            continue                      # painted before us; not an occluder
+        if _bbox_iou(me["bbox"], r2["bbox"]) < 0.06:
             continue
-    return out if held_any else None
-
-
-
-def _paste_faces_from_prev(current, prev_swapped, bboxes):
-    if prev_swapped is None or not bboxes or prev_swapped.shape[:2] != current.shape[:2]:
-        return current
-    out = current.copy()
-    h, w = out.shape[:2]
-    for bb in bboxes:
-        roi = _pad_bbox(bb, h, w, pad=_FACE_ROI_PAD)
-        if roi is None:
-            continue
-        x1, y1, x2, y2 = roi
-        fh, fw = y2 - y1, x2 - x1
-        if fh < 4 or fw < 4:
-            continue
-        patch = prev_swapped[y1:y2, x1:x2]
-        # FIX (debug session): see _temporal_fill_frame — same fix.
-        out = _blend_face_roi(out, patch, x1, y1, x2, y2, soft=0.50, color_match=True)
+        out.append(r2["lmk"])
     return out
 
 
@@ -1581,58 +1389,6 @@ def _enhance(frame, enhancer_name="GFPGAN"):
         return _soft_polish(frame, "Soft polish (fast)")
 
 
-def _enhance_primary_only(frame, primary_bbox, enhancer_name="GFPGAN"):
-    if primary_bbox is None or not enhancer_name or enhancer_name == "None":
-        return frame
-    h, w = frame.shape[:2]
-    roi = _pad_bbox(primary_bbox, h, w, pad=0.40)
-    if roi is None: return frame
-    x1, y1, x2, y2 = roi
-    crop = frame[y1:y2, x1:x2]
-    if crop.size < 100: return frame
-    restored = _enhance(crop, enhancer_name)
-    if restored is None or restored is crop: return frame
-    if restored.shape[:2] != crop.shape[:2]:
-        restored = cv2.resize(restored, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_LINEAR)
-    out = frame.copy()
-    fh, fw = y2 - y1, x2 - x1
-
-    # v11 FIX. This used to paste the enhanced crop back through a RECTANGULAR
-    # linear-ramp mask covering the whole 40%-padded bbox — so on a rolled head
-    # the enhanced (and therefore visibly different) region ballooned over hair,
-    # neck and background. That is the "shiny patch covering the whole face when
-    # the head tilts" complaint. An ellipse oriented to the actual head roll
-    # keeps the enhancement on the face.
-    roll = float(_ROLL_STATE[0])
-    mask_u8 = np.zeros((fh, fw), np.uint8)
-    cv2.ellipse(mask_u8, (fw // 2, int(fh * 0.52)),
-                (max(3, int(fw * 0.37)), max(3, int(fh * 0.43))),
-                roll, 0, 360, 255, -1)
-    k = max(5, int(min(fh, fw) * 0.16) | 1)
-    mask = (cv2.GaussianBlur(mask_u8, (k, k), 0).astype(np.float32) / 255.0)
-
-    # Re-anchor brightness: enhancers frequently lift the crop's mean, and a
-    # brighter patch with a soft edge is exactly what reads as "glossy".
-    try:
-        w = mask
-        wsum = float(w.sum())
-        if wsum > 32:
-            for c in range(3):
-                mc = float((crop[:, :, c].astype(np.float32) * w).sum() / wsum)
-                mr = float((restored[:, :, c].astype(np.float32) * w).sum() / wsum)
-                d = float(np.clip(mc - mr, -18.0, 18.0))
-                restored = restored.astype(np.float32)
-                restored[:, :, c] = np.clip(restored[:, :, c] + d, 0, 255)
-                restored = restored.astype(np.uint8)
-    except Exception:
-        pass
-
-    m3 = mask[..., None]
-    out[y1:y2, x1:x2] = (
-        restored.astype(np.float32) * m3 + out[y1:y2, x1:x2].astype(np.float32) * (1.0 - m3)
-    ).astype(np.uint8)
-    return out
-
 def _color_match_fast(swapped, original, bbox):
     x1,y1,x2,y2 = [max(0,int(v)) for v in bbox]
     x2,y2 = min(swapped.shape[1],x2), min(swapped.shape[0],y2)
@@ -1749,8 +1505,13 @@ def _profile_safe_composite(res, orig, face, alpha=1.0):
 _CM_STRENGTH = {"Fast": 0.70, "Balanced": 0.85, "Optimized": 0.90, "Best": 1.00, "Ultra": 1.00}
 
 
-def _swap_one(work, orig, face, src_face, quality, alpha=1.0):
-    """Swap and composite in ArcFace-aligned space (v11 'Aequus').
+def _swap_one(work, orig, face, src_face, quality, alpha=1.0, *,
+              rivals=None, frame_ord=0, post=None):
+    """Swap and composite in ArcFace-aligned space. Returns (image, cached).
+
+    ``cached`` reports whether the aligned crop was stored on the track, i.e.
+    whether later frames can reuse it instead of falling back to the original.
+
 
     Everything — the mask, the colour statistics, the temporal EMAs — is built
     inside the 128x128 aligned crop that inswapper produces internally. That
@@ -1767,13 +1528,11 @@ def _swap_one(work, orig, face, src_face, quality, alpha=1.0):
     back to the legacy image-space path so the app still works.
     """
     if face is None or src_face is None:
-        return work
-
-    _ROLL_STATE[0] = _face_roll_deg(face)
+        return work, False
 
     comp = _compositor()
     track = getattr(face, "_track", None)
-    guard = bool(getattr(face, "_occlusion_guard", False))
+    guard = float(getattr(face, "_occlusion_guard", 0.0) or 0.0)
     strength = _CM_STRENGTH.get(str(quality), 1.0)
 
     if comp is not None:
@@ -1782,13 +1541,46 @@ def _swap_one(work, orig, face, src_face, quality, alpha=1.0):
                 work, orig, face, src_face,
                 track=track, alpha=float(alpha),
                 colour_strength=strength, occlusion_guard=guard,
+                rivals=rivals, frame_ord=int(frame_ord), post=post,
             )
             if ok:
-                return out
+                return out, True
         except Exception as e:
             logging.debug("aligned compositor failed, falling back: %s", e)
 
-    return _swap_one_legacy(work, orig, face, src_face, quality, alpha=alpha)
+    return _swap_one_legacy(work, orig, face, src_face, quality, alpha=alpha), False
+
+
+def _reuse_one(work, orig, rec, quality, *, rivals=None, cached=None):
+    """Composite an already-computed aligned swap onto THIS frame.
+
+    Called for every output frame the swap network did not run on. Geometry,
+    mask, background and colour match all come from the current frame; only
+    the (expensive) aligned swap texture is reused.
+    """
+    comp = _compositor()
+    if comp is None or rec is None:
+        return work, False
+    track = rec.get("track")
+    if track is None:
+        return work, False
+    if cached is not None:
+        track.fake, track.fake_corr, track.fake_size = cached[0], cached[1], int(cached[0].shape[0])
+    if track.fake is None:
+        return work, False
+    face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], None, 0.5)
+    face._track = track
+    try:
+        return comp.reuse(
+            work, orig, rec["kps"], face,
+            track=track, alpha=float(rec["alpha"]),
+            colour_strength=_CM_STRENGTH.get(str(quality), 1.0),
+            occlusion_guard=float(rec.get("guard", 0.0) or 0.0),
+            rivals=rivals,
+        )
+    except Exception as e:
+        logging.debug("aligned reuse failed: %s", e)
+        return work, False
 
 
 def _swap_one_legacy(work, orig, face, src_face, quality, alpha=1.0):
@@ -1889,39 +1681,6 @@ def _pitch_score(face):
         return 0.4
 
 
-def _kps_look_like_visible_face(face) -> bool:
-    """Reject boxes whose 5-point landmarks are not a readable face
-    (hair clump, elbow, back of head, face leaving the frame)."""
-    kps = getattr(face, "kps", None)
-    if kps is None or len(kps) < 5:
-        return False
-    try:
-        le, re, nose, lm, rm = [np.asarray(kps[i], np.float32) for i in range(5)]
-        eye_dist = float(np.linalg.norm(le - re))
-        if eye_dist < 8.0:
-            return False
-        mid = (le + re) * 0.5
-        if float(nose[1]) < float(mid[1]) - 3.0:
-            return False
-        mouth_y = float((lm[1] + rm[1]) * 0.5)
-        if mouth_y < float(nose[1]) - 3.0:
-            return False
-        if abs(float(nose[0] - mid[0])) / (eye_dist + 1e-6) > 0.78:
-            return False
-        bb = getattr(face, "bbox", None)
-        if bb is not None:
-            x1, y1, x2, y2 = [float(v) for v in bb]
-            bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
-            if bw / bh > 2.15 or bh / bw > 2.40:
-                return False
-            for pt in (le, re, nose):
-                if pt[0] < x1 - 8 or pt[0] > x2 + 8 or pt[1] < y1 - 8 or pt[1] > y2 + 8:
-                    return False
-        return True
-    except Exception:
-        return False
-
-
 def _bbox_drift_too_far(curr_bb, anchor_bb, limit=0.58) -> bool:
     """True when the predicted box has slid off the last real face
     (shoulder / arm / torso). Lying-down faces that stay on the head
@@ -1995,6 +1754,34 @@ def _face_swap_allowed(f) -> bool:
     return True
 
 
+def _render_alpha(f, track):
+    """Composite opacity for one face, smoothed on the track.
+
+    Opacity used to be driven straight off det_score and the predicted-miss
+    counter, both of which move by several hundredths from frame to frame on a
+    profile turn. A face whose opacity walks between 0.70 and 1.00 and back is
+    literally the real face bleeding through and receding again several times a
+    second - reported as brightness flicker and as "the original face comes
+    back occasionally". The target is unchanged; only the trajectory to it is
+    now continuous.
+    """
+    target = 1.0
+    predicted = bool(getattr(f, "predicted", False))
+    if predicted and track is not None:
+        missed = int(getattr(track, "missed", 0) or 0)
+        budget = max(8, _predicted_miss_budget())
+        fade_start = max(4, budget // 3)
+        denom = max(1.0, float(budget - fade_start))
+        target = float(np.clip(1.0 - max(0, missed - fade_start) / denom, 0.70, 1.0))
+    else:
+        det = float(getattr(f, "det_score", 0.5) or 0.5)
+        if det < 0.26:
+            target = float(np.clip((det - 0.16) / 0.10, 0.70, 1.0))
+    if track is not None:
+        return float(track.smooth_alpha(target))
+    return target
+
+
 def _face_looks_marginal(f) -> bool:
     """True when a freshly detected face is small, low-confidence, or
     non-frontal enough that its detected region likely includes some
@@ -2020,71 +1807,8 @@ def _face_looks_marginal(f) -> bool:
         return False
 
 
-def _min_cost_assignment(cost):
-    import itertools
-    n = len(cost)
-    if n == 0: return []
-    m = len(cost[0])
-    if m == 0: return []
-    k = min(n, m)
-    best_cost, best = 1e18, None
-    for cols in itertools.permutations(range(m), k):
-        face_sets = [tuple(range(n))] if n <= m else list(itertools.combinations(range(n), k))
-        for faces_idx in face_sets:
-            total = 0.0
-            assign = []
-            for a, fi in enumerate(faces_idx):
-                sj = cols[a]
-                total += cost[fi][sj]
-                assign.append((fi, sj))
-            if total < best_cost:
-                best_cost, best = total, assign
-    return best or []
-
-
-# v10.9.3: persistent occlusion tracking
-# Keeps identity/bbox continuity across detector misses instead of relying on
-# frame/chunk-level hold/interpolation. Uncertain occlusion is rejected.
-class _PhoenixFaceTrack:
-    __slots__ = ("bbox", "embedding", "velocity", "confidence", "missed", "stable_frames", "last_area")
-    def __init__(self, bbox, embedding, confidence=1.0):
-        self.bbox = np.asarray(bbox, dtype=np.float32).copy()
-        self.embedding = (np.asarray(embedding, dtype=np.float32).copy()
-                          if embedding is not None else None)
-        self.velocity = np.zeros(4, dtype=np.float32)
-        self.confidence = float(confidence)
-        self.missed = 0
-        self.stable_frames = 1
-        self.last_area = float(max(1.0, (self.bbox[2]-self.bbox[0]) * (self.bbox[3]-self.bbox[1])))
-
-    def predict(self):
-        self.bbox = self.bbox + self.velocity
-        self.missed += 1
-        self.confidence *= 0.82
-        return self.bbox
-
-    def update(self, bbox, embedding=None, confidence=1.0, alpha=0.35, update_embedding=True):
-        b = np.asarray(bbox, dtype=np.float32)
-        old = self.bbox.copy()
-        smoothed = old * (1.0 - alpha) + b * alpha
-        self.velocity = self.velocity * 0.65 + (smoothed - old) * 0.35
-        self.bbox = smoothed
-        self.last_area = float(max(1.0, (b[2]-b[0]) * (b[3]-b[1])))
-        if update_embedding and embedding is not None:
-            e = np.asarray(embedding, dtype=np.float32)
-            n = np.linalg.norm(e) + 1e-6
-            e = e / n
-            if self.embedding is None:
-                self.embedding = e
-            else:
-                ee = self.embedding * 0.88 + e * 0.12
-                self.embedding = ee / (np.linalg.norm(ee) + 1e-6)
-        self.confidence = min(1.0, self.confidence * 0.65 + float(confidence) * 0.35)
-        self.missed = 0
-        self.stable_frames += 1
-
-
-def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None):
+def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
+                            dt_frames=1.0):
     """Associate detections to replacement slots via the v11 MultiFaceTracker.
 
     Replaces the old greedy slot-by-slot loop. Three properties matter here:
@@ -2113,7 +1837,7 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
             r = getattr(src, "normed_embedding", None)
         ref_map[j] = r
 
-    assigned = tracker.assign(list(faces or []), ref_map)
+    assigned = tracker.assign(list(faces or []), ref_map, dt_frames=dt_frames)
 
     pairs = []
     for slot in sorted(assigned.keys()):
@@ -2123,6 +1847,7 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
         tr = tracker.tracks.get(slot)
         try:
             f._track = tr
+            f._slot = slot
             # Phase 1: Add boundary confidence penalty to occlusion guard
             is_marginal = _face_looks_marginal(f)
             boundary_conf = 1.0
@@ -2135,17 +1860,33 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
             # Moderate profile alone must NOT trip the guard on single-face
             # (that over-trimmed and looked like flicker). is_marginal still
             # applies when tracks are crossing or multiple slots are live.
+            # n_live used to count tracker.tracks entries, which are created
+            # for every slot up front and are never None - so it was a constant
+            # equal to the slot count, and `multi_or_cross` was simply always
+            # True whenever more than one face was configured. Count tracks
+            # that are actually live.
             n_live = 0
             try:
-                n_live = sum(1 for _t in tracker.tracks.values() if _t is not None)
+                n_live = sum(1 for _t in tracker.tracks.values()
+                             if _t is not None and _t.established
+                             and int(getattr(_t, "missed", 0) or 0) <= 2)
             except Exception:
                 n_live = 0
             multi_or_cross = bool(tr is not None and tr.crossing) or n_live >= 2
-            f._occlusion_guard = bool(
-                (tr is not None and tr.crossing) or
-                (is_marginal and multi_or_cross) or
-                (boundary_conf < 0.75)
-            )
+
+            # Continuous, not boolean. A guard that snaps between 0 and 1
+            # changes the mask silhouette - and therefore the colour statistics
+            # weighted by that mask - in a single frame, so each toggle moved
+            # both the outline and the brightness. TrackState.ramp_occlusion()
+            # slews it instead.
+            want = 0.0
+            if tr is not None and tr.crossing:
+                want = max(want, 1.0)
+            if is_marginal and multi_or_cross:
+                want = max(want, 0.75)
+            if boundary_conf < 0.75:
+                want = max(want, float(np.clip((0.75 - boundary_conf) / 0.35, 0.0, 1.0)))
+            f._occlusion_guard = (tr.ramp_occlusion(want) if tr is not None else want)
         except Exception:
             pass
         if bool(getattr(f, "predicted", False)) and not _face_swap_allowed(f):
@@ -2156,7 +1897,7 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
     return pairs
 
 
-def _carry_pairs(tracker, smap, max_faces, advance=True):
+def _carry_pairs(tracker, smap, max_faces, advance=True, dt_frames=1.0):
     """Swap pairs for slots the detector did not see this frame.
 
     This is what replaces "fall back to the original frame". A single original
@@ -2171,7 +1912,7 @@ def _carry_pairs(tracker, smap, max_faces, advance=True):
         return []
     if advance:
         for tr in tracker.tracks.values():
-            tr.predict()
+            tr.predict(dt_frames)
     carried = tracker.carry(slots=set(smap.keys()))
     pairs = []
     for slot in sorted(carried.keys()):
@@ -2179,9 +1920,10 @@ def _carry_pairs(tracker, smap, max_faces, advance=True):
         tr = tracker.tracks.get(slot)
         try:
             pf._track = tr
-            pf._occlusion_guard = True
-        except Exception:
-            pass
+            pf._slot = slot
+            pf._occlusion_guard = tr.ramp_occlusion(0.85) if tr is not None else 0.85
+        except Exception as e:
+            logging.warning("could not tag carried face for slot %s: %s", slot, e)
         # Predicted geometry is only used for a 1-2 frame detector blink.
         # Longer gaps / looking-down / out-of-frame must NOT paste a face.
         if not _face_swap_allowed(pf):
@@ -2283,7 +2025,9 @@ def _pairs_for_frame(
                 continue
             cost[fi][si] = 0.50 * (1.0 - max(sim, -1.0)) + 0.44 * (1.0 - spatial) + 0.06 * (1.0 - spatial)
 
-    assign = _min_cost_assignment(cost)
+    # Same solver as the video tracker: exhaustive over column choices only,
+    # which visits each distinct assignment once instead of k! times over.
+    assign = sorted(_E.optimal_assignment(cost).items())
     pairs = []
     used_src, used_face = set(), set()
     for fi, si in assign:
@@ -2431,7 +2175,7 @@ def swap_image(target, s1, s2, s3, s4, quality, refs):
         if not faces: return None, "❌ No face detected"
         pairs = _pairs_for_frame(faces, smap, refs or [], frame_bgr=work)
         for f, src in pairs:
-            work = _swap_one(work, orig, f, src, quality)
+            work, _ = _swap_one(work, orig, f, src, quality)
         if quality in ("Best", "Ultra"):
             work = _enhance(work, "Soft polish (fast)")
         out = f"/tmp/image_swap_{uuid.uuid4().hex[:8]}.jpg"
@@ -2478,8 +2222,17 @@ def _run_job(jid, src_paths, vp, cfg):
     return _run_job_body(jid, src_paths, vp, cfg)
 
 
-def _face_region_ok(img, bbox, min_std=6.0):
-    """Reject flat / corrupted / solid patches."""
+def _face_region_ok(img, bbox, min_std=6.0, reference=None):
+    """Reject flat / corrupted / solid patches.
+
+    ``reference`` is the pre-swap frame. Judging the result against an ABSOLUTE
+    std floor punishes legitimately low-detail regions - a motion-blurred face
+    during exactly the rapid movement this build is meant to handle, a soft
+    shallow-depth-of-field shot, a face in deep shadow - and every rejection
+    drops that face back to the original for one frame. Comparing against the
+    source region instead only rejects output that is degenerate RELATIVE to
+    what was there before, which is the actual failure this guards against.
+    """
     try:
         x1, y1, x2, y2 = [int(v) for v in bbox]
         x1, y1 = max(0, x1), max(0, y1)
@@ -2488,6 +2241,9 @@ def _face_region_ok(img, bbox, min_std=6.0):
         roi = img[y1:y2, x1:x2]
         std = float(np.std(roi))
         mean = float(np.mean(roi))
+        if reference is not None and reference.shape[:2] == img.shape[:2]:
+            ref_std = float(np.std(reference[y1:y2, x1:x2]))
+            return std >= max(2.0, min(float(min_std), ref_std * 0.35))
         if std < min_std: return False
         # v11: the old "brown patch" heuristic that used to live here (reject any
         # ROI whose channel means looked warm and flat) was a downstream band-aid
@@ -2592,7 +2348,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             "detector_calls": 0, "tracker_hits": 0, "gfpgan_calls": 0,
             "swap_calls": 0, "swap_skips": 0, "frames_in": 0, "frames_out": 0,
             "det_times": [], "swap_times": [],
-            "fill_times": [], "frames_filled": 0,
+            "frames_filled": 0,
             "encode_seconds": 0.0, "processing_seconds": 0.0,
         }
 
@@ -2602,7 +2358,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
         _last_gray_full = [None]
         _last_motion_class = ["MEDIUM"]
         _face_ema = []
-        _last_swapped = [None]
         _last_swap_bboxes = []
         # Previous bbox for each replacement slot. Never infer slot identity from
         # detector ordering because detector order changes during crossings.
@@ -2611,6 +2366,45 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # colour EMA. Predictions ARE rendered now — carrying a swap through a
         # detector gap looks far better than blinking back to the original face.
         _tracker = _E.MultiFaceTracker(sorted(smap.keys()))
+        # ---- continuous-composite state (persists across chunk boundaries) --
+        # Chunk boundaries used to be visible: everything after a chunk's last
+        # key frame had no following key frame to interpolate toward, so it fell
+        # through every guard and emitted the untouched original frame - four
+        # consecutive real-face frames roughly every five seconds, plus the
+        # same at the head of each chunk. Geometry and aligned-swap history now
+        # span chunks, and any frame that is not yet bracketed is deferred to
+        # the next chunk instead of being emitted unswapped.
+        _geom_hist = {j: [] for j in smap.keys()}      # slot -> [(g, record)]
+        _aligned_hist = {j: [] for j in smap.keys()}   # slot -> [(g, fake, corr)]
+        _pending_tail = []                             # [(g, frame)] not yet emittable
+        _det_dt = [1.0]                                # frames since the last detection
+        _last_det_frame = [-1]
+        # Per identity slot: did the most recent detector probe actually see
+        # this face? Tracked per slot, not per frame - in a two-person shot one
+        # face can be plainly visible while the other is behind a shoulder, and
+        # refreshing the hidden one's crop from a guessed position is exactly
+        # what puts a shoulder into its colour statistics.
+        _seen_ok = {j: True for j in smap.keys()}
+        _legacy_mode = [False]   # inswapper build exposes no affine
+
+        def _record_geometry(pairs, g):
+            """Snapshot, per identity slot, the geometry key frame ``g`` will
+            be rendered with. Bound to the frame here rather than read off the
+            shared tracker at swap time - by then the detection pass has
+            already advanced every track to the end of the chunk."""
+            for f, src in (pairs or []):
+                slot = getattr(f, "_slot", None)
+                if slot is None or slot not in _geom_hist:
+                    continue
+                tr = getattr(f, "_track", None)
+                rec = _geom_record(
+                    f, tr,
+                    _render_alpha(f, tr),
+                    float(getattr(f, "_occlusion_guard", 0.0) or 0.0),
+                    src,
+                )
+                if rec is not None:
+                    _geom_hist[slot].append((int(g), rec))
 
         _startup_emb_buf = []
         _locked_emb = [None]
@@ -2716,7 +2510,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         fi = produced = keys_done = 0
         _adaptive_last_swap_g = [-10**9]
-        _adaptive_last_det_key_ord = [-10**9]
+        _adaptive_last_det_frame = [-10**9]
         # Release-audited progress model:
         #   0-12  startup / model loading
         #  12-30  face analysis
@@ -2863,8 +2657,14 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         ex = ThreadPoolExecutor(max_workers=workers)
 
-        while produced < lim and not eof:
-            cframes, gidx = [], []
+        # `or _pending_tail`: frames deferred from the previous chunk were
+        # already counted in `produced`, so once `produced` reaches `lim` the
+        # loop would otherwise exit with them still unemitted - silently
+        # truncating the output by up to skip_n-1 frames.
+        while (produced < lim or _pending_tail) and not eof:
+            cframes = [f for _g, f in _pending_tail]
+            gidx = [_g for _g, _f in _pending_tail]
+            _pending_tail = []
             while len(cframes) < chunk_n and produced < lim:
                 if _cxl(): raise _CancelledJob()
                 try: item = frame_q.get(timeout=8.0)
@@ -2884,10 +2684,14 @@ def _run_job_body(jid, src_paths, vp, cfg):
             results = {}
 
             key_indices = [k for k in range(n) if keyf[k]]
-            key_faces_map = {}
-            key_pairs_map = {}
-            key_bbox_map = {}
             key_motion_map = {}
+            # Whether the detector can currently SEE this face. Only then may
+            # the cached aligned crop be refreshed: during a genuine occlusion
+            # the tracker still supplies plausible geometry, but a crop cut
+            # there is a crop of whatever is covering the face, and the colour
+            # match then locks onto that. Re-projecting the last crop taken
+            # while the face was visible is the right thing to keep doing.
+            key_swap_ok = {}
             prev_primary_bbox = _last_swap_bboxes[0] if _last_swap_bboxes else None
             prev_kps_state = [None]
             prev_bbox_state = [prev_primary_bbox]
@@ -2910,7 +2714,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             initial_force_until = max(3, int(round(out_fps * 1.5)))
             last_pairs_ref = [None]
             last_bboxes_ref = [list(_last_swap_bboxes) if _last_swap_bboxes else []]
-            last_det_g = _adaptive_last_det_key_ord
+            last_det_g = _adaptive_last_det_frame
             last_swap_g = _adaptive_last_swap_g
 
             for key_ord, k in enumerate(key_indices):
@@ -2927,7 +2731,10 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 # Schedule detection in KEY-FRAME space (not output-frame index).
                 # Static scenes may hold longer; motion keeps det_mult=1.
                 det_mult = {"STATIC": 2, "LOW": 1, "MEDIUM": 1, "HIGH": 1}.get(mclass, 1)
-                det_due = (key_ord == 0 or (key_ord - int(max(0, last_det_g[0]))) >= det_n_val * det_mult)
+                # Scheduled in OUTPUT-FRAME space. It used to compare `key_ord`,
+                # which is an index within the current chunk and restarts at 0
+                # at every chunk boundary, so the cadence silently reset there.
+                det_due = (g - last_det_g[0]) >= det_n_val * det_mult * max(1, skip_n)
                 need_det = force_initial or det_due or (last_pairs_ref[0] is None)
 
                 if need_det:
@@ -2940,6 +2747,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     raw_faces = _fa.get(det_frm)
                     faces = _scale_faces(raw_faces, sx, sy) if raw_faces else []
                     faces = sorted(faces, key=lambda f: f.bbox[0])
+                    # Frames elapsed since the previous detection. Velocity and
+                    # the One-Euro filter are both expressed per OUTPUT frame,
+                    # so they need the real interval, not an assumed 1.
+                    _det_dt[0] = float(max(1, g - _last_det_frame[0])) if _last_det_frame[0] >= 0 else 1.0
+                    _last_det_frame[0] = g
 
                     # Adaptive high-resolution probe. Do NOT wait for total face
                     # loss: small or low-confidence faces are exactly the cases where
@@ -2991,23 +2803,23 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     faces, _face_ema = _smooth_faces(faces, _face_ema)
                     stats["detector_calls"] += 1
                     stats["det_times"].append((time.perf_counter() - t_det0) * 1000)
-                    last_det_g[0] = key_ord
+                    last_det_g[0] = g
 
                     if not faces:
                         _no_face_streak[0] += 1
-                        key_faces_map[k] = []
                         # v11: a detector miss is not a reason to show the real
                         # face again. Carry the tracked geometry for a bounded
                         # number of frames so the swap rides through the gap.
-                        _tracker.assign([], {})   # advances every track once
+                        # Advance every track by the frames actually elapsed.
+                        _tracker.assign([], {}, dt_frames=_det_dt[0])
                         carried = _carry_pairs(_tracker, smap, max_faces,
                                                advance=False)
-                        key_pairs_map[k] = carried
+                        _record_geometry(carried, g)
+                        for _j in _seen_ok:
+                            _seen_ok[_j] = False
+                        key_swap_ok[k] = dict(_seen_ok)
                         if carried:
-                            key_bbox_map[k] = carried[0][0].bbox.astype(np.float32).copy()
                             last_pairs_ref[0] = carried
-                        elif last_bboxes_ref[0]:
-                            key_bbox_map[k] = np.asarray(last_bboxes_ref[0][0], dtype=np.float32).copy()
                         # Detection itself is visible as a heartbeat, so a slow
                         # first chunk does not look frozen.
                         det_done = min(lim, max(0, g + 1))
@@ -3018,7 +2830,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     if multi_face_safe:
                         pairs = _persistent_track_pairs(
                             faces, smap, refs, _tracker, max_faces,
-                            frame_shape=frm.shape if frm is not None else None
+                            frame_shape=frm.shape if frm is not None else None,
+                            dt_frames=_det_dt[0],
                         )
                     else:
                         pairs = _pairs_for_frame(
@@ -3036,9 +2849,10 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         for _pf, _psrc in pairs:
                             for _sj, _sface in smap.items():
                                 if _psrc is _sface:
-                                    _tr = _tracker.bind(_sj, _pf)
+                                    _tr = _tracker.bind(_sj, _pf, dt_frames=_det_dt[0])
                                     try:
                                         _pf._track = _tr
+                                        _pf._slot = _sj
                                         # FIX (debug session): single-face path previously
                                         # hardcoded _occlusion_guard=False unconditionally,
                                         # which meant a face partially outside the frame
@@ -3059,7 +2873,10 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                                 )
                                             except Exception:
                                                 _boundary_conf = 1.0
-                                        _pf._occlusion_guard = bool(_boundary_conf < 0.75)
+                                        _want = float(np.clip((0.75 - _boundary_conf) / 0.35, 0.0, 1.0))
+                                        _pf._occlusion_guard = (
+                                            _tr.ramp_occlusion(_want) if _tr is not None else _want
+                                        )
                                     except Exception:
                                         pass
                                     break
@@ -3112,40 +2929,61 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _last_swap_bboxes.append(bb.copy())
                             last_bboxes_ref[0] = list(_last_swap_bboxes)
 
-                    key_faces_map[k] = faces
                     if not pairs:
                         # Detector saw a head-turn/partial and pairing dropped
                         # the identity match. Carry the last locked slot so
                         # the original face does not flash through.
                         pairs = _carry_pairs(_tracker, smap, max_faces, advance=False)
-                    key_pairs_map[k] = pairs or []
+                    _record_geometry(pairs or [], g)
+                    # A pair that comes back predicted means the detector ran
+                    # and this identity was not among what it found.
+                    for _j in _seen_ok:
+                        _seen_ok[_j] = False
+                    for _f, _ in (pairs or []):
+                        _j = getattr(_f, "_slot", None)
+                        if _j in _seen_ok and not bool(getattr(_f, "predicted", False)):
+                            _seen_ok[_j] = True
+                    key_swap_ok[k] = dict(_seen_ok)
                     if pairs:
-                        key_bbox_map[k] = pairs[0][0].bbox.astype(np.float32).copy()
                         last_pairs_ref[0] = pairs
                     det_done = min(lim, max(0, g + 1))
                     _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
                 else:
                     stats["tracker_hits"] += 1
-                    key_faces_map[k] = []
                     # Detector deliberately skipped this key frame. Predict every
                     # slot forward and swap the predicted geometry — this is the
                     # difference between a continuous swap and one that pulses in
                     # time with the detection interval.
-                    carried = _carry_pairs(_tracker, smap, max_faces)
-                    key_pairs_map[k] = carried
-                    if carried:
-                        key_bbox_map[k] = carried[0][0].bbox.astype(np.float32).copy()
-                    elif last_bboxes_ref[0]:
-                        key_bbox_map[k] = np.asarray(last_bboxes_ref[0][0], dtype=np.float32).copy()
+                    carried = _carry_pairs(_tracker, smap, max_faces,
+                                           dt_frames=float(max(1, skip_n)))
+                    _record_geometry(carried, g)
+                    # Detector deliberately skipped: its most recent verdict on
+                    # whether each face is visible still stands.
+                    key_swap_ok[k] = dict(_seen_ok)
 
-            # Phase 2 — Parallel swap execution
-            # Select actual AI swap frames adaptively.  Detection/tracking can run
-            # on sparse key frames, but Inswapper is much more expensive.  Stable
-            # scenes get a longer interval; high motion gets the base interval.
+            # One-sided hold: only long enough to bridge to the next key frame.
+            # The tracker's own carry budget already decides how long a lost
+            # face may be predicted for; stacking a further ~0.8 s of held
+            # geometry on top of it is how a face ends up painted on a body
+            # after its owner has left the shot.
+            taper = int(max(3, min(2 * max(1, skip_n), 12)))
+
+            def _records_at(g):
+                """Every slot's geometry for output frame ``g``."""
+                out = {}
+                for slot in sorted(smap.keys()):
+                    rec = _geom_for_frame(_geom_hist.get(slot) or [], g, taper)
+                    if rec is not None:
+                        out[slot] = rec
+                return out
+
+            # Phase 2 — swap-network scheduling. Detection and tracking can run
+            # on sparse key frames; the ONNX forward pass is far more expensive
+            # still, so it gets its own, motion-adaptive interval on top.
             selected = []
             for k in key_indices:
-                pairs = key_pairs_map.get(k) or []
-                if not pairs:
+                visible = key_swap_ok.get(k) or {}
+                if not any(visible.get(sl) for sl in _records_at(gidx[k])):
                     continue
                 mclass = key_motion_map.get(k, "MEDIUM")
                 gap = _adaptive_swap_gap(skip_n, mclass, quality)
@@ -3155,211 +2993,149 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     last_swap_g[0] = g
             key_indices_for_swap = selected
 
-            def work(k):
+            # ---------------------------------------------------------------
+            # Phase 2a (parallel) — run ONLY the swap network on the selected
+            # key frames and keep each identity's 128x128 aligned result.
+            #
+            # Compositing is deliberately NOT done here. The aligned crop is the
+            # expensive part; placement, masking, background and colour match
+            # are cheap, frame-specific, and must happen in strict frame order
+            # so the mask and colour EMAs advance monotonically in time. Doing
+            # them inside out-of-order workers is what let a frame be toned by
+            # statistics belonging to a frame several tenths of a second away.
+            # ---------------------------------------------------------------
+            enh = cfg.get("enhancer") or "None"
+            enh_scope = (cfg.get("enhance_scope") or "primary").lower()
+            enh_all = enh_scope.startswith("all")
+
+            def _aligned_post(is_primary):
+                """Enhancer applied ONCE, to the aligned crop.
+
+                Running an enhancer on the output frame meant only frames the
+                swapper ran on were enhanced, so enhanced and unenhanced frames
+                alternated at the swap cadence - the face pulsing in texture and
+                tone several times a second. Enhancing the cached aligned crop
+                means every frame that reuses it is enhanced identically, at a
+                fraction of the cost (128x128 instead of a padded face ROI).
+                """
+                if not enh or enh == "None":
+                    return None
+                if not (enh_all or is_primary):
+                    return None
+
+                def _post(crop):
+                    try:
+                        if _is_soft_polish(enh):
+                            return _soft_polish(crop, enh)
+                        big = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_CUBIC)
+                        out = _enhance(big, enh)
+                        if out is None:
+                            return None
+                        stats["gfpgan_calls"] += 1
+                        return cv2.resize(out, (crop.shape[1], crop.shape[0]),
+                                          interpolation=cv2.INTER_AREA)
+                    except Exception as e:
+                        logging.debug("aligned enhancer skipped: %s", e)
+                        return None
+                return _post
+
+            def swap_frame(k):
+                """Produce the aligned swap crop for every slot on key frame k.
+
+                Geometry comes from the SAME interpolated timeline the emission
+                pass will use, not from whatever the tracker happened to be
+                holding. Two reasons that matters:
+
+                  * between two real detections, interpolation is exact for any
+                    motion the tracker can model, while the tracker's own
+                    forward prediction trails the subject - so a crop cut at
+                    predicted keypoints is cut slightly off the face, and that
+                    offset is then baked into every frame that reuses it;
+                  * the crop and the composite that re-projects it are then
+                    described by one and the same geometry, so the hand-over
+                    between a freshly swapped frame and a reused one is exact.
+                """
                 frm = cframes[k]
-                pairs = key_pairs_map.get(k) or []
-                curr_bb = key_bbox_map.get(k)
-
-                if not pairs:
-                    # Prefer hold / soft crossfade over raw original (v11.0.1).
-                    stats["swap_skips"] += 1
-                    held = None
-                    try:
-                        bbs = []
-                        if curr_bb is not None:
-                            # curr_bb may be a single box or a list of boxes
-                            if isinstance(curr_bb, (list, tuple)) and curr_bb and hasattr(curr_bb[0], '__len__') and not isinstance(curr_bb[0], (float, int)):
-                                bbs = list(curr_bb)
-                            else:
-                                bbs = [curr_bb]
-                        elif last_bboxes_ref[0]:
-                            bbs = list(last_bboxes_ref[0])
-                        if len(bbs) >= 2:
-                            held = _safe_hold_multi(frm, bbs)
-                        elif bbs:
-                            held = _safe_hold_same_person(frm, bbs[0])
-                        if held is None:
-                            prev = _last_swapped[0]
-                            if prev is not None and prev.shape[:2] == frm.shape[:2]:
-                                # Soft crossfade last swapped frame (keep identity).
-                                held = cv2.addWeighted(frm, 0.18, prev, 0.82, 0)
-                    except Exception:
-                        held = None
-                    return k, (held if held is not None else frm.copy())
-
+                records = _records_at(gidx[k])
+                if not records:
+                    return k, []
                 t_swap0 = time.perf_counter()
-                # Fast always aliases. Optimized single-face is safe too: colour
-                # match reads orig before paste mutates work. Multi-face needs a
-                # stable pre-swap orig for later faces in painter order.
-                if quality == "Fast" or (quality == "Optimized" and len(pairs) <= 1):
-                    orig = frm
-                else:
-                    orig = frm.copy()
-                out = frm
 
-                seen_src = set()
-                clean = []
-                for f, src in pairs:
-                    sid = id(src)
-                    if sid in seen_src: continue
-                    seen_src.add(sid)
-                    clean.append((f, src))
-                pairs = clean
-                if not pairs:
-                    # After dedupe emptied pairs — same soft hold path.
-                    held = None
-                    try:
-                        bb = curr_bb if curr_bb is not None else (last_bboxes_ref[0][0] if last_bboxes_ref[0] else None)
-                        if bb is not None:
-                            held = _safe_hold_same_person(frm, bb)
-                        if held is None:
-                            prev = _last_swapped[0]
-                            if prev is not None and prev.shape[:2] == frm.shape[:2]:
-                                held = cv2.addWeighted(frm, 0.18, prev, 0.82, 0)
-                    except Exception:
-                        held = None
-                    return k, (held if held is not None else frm.copy())
-
-                primary_bbox = pairs[0][0].bbox
-                swapped_any = False
-
-                def _det(f):
-                    return float(getattr(f, "det_score", 0.5) or 0.5)
-
-                def _bb_area(f):
-                    b = f.bbox
+                # Largest face is the "primary" for enhancer scope.
+                def _area_of(rec):
+                    b = rec["bbox"]
                     return float(max(1.0, (b[2] - b[0]) * (b[3] - b[1])))
+                primary_slot = max(records, key=lambda sl: _area_of(records[sl]))
 
-                # Painter's order: smallest/furthest face first, nearest last.
-                # During a kiss the two crops overlap, so whoever is painted last
-                # wins the contested pixels. Nearest-last is the physically
-                # correct occlusion order and stops the further person's
-                # replacement from bleeding over the nearer one's cheek.
-                ordered = sorted(pairs, key=lambda fs: _bb_area(fs[0]))
-
-                for f, src in ordered:
-                    det = _det(f)
-                    predicted = bool(getattr(f, "predicted", False))
-                    tr = getattr(f, "_track", None)
-
-                    # Drift gate only for predicted boxes. Live lying-down
-                    # detections must keep swapping or the face flickers
-                    # back to original.
-                    if predicted and not _face_swap_allowed(f):
-                        stats["swap_skips"] += 1
+                comp = _compositor()
+                visible = key_swap_ok.get(k) or {}
+                produced_crops = []
+                seen_src = set()
+                for slot, rec in records.items():
+                    # Only refresh a crop for a face the detector can currently
+                    # see. A crop cut at a guessed position during an occlusion
+                    # is a crop of whatever is covering the face.
+                    if not visible.get(slot):
                         continue
-
-                    alpha = 1.0
-                    if predicted and tr is not None:
-                        missed = int(getattr(tr, "missed", 0) or 0)
-                        # Prefer alpha fade over hard reject through the full
-                        # miss budget (aligned with trk_max_missed). Keep a
-                        # strong hold early; taper gently toward the end.
-                        budget = max(8, _predicted_miss_budget())
-                        fade_start = max(4, budget // 3)
-                        denom = max(1.0, float(budget - fade_start))
-                        # SoftStable: floor 0.70–0.75 (was 0.55). Do NOT raise to ProStable 0.88.
-                        alpha *= float(np.clip(1.0 - max(0, missed - fade_start) / denom, 0.70, 1.0))
-                    elif det < 0.26:
-                        alpha *= float(np.clip((det - 0.16) / 0.10, 0.70, 1.0))
-
-                    # Overlap with another tracked face (hug / kiss). Rather than
-                    # dropping the face, turn on the occlusion guard so the
-                    # compositor's skin-confidence term trims whatever is not
-                    # this person's skin out of the aligned crop.
-                    for other, _o in pairs:
-                        if other is f:
+                    src = rec.get("src")
+                    if src is None or id(src) in seen_src:
+                        continue
+                    seen_src.add(id(src))
+                    face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], None, 0.5)
+                    # Every crop is cut from the UNMODIFIED frame, so one
+                    # person's swap can never be fed into the next person's
+                    # alignment. Overlap between two faces in contact is
+                    # resolved at composite time, by paint order and by the
+                    # rival-hull cut, where the geometry to do it properly is
+                    # actually available.
+                    try:
+                        fake, M = comp._raw_swap(frm, face, src) if comp is not None else (None, None)
+                    except Exception as e:
+                        logging.debug("swap failed on slot %s: %s", slot, e)
+                        fake, M = None, None
+                    stats["swap_calls"] += 1
+                    if fake is None or M is None:
+                        if M is None:
+                            _legacy_mode[0] = True
+                        continue
+                    # Degenerate output (a solid or near-solid patch) is a
+                    # property of the CROP, so test it once here rather than
+                    # re-testing the composited frame every time the crop is
+                    # reused - and judge it against the region it replaces, not
+                    # an absolute floor. An absolute floor rejected legitimately
+                    # low-detail faces: motion blur during exactly the fast
+                    # movement this build has to handle, shallow depth of field,
+                    # deep shadow. Every rejection put the real face back for a
+                    # frame, converting a non-problem into a visible flick.
+                    try:
+                        tgt = cv2.warpAffine(frm, M, (fake.shape[1], fake.shape[0]),
+                                             borderMode=cv2.BORDER_REPLICATE)
+                        if not _face_region_ok(fake, (0, 0, fake.shape[1], fake.shape[0]),
+                                               reference=tgt):
+                            stats["swap_skips"] += 1
                             continue
-                        if _bbox_iou(f.bbox, other.bbox) >= 0.16:
-                            try:
-                                f._occlusion_guard = True
-                            except Exception:
-                                pass
-                            break
-
-                    if alpha <= 0.02:
-                        continue
-
-                    # FIX (debug session): on a freshly-detected frame, `f` still
-                    # carries the RAW detector bbox/kps. The tracker's One-Euro
-                    # filtered geometry (tr.kps/tr.bbox) is computed every frame
-                    # in TrackState.update() but was previously only ever used
-                    # via predicted_face() on frames the detector skipped. That
-                    # meant rendering alternated between raw (detected) and
-                    # smoothed (predicted) geometry from frame to frame — the
-                    # direct cause of the swap appearing to "move"/wobble even
-                    # on an otherwise still face. Use the same smoothed geometry
-                    # for both cases so every rendered frame comes from one
-                    # continuous filter. Association/gating logic above this
-                    # point already ran on the true raw detection, so drift/
-                    # confidence checks are unaffected — only the final paste
-                    # geometry changes.
-                    if not predicted and tr is not None and getattr(tr, "kps", None) is not None:
+                    except Exception:
+                        pass
+                    post = _aligned_post(slot == primary_slot)
+                    if post is not None:
                         try:
-                            f.bbox = np.asarray(tr.bbox, np.float32).copy()
-                            f.kps = np.asarray(tr.kps, np.float32).copy()
-                            if getattr(tr, "lmk", None) is not None:
-                                f.landmark_2d_106 = np.asarray(tr.lmk, np.float32).copy()
+                            pf = post(fake)
+                            if pf is not None and pf.shape == fake.shape:
+                                fake = pf
                         except Exception:
                             pass
-
-                    trial = _swap_one(out, orig, f, src, quality, alpha=alpha)
-                    stats["swap_calls"] += 1
-                    if trial is None:
-                        continue
-                    if not _face_region_ok(trial, f.bbox):
-                        # Degenerate output (solid/black patch). Skip this face
-                        # only; keep whatever the other faces contributed.
-                        stats["swap_skips"] += 1
-                        continue
-                    out = trial
-                    swapped_any = True
-
-                if not swapped_any:
-                    # Swap failed / all faces gated — hold or soft-fade, never
-                    # hard-cut to the original face when a prior swap exists.
-                    stats["swap_skips"] += 1
-                    held = None
-                    try:
-                        bb = primary_bbox if primary_bbox is not None else curr_bb
-                        if bb is not None:
-                            held = _safe_hold_same_person(frm, bb)
-                        if held is None and last_bboxes_ref[0] and len(last_bboxes_ref[0]) >= 2:
-                            held = _safe_hold_multi(frm, last_bboxes_ref[0])
-                        if held is None:
-                            prev = _last_swapped[0]
-                            if prev is not None and prev.shape[:2] == frm.shape[:2]:
-                                held = cv2.addWeighted(frm, 0.18, prev, 0.82, 0)
-                    except Exception:
-                        held = None
-                    return k, (held if held is not None else frm.copy())
-
-                enh = cfg.get("enhancer") or "None"
-                enh_scope = (cfg.get("enhance_scope") or "primary").lower()
-                if enh and enh != "None":
-                    primary_h = int(primary_bbox[3] - primary_bbox[1])
-                    min_h = 40 if _is_soft_polish(enh) else 80
-                    if primary_h > min_h:
-                        if _is_soft_polish(enh) or not enh_scope.startswith("all"):
-                            out = _enhance_primary_only(out, primary_bbox, enh)
-                        else:
-                            out = _enhance(out, enh)
-                        if not _is_soft_polish(enh):
-                            stats["gfpgan_calls"] += 1
+                    corr = _E.aligned_correction(rec["kps"], M, int(fake.shape[0]))
+                    produced_crops.append((slot, fake, corr))
 
                 stats["swap_times"].append((time.perf_counter() - t_swap0) * 1000)
-                return k, out
+                return k, produced_crops
 
             todo = list(key_indices_for_swap)
             # No-face / no-pair keys still count toward progress (audit NSDOS-012).
-            # Update immediately so the UI does not appear frozen during detection.
             keys_done += max(0, len(key_indices) - len(todo))
             _tick()
 
-            # Collect completed workers as they finish rather than waiting for
-            # futures in submission order. A slow first frame previously blocked
-            # all progress/ETA updates even when later frames had completed.
-            pending = {ex.submit(work, k) for k in todo}
+            pending = {ex.submit(swap_frame, k) for k in todo}
             while pending:
                 if _cxl():
                     for fut in pending:
@@ -3368,21 +3144,20 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     raise _CancelledJob()
                 done_futs, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
                 if not done_futs:
-                    # Keep the job heartbeat/progress UI alive during long swaps.
                     _tick()
                     continue
                 for fut in done_futs:
                     try:
-                        k, r = fut.result()
-                        if r is not None:
-                            results[k] = r
-                            _last_swapped[0] = r
+                        k, crops = fut.result()
+                        for slot, fake, corr in crops:
+                            if slot in _aligned_hist:
+                                _aligned_hist[slot].append((int(gidx[k]), fake, corr))
                     except Exception as e:
                         logging.warning("swap worker failed: %s", e)
                     keys_done += 1
                     _tick()
-
-            key_pos = sorted(results.keys())
+            for slot in _aligned_hist:
+                _aligned_hist[slot].sort(key=lambda t: t[0])
 
             def _safe_result_put(item):
                 while True:
@@ -3396,29 +3171,126 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             return False
                         continue
 
+            # ---------------------------------------------------------------
+            # Phase 2b (sequential, strict frame order) — composite every
+            # output frame.
+            #
+            # This is the change that removes the flicker family. Previously
+            # only key frames were composited and the frames between them were
+            # filled by copying a face ROI out of a neighbouring frame, cross-
+            # fading two whole frames, or - in several branches - emitting the
+            # untouched original. Now every frame gets a real composite: the
+            # aligned swap texture is reused, but the placement, the mask, the
+            # background and the colour match are this frame's own. The face
+            # therefore tracks the head continuously through fast movement,
+            # never carries a neighbouring frame's exposure, and the original
+            # face is never re-exposed mid-shot.
+            # ---------------------------------------------------------------
+            emit_upto = n - 1
+            # No more input can arrive, so nothing is left to bracket toward:
+            # emit everything now instead of deferring it forever.
+            if not (eof or produced >= lim):
+                last_key_g = max((gidx[k] for k in key_indices), default=None)
+                if last_key_g is not None:
+                    # Frames past the last key frame have nothing to interpolate
+                    # toward yet. Hand them to the next chunk rather than
+                    # guessing - guessing here is what produced the periodic
+                    # original-face flash at every chunk boundary.
+                    emit_upto = max(-1, max((k for k in range(n) if gidx[k] <= last_key_g),
+                                            default=-1))
+                    _pending_tail = [(gidx[k], cframes[k]) for k in range(emit_upto + 1, n)]
+
+            def _nearest_aligned(slot, g):
+                hist = _aligned_hist.get(slot) or []
+                if not hist:
+                    return None
+                best, bd = None, None
+                for gi, fake, corr in hist:
+                    d = abs(gi - g)
+                    if bd is None or d < bd:
+                        best, bd = (fake, corr), d
+                return best
+
+            swap_keys = set(key_indices_for_swap)
             writer_ok = True
-            for k in range(n):
+            for k in range(emit_upto + 1):
                 if not writer_ok: break
-                r = results.get(k)
-                if r is not None:
-                    writer_ok = _safe_result_put(r)
+                if _cxl(): raise _CancelledJob()
+                g = gidx[k]
+                frm = cframes[k]
+
+                records = _records_at(g)
+                if not records:
+                    # Genuinely nothing tracked here (before the first face
+                    # appears, or long after the last one left).
+                    writer_ok = _safe_result_put(frm)
                     if writer_ok: stats["frames_out"] += 1
                     continue
 
-                # v11: multi-face frames are temporally filled like every other
-                # frame. Dropping to the original frame here was safe against
-                # cross-person contamination but produced a visible one-frame
-                # flash of the real face on every uncertain frame -- the single
-                # most noticeable artefact in a couple/hug scene. Identity
-                # safety is now enforced upstream by the tracker's crossing lock
-                # and the compositor's occlusion guard, so this fallback no
-                # longer has to be so blunt.
-                _fill_t0 = time.perf_counter()
-                frame = _temporal_fill_frame(cframes[k], results, key_pos, key_bbox_map, k)
-                stats["fill_times"].append((time.perf_counter() - _fill_t0) * 1000)
-                stats["frames_filled"] += 1
-                writer_ok = _safe_result_put(frame)
+                orig = frm
+                out = frm.copy()
+                # Painter's order: furthest (smallest) first, nearest last, so
+                # the nearer person wins the contested pixels where two faces
+                # touch.
+                order = sorted(records.keys(),
+                               key=lambda sl: float((records[sl]["bbox"][2] - records[sl]["bbox"][0]) *
+                                                    (records[sl]["bbox"][3] - records[sl]["bbox"][1])))
+                any_ok = False
+                for slot in order:
+                    rec = records[slot]
+                    rivals = _rival_landmarks(records, slot)
+                    cached = _nearest_aligned(slot, g)
+                    if cached is not None:
+                        trial, ok = _reuse_one(out, orig, rec, quality,
+                                               rivals=rivals, cached=cached)
+                    elif _legacy_mode[0]:
+                        # This inswapper build does not expose its affine, so no
+                        # aligned result can be cached or re-projected. Run the
+                        # legacy image-space swap on THIS frame directly:
+                        # slower, but still every frame, so the artefact profile
+                        # does not regress to "some frames show the real face".
+                        face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], None, 0.5)
+                        trial = _swap_one_legacy(out, orig, face, rec["src"], quality,
+                                                 alpha=rec["alpha"])
+                        ok = trial is not None
+                    else:
+                        trial, ok = None, False
+                    if not ok or trial is None:
+                        continue
+                    out = trial
+                    any_ok = True
+
+                if not any_ok:
+                    stats["swap_skips"] += 1
+                    out = frm
+                elif k not in swap_keys:
+                    stats["frames_filled"] += 1
+
+                writer_ok = _safe_result_put(out)
                 if writer_ok: stats["frames_out"] += 1
+
+                # Drop aligned crops that no later frame can still be nearest
+                # to, so peak memory stays a few crops rather than one per
+                # swapped frame in the chunk.
+                horizon = g - 2 * max(1, skip_n)
+                for _sl, _h in _aligned_hist.items():
+                    if len(_h) > 2:
+                        _aligned_hist[_sl] = [e for e in _h if e[0] >= horizon] or _h[-1:]
+
+            # Trim history: keep the last anchor on each side of the boundary so
+            # the next chunk's leading frames are still bracketed.
+            keep_from = None
+            if _pending_tail:
+                keep_from = _pending_tail[0][0]
+            elif gidx:
+                keep_from = gidx[-1]
+            if keep_from is not None:
+                for slot in _geom_hist:
+                    h = _geom_hist[slot]
+                    idx = max((i for i, (gi, _r) in enumerate(h) if gi <= keep_from), default=None)
+                    _geom_hist[slot] = h[idx:] if idx is not None else h[-1:]
+                for slot in _aligned_hist:
+                    _aligned_hist[slot] = (_aligned_hist[slot] or [])[-1:]
 
             if not writer_ok:
                 logging.error("Writer failed mid-job — stopping further chunks")
@@ -3492,11 +3364,10 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # "local variable 'res' referenced before assignment".
         res = final
         logging.info(
-            "Done in %.1fs — frames=%d; detector_calls=%d; swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; fill_avg=%.1fms; encode=%.1fs; filled=%d",
+            "Done in %.1fs — frames=%d; detector_calls=%d; swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d",
             time.time() - t0, stats["frames_out"], stats["detector_calls"], stats["swap_calls"],
             (sum(stats["det_times"]) / len(stats["det_times"])) if stats["det_times"] else 0.0,
             (sum(stats["swap_times"]) / len(stats["swap_times"])) if stats["swap_times"] else 0.0,
-            (sum(stats["fill_times"]) / len(stats["fill_times"])) if stats["fill_times"] else 0.0,
             stats["encode_seconds"], stats["frames_filled"],
         )
 

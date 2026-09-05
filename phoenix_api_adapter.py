@@ -1,5 +1,5 @@
 """
-Phoenix Mobile API adapter for Swamitech Phoenix v11.0.4 SoftStable.
+Phoenix Mobile API adapter for Swamitech Phoenix v11.1.0 Continuum.
 
 Stable Gradio API surface:
   phoenix_submit_video
@@ -23,7 +23,7 @@ from core_pipeline import _lock, jobs, submit_video
 try:
     from config import VERSION_FULL
 except Exception:
-    VERSION_FULL = "v11.0.4 (SoftStable)"
+    VERSION_FULL = "v11.1.0 (Continuum)"
 
 _JOB_RE = re.compile(r"\bJob\s+([A-Z0-9]{8})\b")
 
@@ -138,7 +138,7 @@ def api_submit_video(video, face1, face2, face3, face4, settings=None):
         "eta_seconds": job.get("eta_seconds"),
         "device": defaults["device_mode"],
         "version": VERSION_FULL,
-        "engine": "aequus-1.0",
+        "engine": "aequus-1.1",
     }
 
 

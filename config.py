@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.0.4 "SoftStable" configuration (Seamless-CPU base)."""
+"""Swamitech Phoenix v11.1.0 "Continuum" configuration (Seamless-CPU base)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -45,6 +45,13 @@ INPUT_MAX_W = 720
 # x264 native threads are not thrashing. Override with PHOENIX_VIDEO_WORKERS≤2.
 VIDEO_WORKERS = 1
 
+# NOTE (v11.1.0): swap_n / SKIP_N no longer decide how many frames get a face.
+# EVERY output frame is composited; these now only decide how often the swap
+# NETWORK runs. Between network runs the cached aligned result is re-projected
+# onto the current frame with the current frame's own geometry, mask,
+# background and lighting, so raising the skip interval costs expression
+# freshness, not face presence or placement.
+#
 # DET_SKIP_INTERVAL: default detector cadence ONLY when det_n/det_int is Auto.
 # Do NOT use this as a hard floor over explicit preset/user values (that bug
 # forced re-detect every ≥3 keyframes even when Stable set det_n=1 → flicker).
@@ -90,8 +97,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.0.4"
-BUILD = "SoftStable · brightness-only · Seamless-CPU base (no hold-everywhere)"
+VERSION = "v11.1.0"
+BUILD = "Continuum · every frame composited · aligned-space reuse"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass
@@ -134,6 +141,22 @@ ENGINE_TUNABLES = {
 
     # --- occlusion guard (hug / kiss / hand across the face) ---------------
     "occl_min_keep":    0.35,    # lower = trims intruding pixels harder
+    # The guard is a CONTINUOUS weight, not an on/off flag. A flag changed the
+    # mask silhouette - and so the colour statistics weighted by that mask - in
+    # a single frame every time it flipped, moving outline and brightness at
+    # once. occl_ramp is how fast it may slew per frame; lower = smoother.
+    "occl_ramp":        0.25,
+    # Two faces in contact have essentially identical chroma, so the skin
+    # confidence term cannot see the other person's cheek inside this face's
+    # aligned crop. Their own landmark hull can be projected in and subtracted.
+    # rival_cut 0 disables it; raise toward 1.0 to trim contact harder.
+    "rival_cut":        0.85,
+    "rival_feather":    0.09,
+    # The 106-point hull is the only pose-DEPENDENT term in an otherwise
+    # pose-normalised mask, so it is what makes the silhouette breathe on a yaw
+    # turn. Lower = steadier outline on profile turns, slower to follow a real
+    # change in face shape.
+    "hull_ema":         0.22,
 
     # --- multi-face association -------------------------------------------
     "trk_gate_new":     0.30,    # identity similarity needed to CREATE a binding

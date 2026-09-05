@@ -49,6 +49,8 @@ import numpy as np
 
 __all__ = [
     "AlignedCompositor",
+    "estimate_norm",
+    "ARCFACE_DST",
     "TrackState",
     "MultiFaceTracker",
     "PredictedFace",
@@ -56,7 +58,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.0.4-softstable"
+ENGINE_VERSION = "aequus-1.1.0-continuous"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -86,6 +88,22 @@ _P = {
     "cm_delta_clamp": 5.0,   # SoftStable: max |dmean| step vs prior smoothed
     # occlusion guard (off by default)
     "occl_min_keep": 0.35,
+    # Occlusion strength is a CONTINUOUS weight in [0,1], not a boolean.
+    # A binary guard changed the mask area by several percent from one frame
+    # to the next every time it toggled, and the mask is what the colour
+    # statistics are weighted by - so a toggle moved both the silhouette and
+    # the brightness at once. The guard now ramps over occl_ramp frames.
+    "occl_ramp": 0.25,
+    # Rival-face subtraction. During a kiss/hug the other person's cheek lands
+    # inside this face's aligned crop with near-identical chroma, so
+    # skin_confidence() cannot see it. Their landmark hull can be projected in
+    # geometrically, which can.
+    "rival_cut": 0.85,       # how hard a rival hull is removed (0 = off)
+    "rival_feather": 0.09,   # softness of that cut, fraction of crop size
+    # Hull temporal stability. The 106-point hull is the only pose-DEPENDENT
+    # term in an otherwise pose-normalised mask, so it is what makes the
+    # silhouette breathe on a yaw turn. Smooth it on its own, slower clock.
+    "hull_ema": 0.22,
     # tracker
     "trk_w_id": 0.52,
     "trk_w_iou": 0.33,
@@ -159,6 +177,126 @@ def canonical_template(size: int) -> np.ndarray:
     mask = np.clip(mask, 0.0, 1.0).astype(np.float32)
     _TEMPLATE_CACHE[size] = mask
     return mask
+
+
+# --------------------------------------------------------------------------
+# ArcFace 5-point alignment.
+#
+# inswapper builds its own 128x128 aligned crop from the 5 keypoints and hands
+# back the affine it used. That affine is only available on frames where the
+# ONNX forward pass actually ran. To composite a CACHED aligned result onto a
+# LATER frame - which is what makes every output frame a real composite rather
+# than a stale ROI pasted from another moment in time - the same affine has to
+# be derivable from keypoints alone. This is that derivation: the canonical
+# ArcFace destination points plus a Umeyama similarity fit, i.e. exactly what
+# insightface does internally, reimplemented here so the module keeps its
+# numpy+cv2-only dependency footprint and stays unit-testable.
+#
+# Any residual disagreement with the installed insightface build is cancelled
+# out at runtime by aligned_correction() below, so this never has to match
+# bit-for-bit to be safe.
+# --------------------------------------------------------------------------
+ARCFACE_DST = np.array([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+], dtype=np.float32)
+
+
+def _umeyama(src: np.ndarray, dst: np.ndarray):
+    """Least-squares similarity (scale+rotation+translation) src -> dst."""
+    src = np.asarray(src, np.float64).reshape(-1, 2)
+    dst = np.asarray(dst, np.float64).reshape(-1, 2)
+    num = src.shape[0]
+    if num < 2:
+        return None
+    src_mean = src.mean(axis=0)
+    dst_mean = dst.mean(axis=0)
+    src_d = src - src_mean
+    dst_d = dst - dst_mean
+    A = (dst_d.T @ src_d) / num
+    d = np.ones(2, np.float64)
+    if np.linalg.det(A) < 0:
+        d[1] = -1.0
+    try:
+        U, S, Vt = np.linalg.svd(A)
+    except np.linalg.LinAlgError:
+        return None
+    rank = np.linalg.matrix_rank(A)
+    if rank == 0:
+        return None
+    if rank == 1:
+        if np.linalg.det(U) * np.linalg.det(Vt) > 0:
+            R = U @ Vt
+        else:
+            keep = d[1]
+            d[1] = -1.0
+            R = U @ np.diag(d) @ Vt
+            d[1] = keep
+    else:
+        R = U @ np.diag(d) @ Vt
+    var_src = src_d.var(axis=0).sum()
+    scale = 1.0 if var_src <= 1e-12 else float((S @ d) / var_src)
+    M = np.zeros((2, 3), np.float32)
+    M[:, :2] = (scale * R).astype(np.float32)
+    M[:, 2] = (dst_mean - scale * (R @ src_mean)).astype(np.float32)
+    return M
+
+
+def estimate_norm(kps, image_size: int = 128):
+    """Image-space -> aligned-crop affine for 5-point ArcFace keypoints."""
+    try:
+        lmk = np.asarray(kps, np.float32).reshape(-1, 2)
+    except Exception:
+        return None
+    if lmk.shape[0] < 5:
+        return None
+    lmk = lmk[:5]
+    if image_size % 112 == 0:
+        ratio = float(image_size) / 112.0
+        diff_x = 0.0
+    else:
+        ratio = float(image_size) / 128.0
+        diff_x = 8.0 * ratio
+    dst = ARCFACE_DST * ratio
+    dst = dst + np.array([diff_x, 0.0], np.float32)
+    return _umeyama(lmk, dst)
+
+
+def _as3x3(M):
+    T = np.eye(3, dtype=np.float32)
+    T[:2, :] = np.asarray(M, np.float32).reshape(2, 3)
+    return T
+
+
+def aligned_correction(kps, M_actual, image_size: int):
+    """Aligned-space correction C with  C @ estimate_norm(kps) == M_actual.
+
+    Guarantees the reprojected crop lines up exactly with whatever affine the
+    installed inswapper build actually used, so a cached aligned result can be
+    re-pasted on a later frame with no seam at the hand-over.
+    """
+    if M_actual is None:
+        return None
+    est = estimate_norm(kps, image_size)
+    if est is None:
+        return None
+    try:
+        C = _as3x3(M_actual) @ np.linalg.inv(_as3x3(est))
+        return C[:2, :].astype(np.float32)
+    except Exception:
+        return None
+
+
+def apply_correction(C, M):
+    if C is None:
+        return M
+    try:
+        return (_as3x3(C) @ _as3x3(M))[:2, :].astype(np.float32)
+    except Exception:
+        return M
 
 
 def _landmarks_to_aligned(lmk, M, size):
@@ -239,7 +377,9 @@ class TrackState:
 
     __slots__ = ("slot", "bbox", "obs_bbox", "kps", "lmk", "vel_bbox", "vel_kps",
                  "emb", "hits", "missed", "mask_ema", "cm_dmean", "cm_ratio",
-                 "flip_votes", "crossing", "last_face", "det_score", "last_hit_bbox")
+                 "flip_votes", "crossing", "last_face", "det_score", "last_hit_bbox",
+                 "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps",
+                 "fake", "fake_corr", "fake_size", "fake_frame")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -260,6 +400,19 @@ class TrackState:
         self.last_face = None
         self.det_score = 0.0
         self.last_hit_bbox = None
+        self.last_dt = 1.0        # output frames between the last two detections
+        self.last_hit_kps = None  # raw keypoints at the last real detection
+        self.hull_ema = None      # smoothed landmark hull (aligned space)
+        self.occl_w = 0.0         # CONTINUOUS occlusion weight in [0,1]
+        self.alpha_ema = 1.0      # smoothed composite opacity
+        # Cached aligned swap result. Holding the 128x128 crop (not a
+        # full-frame paste) is what lets a later frame be composited with its
+        # OWN background, its OWN geometry and its OWN lighting while reusing
+        # the expensive ONNX forward pass.
+        self.fake = None
+        self.fake_corr = None     # aligned-space correction for this build
+        self.fake_size = 0
+        self.fake_frame = -10 ** 9
 
     # -- geometry -------------------------------------------------------
     @property
@@ -278,29 +431,67 @@ class TrackState:
         base = self.obs_bbox if self.obs_bbox is not None else self.bbox
         if base is None:
             return None
-        return (np.asarray(base, np.float32) + self.vel_bbox).astype(np.float32)
+        # Velocity is per OUTPUT frame, so the prediction has to span the
+        # detector's actual interval - otherwise, at a cadence above 1, the
+        # gate that decides who a detection belongs to is comparing against a
+        # position the face left several frames ago.
+        return (np.asarray(base, np.float32)
+                + self.vel_bbox * float(max(1.0, self.last_dt))).astype(np.float32)
 
-    def predict(self):
-        """Advance geometry one frame with constant velocity. Used when the
-        detector was skipped or missed, so the swap can still run instead of
-        the frame reverting to the original face."""
-        self.missed += 1
-        damp = 0.85 ** min(self.missed, 12)
+    def predict(self, n_frames: float = 1.0):
+        """Advance geometry by ``n_frames`` output frames at constant velocity.
+
+        ``n_frames`` exists because velocity is stored PER OUTPUT FRAME (see
+        update()) while the caller may only get to advance a track once per
+        detector interval. Assuming those are the same thing - which the
+        previous signature forced - made the prediction lag by exactly the
+        detection cadence, so the carried face trailed the real one during
+        every fast movement and then snapped forward on the next detection.
+        That snap is visible as a flick.
+        """
+        n = max(0.0, float(n_frames))
+        if n <= 0.0:
+            return self.bbox
+        steps = max(1, int(round(n)))
+        # Confidence in an extrapolation decays per FRAME advanced, so the
+        # damping has to be summed over the frames being covered. Applying the
+        # end-of-interval damping factor to the whole interval at once (n * damp)
+        # under-advances a multi-frame catch-up badly - a 5-frame advance moved
+        # about 2.2 frames' worth - which shows up as the carried face trailing
+        # the real one and then snapping forward on the next detection.
+        m0 = self.missed
+        self.missed = m0 + steps
+        step = float(sum(0.85 ** min(m0 + i, 12) for i in range(1, steps + 1)))
         if self.bbox is not None:
-            self.bbox = (self.bbox + self.vel_bbox * damp).astype(np.float32)
+            self.bbox = (self.bbox + self.vel_bbox * step).astype(np.float32)
         if self.obs_bbox is not None:
-            self.obs_bbox = (self.obs_bbox + self.vel_bbox * damp).astype(np.float32)
+            self.obs_bbox = (self.obs_bbox + self.vel_bbox * step).astype(np.float32)
         if self.kps is not None and self.vel_kps is not None:
-            self.kps = (self.kps + self.vel_kps * damp).astype(np.float32)
+            self.kps = (self.kps + self.vel_kps * step).astype(np.float32)
         return self.bbox
 
-    def update(self, face, update_embedding=True):
+    def update(self, face, update_embedding=True, dt_frames: float = 1.0):
         a = float(_P["trk_alpha"])
+        dt = max(1.0, float(dt_frames or 1.0))
+        self.last_dt = dt
+        # Frames since this track last had a REAL detection. predict() adds to
+        # `missed`; a hit resets it. `dt` covers the interval that has not been
+        # counted yet.
+        elapsed = max(1.0, float(self.missed) + dt)
         bb = np.asarray(face.bbox, np.float32).reshape(4).copy()
-        if self.obs_bbox is None:
+        if self.last_hit_bbox is None:
             self.vel_bbox = np.zeros(4, np.float32)
         else:
-            self.vel_bbox = (self.vel_bbox * 0.5 + (bb - self.obs_bbox) * 0.5).astype(np.float32)
+            # Measure against the last OBSERVED box, not against obs_bbox -
+            # predict() advances obs_bbox, so (bb - obs_bbox) is the prediction
+            # RESIDUAL. Feeding a residual back as velocity means an accurate
+            # prediction halves the velocity, and a few accurate predictions in
+            # a row drive it to zero: the carried face stops moving mid-gap and
+            # then jumps when the detector next reports. Dividing by the real
+            # elapsed frames also keeps the unit at pixels per OUTPUT frame,
+            # whatever the detector cadence is.
+            inst = (bb - self.last_hit_bbox) / elapsed
+            self.vel_bbox = (self.vel_bbox * 0.5 + inst * 0.5).astype(np.float32)
         self.obs_bbox = bb.copy()
         self.last_hit_bbox = bb.copy()
         if self.bbox is None:
@@ -318,18 +509,24 @@ class TrackState:
                 # how fast things are moving RIGHT NOW, not a lagged
                 # estimate of that, or it would itself lag exactly when
                 # responsiveness matters most.
-                raw_speed = float(np.mean(np.abs(kp - self.kps)))
+                raw_speed = float(np.mean(np.abs(kp - self.kps))) / elapsed
                 cutoff = float(_P["kps_min_cutoff"]) + float(_P["kps_beta"]) * raw_speed
-                r = 2.0 * math.pi * cutoff
+                # t_e = elapsed frames, not a hard-coded 1. With a detector
+                # cadence above 1 the old form under-smoothed by that factor.
+                r = 2.0 * math.pi * cutoff * elapsed
                 a = r / (r + 1.0)
                 sm = self.kps * (1.0 - a) + kp * a
-                v = sm - self.kps
-                self.vel_kps = (v if self.vel_kps is None
-                                else self.vel_kps * 0.6 + v * 0.4)
+                # Same reasoning as vel_bbox: measure against the last observed
+                # keypoints, never against the predicted ones.
+                if self.last_hit_kps is not None and self.last_hit_kps.shape == kp.shape:
+                    v = (kp - self.last_hit_kps) / elapsed
+                    self.vel_kps = (v if self.vel_kps is None
+                                    else self.vel_kps * 0.6 + v * 0.4)
                 self.kps = sm.astype(np.float32)
             else:
                 self.kps = kp
                 self.vel_kps = np.zeros_like(kp)
+            self.last_hit_kps = kp.copy()
 
         lmk = getattr(face, "landmark_2d_106", None)
         if lmk is not None:
@@ -361,6 +558,56 @@ class TrackState:
                              self.det_score)
 
     # -- appearance -----------------------------------------------------
+    def smooth_hull(self, hull: np.ndarray | None):
+        """EMA the landmark hull on its own, slower clock.
+
+        The hull is the only POSE-DEPENDENT term in an otherwise
+        pose-normalised mask, so it is the term that makes the silhouette
+        breathe when the head yaws. Smoothing the composed mask (as before)
+        could not separate this from legitimate scale changes; smoothing the
+        hull itself can.
+        """
+        if hull is None:
+            return self.hull_ema
+        a = float(_P.get("hull_ema", 0.22) or 0.22)
+        if a <= 0 or self.hull_ema is None or self.hull_ema.shape != hull.shape:
+            self.hull_ema = hull.astype(np.float32).copy()
+        else:
+            self.hull_ema = (self.hull_ema * (1.0 - a) + hull * a).astype(np.float32)
+        return self.hull_ema
+
+    def ramp_occlusion(self, target: float) -> float:
+        """Move the occlusion weight toward ``target`` at a bounded rate.
+
+        A hard on/off guard moved the mask area by several percent between
+        consecutive frames, and the mask is exactly what the colour statistics
+        are weighted by - so one toggle shifted the silhouette AND the
+        brightness at the same time. Ramping removes both steps.
+        """
+        r = float(_P.get("occl_ramp", 0.25) or 0.25)
+        t = float(np.clip(target, 0.0, 1.0))
+        self.occl_w = float(self.occl_w + (t - self.occl_w) * np.clip(r, 0.01, 1.0))
+        return self.occl_w
+
+    def smooth_alpha(self, target: float) -> float:
+        """EMA the composite opacity.
+
+        det_score wobbles by several hundredths between consecutive frames on
+        a profile turn. Driving alpha straight from it made the replacement
+        fade partly back toward the real face and out again, several times a
+        second - seen as brightness flicker and as the original face
+        'showing through'. Opacity now moves smoothly or not at all.
+        """
+        t = float(np.clip(target, 0.0, 1.0))
+        self.alpha_ema = float(self.alpha_ema * 0.72 + t * 0.28)
+        return self.alpha_ema
+
+    def cache_fake(self, fake, corr, frame_ord):
+        self.fake = fake
+        self.fake_corr = corr
+        self.fake_size = int(fake.shape[0]) if fake is not None else 0
+        self.fake_frame = int(frame_ord)
+
     def smooth_mask(self, mask: np.ndarray) -> np.ndarray:
         a = float(_P["mask_ema"])
         if a <= 0 or self.mask_ema is None or self.mask_ema.shape != mask.shape:
@@ -379,7 +626,13 @@ class TrackState:
         a = float(_P["cm_ema"])
         dmean = np.asarray(dmean, np.float32).reshape(-1).copy()
         ratio = np.asarray(ratio, np.float32).reshape(-1).copy()
-        if self.cm_dmean is None or self.missed > 8:
+        # NOTE: the previous version also re-seeded outright whenever
+        # missed > 8. Dropping a converged correction and replacing it with a
+        # single frame's raw measurement is a step change in face brightness,
+        # and it fired precisely on the frames a long occlusion ended - which
+        # is when a brightness pop is most visible. Only seed when there is
+        # genuinely nothing to carry.
+        if self.cm_dmean is None:
             self.cm_dmean = dmean.astype(np.float32).copy()
             self.cm_ratio = ratio.astype(np.float32).copy()
         else:
@@ -390,17 +643,42 @@ class TrackState:
             self.cm_ratio = (self.cm_ratio * (1.0 - a) + ratio * a).astype(np.float32)
         return self.cm_dmean, self.cm_ratio
 
-    def reset_appearance(self):
+    def reset_appearance(self, hard: bool = False):
+        """Let the appearance memory re-converge; do not delete it.
+
+        This is called whenever the tracker merely SUSPECTS a relabel, which
+        on a geometric test happens routinely during a crossing. Clearing the
+        colour EMA outright produced a measured ~4x frame-to-frame luma step
+        on the very next frame - a visible brightness pop in exactly the hug /
+        kiss shots it was meant to protect. Halving the correction lets it
+        re-converge over a few frames instead, which is invisible. ``hard``
+        remains available for a genuine identity change.
+        """
         self.mask_ema = None
-        self.cm_dmean = None
-        self.cm_ratio = None
+        self.hull_ema = None
+        self.fake = None
+        self.fake_corr = None
+        self.fake_size = 0
+        if hard:
+            self.cm_dmean = None
+            self.cm_ratio = None
+        else:
+            if self.cm_dmean is not None:
+                self.cm_dmean = (self.cm_dmean * 0.5).astype(np.float32)
+            if self.cm_ratio is not None:
+                self.cm_ratio = (1.0 + (self.cm_ratio - 1.0) * 0.5).astype(np.float32)
 
 
 class PredictedFace:
     """Minimal duck-typed stand-in matching insightface's Face attributes."""
 
+    # NOTE: `_slot` belongs here. Without it, a caller tagging a carried face
+    # with its identity slot raised AttributeError - silently, because those
+    # call sites are inside try/except - so a carried face reached the renderer
+    # with no slot and was dropped. The effect was that key frames where the
+    # detector was deliberately skipped contributed no geometry at all.
     __slots__ = ("bbox", "kps", "landmark_2d_106", "normed_embedding",
-                 "det_score", "predicted", "_track", "_occlusion_guard")
+                 "det_score", "predicted", "_track", "_slot", "_occlusion_guard")
 
     def __init__(self, bbox, kps, lmk=None, emb=None, det_score=0.5):
         self.bbox = np.asarray(bbox, np.float32).reshape(4).copy()
@@ -410,7 +688,8 @@ class PredictedFace:
         self.det_score = float(det_score)
         self.predicted = True
         self._track = None
-        self._occlusion_guard = False
+        self._slot = None
+        self._occlusion_guard = 0.0   # continuous weight, not a flag
 
 
 # --------------------------------------------------------------------------
@@ -447,18 +726,48 @@ class AlignedCompositor:
         return None, None
 
     # -- mask ------------------------------------------------------------
-    def build_mask(self, face, M, size, track=None, occlusion_guard=False,
-                   aligned_target=None):
+    def build_mask(self, face, M, size, track=None, occlusion_guard=0.0,
+                   aligned_target=None, rivals=None):
+        """Face mask in aligned space.
+
+        ``occlusion_guard`` is a CONTINUOUS weight in [0,1], not a flag: a
+        boolean guard changed the mask silhouette (and therefore the colour
+        statistics weighted by it) in a single frame every time it toggled.
+
+        ``rivals`` are other faces' image-space landmark sets belonging to
+        people who are IN FRONT of this one. Two faces in contact have
+        essentially identical chroma, so skin_confidence() is blind to a cheek
+        pressed against this face - but the rival's own landmarks say exactly
+        where it is, and they project into this crop through the same affine.
+        """
         mask = canonical_template(size).copy()
 
         pts = _landmarks_to_aligned(getattr(face, "landmark_2d_106", None), M, size)
         h = hull_mask(pts, size)
+        if track is not None:
+            h = track.smooth_hull(h)
         if h is not None:
             floor = float(_P["hull_floor"])
             mask = mask * (floor + (1.0 - floor) * h)
 
-        if occlusion_guard and aligned_target is not None:
-            mask = mask * skin_confidence(aligned_target, mask)
+        if rivals:
+            cut = float(_P.get("rival_cut", 0.85) or 0.0)
+            if cut > 0.0:
+                block = np.zeros((size, size), np.float32)
+                for rl in rivals:
+                    rp = _landmarks_to_aligned(rl, M, size)
+                    rh = hull_mask(rp, size)
+                    if rh is not None:
+                        np.maximum(block, rh, out=block)
+                if float(block.max()) > 0.02:
+                    k = int(max(3, round(size * float(_P.get("rival_feather", 0.09))))) | 1
+                    block = cv2.GaussianBlur(block, (k, k), 0)
+                    mask = mask * (1.0 - cut * np.clip(block, 0.0, 1.0))
+
+        g = float(np.clip(occlusion_guard, 0.0, 1.0))
+        if g > 0.01 and aligned_target is not None:
+            conf = skin_confidence(aligned_target, mask)
+            mask = mask * (1.0 - g + g * conf)
 
         mask = np.clip(mask, 0.0, 1.0).astype(np.float32)
         if track is not None:
@@ -576,23 +885,79 @@ class AlignedCompositor:
         out[y1:y2, x1:x2] = (fac * m + roi * (1.0 - m)).astype(np.uint8)
         return out
 
-    # -- one-shot -----------------------------------------------------------
-    def run(self, work, orig, face, src_face, *, track=None, alpha=1.0,
-            colour_strength=1.0, occlusion_guard=False):
-        """Swap `face` in `work` with `src_face`. Returns (image, ok)."""
-        fake, M = self._raw_swap(work, face, src_face)
-        if fake is None:
-            return work, False
-
+    # -- composite tail (shared by the swap and reuse paths) ----------------
+    def _composite(self, work, orig, face, fake, M, *, track, alpha,
+                   colour_strength, occlusion_guard, rivals):
         size = int(fake.shape[0])
         aligned_target = cv2.warpAffine(orig, M, (size, size),
                                         borderMode=cv2.BORDER_REPLICATE)
         mask = self.build_mask(face, M, size, track=track,
                                occlusion_guard=occlusion_guard,
-                               aligned_target=aligned_target)
-        fake = self.colour_match(fake, aligned_target, mask, track=track,
-                                 strength=colour_strength)
-        out = self.paste_back(work, fake, mask, M, alpha=alpha)
+                               aligned_target=aligned_target,
+                               rivals=rivals)
+        toned = self.colour_match(fake, aligned_target, mask, track=track,
+                                  strength=colour_strength)
+        return self.paste_back(work, toned, mask, M, alpha=alpha)
+
+    # -- one-shot -----------------------------------------------------------
+    def run(self, work, orig, face, src_face, *, track=None, alpha=1.0,
+            colour_strength=1.0, occlusion_guard=0.0, rivals=None,
+            frame_ord=0, post=None):
+        """Swap `face` in `work` with `src_face`. Returns (image, ok).
+
+        The aligned result is cached on ``track`` so later frames can be
+        composited from it without another ONNX forward pass - see
+        ``reuse()``. ``post`` is an optional callable applied ONCE to the
+        aligned crop (this is where a face enhancer belongs: enhancing the
+        cached crop means every frame that reuses it is enhanced identically,
+        instead of enhanced and unenhanced frames alternating at the swap
+        cadence and pulsing).
+        """
+        fake, M = self._raw_swap(work, face, src_face)
+        if fake is None:
+            return work, False
+
+        size = int(fake.shape[0])
+        if post is not None:
+            try:
+                p = post(fake)
+                if p is not None and p.shape == fake.shape:
+                    fake = p
+            except Exception as e:
+                log.debug("aligned post-process skipped: %s", e)
+
+        if track is not None:
+            track.cache_fake(fake, aligned_correction(getattr(face, "kps", None), M, size),
+                             frame_ord)
+
+        out = self._composite(work, orig, face, fake, M, track=track, alpha=alpha,
+                              colour_strength=colour_strength,
+                              occlusion_guard=occlusion_guard, rivals=rivals)
+        return out, True
+
+    # -- reuse a cached aligned result on a later frame ---------------------
+    def reuse(self, work, orig, kps, face, *, track, alpha=1.0,
+              colour_strength=1.0, occlusion_guard=0.0, rivals=None):
+        """Composite the cached aligned swap onto THIS frame's geometry.
+
+        This is what replaces "paste the face ROI copied out of a different
+        frame". The expensive part of a swap is the ONNX forward pass; the
+        placement, the mask, the background and the colour match are cheap and
+        are all recomputed here from the CURRENT frame. So a frame the swapper
+        did not run on still gets its face in the right place, at the right
+        angle, lit by its own scene - rather than a rectangle of some other
+        moment stamped on top of it.
+        """
+        if track is None or track.fake is None:
+            return work, False
+        size = int(track.fake_size or track.fake.shape[0])
+        M = estimate_norm(kps, size)
+        if M is None:
+            return work, False
+        M = apply_correction(track.fake_corr, M)
+        out = self._composite(work, orig, face, track.fake, M, track=track,
+                              alpha=alpha, colour_strength=colour_strength,
+                              occlusion_guard=occlusion_guard, rivals=rivals)
         return out, True
 
 
@@ -632,11 +997,16 @@ def _cdist_norm(a, b):
 def optimal_assignment(cost, forbidden=None):
     """Exact minimum-cost assignment for the tiny matrices we deal with.
 
-    Slots <= 4 and detections <= 10 in practice, so an exhaustive search over
-    permutations is both optimal and fast. Unlike the previous greedy
-    slot-by-slot loop, this cannot hand face #1's source to face #2 just
-    because face #1 happened to be iterated first — which is exactly the
-    hug/kiss mix-up.
+    Still exhaustive - slots <= 4 - but over COLUMN choices only. The previous
+    implementation looped over permutations of rows AND columns, which
+    enumerates every assignment r! times over: at 4 slots x 12 detections that
+    measured 209 ms of pure Python per frame, on a build whose whole point is
+    CPU throughput. Iterating rows in fixed order and permuting only the
+    columns visits each distinct assignment exactly once.
+
+    Partial assignments (fewer pairs than min(n, m)) are still reachable:
+    the search descends row by row and may leave a row unassigned, so a row
+    with no admissible column no longer blocks the rows after it.
     """
     n = len(cost)
     if n == 0:
@@ -645,25 +1015,38 @@ def optimal_assignment(cost, forbidden=None):
     if m == 0:
         return {}
     forbidden = forbidden or set()
-    best, best_cost = {}, float("inf")
-    idx = list(range(n))
-    for r in range(min(n, m), 0, -1):
-        found = False
-        for rows in permutations(idx, r):
-            for cols in permutations(range(m), r):
-                total, ok = 0.0, True
-                for a, b in zip(rows, cols):
-                    if (a, b) in forbidden or cost[a][b] >= 1e6:
-                        ok = False
-                        break
-                    total += cost[a][b]
-                if ok and total < best_cost:
-                    best_cost = total
-                    best = dict(zip(rows, cols))
-                    found = True
-        if found:
-            break
-    return best
+
+    best = {"pairs": 0, "cost": float("inf"), "map": {}}
+    cur = {}
+
+    def rec(i, used, total, pairs):
+        if i == n:
+            if pairs > best["pairs"] or (pairs == best["pairs"] and total < best["cost"]):
+                best["pairs"], best["cost"], best["map"] = pairs, total, dict(cur)
+            return
+        # The objective is lexicographic - most pairs first, then least cost -
+        # so a branch may only be pruned on cost once it is established that it
+        # cannot beat the incumbent on pair count either.
+        reach = pairs + (n - i)
+        if reach < best["pairs"]:
+            return
+        if reach == best["pairs"] and total >= best["cost"]:
+            return
+        for j in range(m):
+            if j in used or (i, j) in forbidden:
+                continue
+            c = cost[i][j]
+            if c >= 1e6:
+                continue
+            cur[i] = j
+            used.add(j)
+            rec(i + 1, used, total + c, pairs + 1)
+            used.discard(j)
+            cur.pop(i, None)
+        rec(i + 1, used, total, pairs)     # leave row i unassigned
+
+    rec(0, set(), 0.0, 0)
+    return best["map"]
 
 
 class MultiFaceTracker:
@@ -749,7 +1132,7 @@ class MultiFaceTracker:
         return False
 
     # ------------------------------------------------------------------
-    def assign(self, faces, refs):
+    def assign(self, faces, refs, dt_frames: float = 1.0):
         """faces: list of detections. refs: {slot: reference embedding}.
 
         Returns {slot: face} for slots that got a detection this frame. Slots
@@ -760,7 +1143,7 @@ class MultiFaceTracker:
         slots = sorted(self.tracks.keys())
         if not faces:
             for t in self.tracks.values():
-                t.predict()
+                t.predict(dt_frames)
             return {}
 
         n, m = len(slots), len(faces)
@@ -833,7 +1216,7 @@ class MultiFaceTracker:
             tr = self.tracks[s]
             j = pairing.get(i)
             if j is None:
-                tr.predict()
+                tr.predict(dt_frames)
                 tr.flip_votes = max(0, tr.flip_votes - 1)
                 continue
             f = faces[j]
@@ -857,13 +1240,13 @@ class MultiFaceTracker:
                 # embedding so the track can re-acquire the RIGHT person by
                 # identity afterwards instead of guessing.
                 if tr.crossing:
-                    tr.predict()
+                    tr.predict(dt_frames)
                     continue
                 if sim_tab[i][j] < _P["trk_flip_margin"] + 0.30:
                     tr.flip_votes += 1
                     if tr.flip_votes < _P["trk_flip_frames"]:
                         # Keep the previous binding for now; geometry carries it.
-                        tr.predict()
+                        tr.predict(dt_frames)
                         continue
                 tr.flip_votes = 0
             else:
@@ -907,7 +1290,7 @@ class MultiFaceTracker:
             if tr.emb is None and not tr.crossing:
                 good = True
 
-            tr.update(f, update_embedding=good)
+            tr.update(f, update_embedding=good, dt_frames=dt_frames)
             if changed:
                 tr.reset_appearance()
             result[s] = f
@@ -919,7 +1302,7 @@ class MultiFaceTracker:
                 self.tracks[s].emb = keep_emb
         return result
 
-    def bind(self, slot, face, update_embedding=True):
+    def bind(self, slot, face, update_embedding=True, dt_frames: float = 1.0):
         """Attach a detection to a slot without running association.
 
         Used by the single-face path, which has its own well-tested pairing
@@ -931,7 +1314,7 @@ class MultiFaceTracker:
         if tr is None:
             tr = self.tracks[slot] = TrackState(slot)
         tr.crossing = False
-        tr.update(face, update_embedding=update_embedding)
+        tr.update(face, update_embedding=update_embedding, dt_frames=dt_frames)
         return tr
 
     # ------------------------------------------------------------------
@@ -946,7 +1329,14 @@ class MultiFaceTracker:
         for s, tr in self.tracks.items():
             if slots is not None and s not in slots:
                 continue
-            if tr.missed == 0 or not tr.established:
+            # NOTE: this used to also require ``tr.missed != 0``. That made
+            # carry() return NOTHING on the single-face path, where a failed
+            # pairing never advances the track - so the one code path that
+            # exists to keep the swap alive through a bad frame was unreachable
+            # exactly when it was called for, and the frame fell back to the
+            # real face. A track with missed == 0 has CURRENT geometry, which
+            # is the best case for carrying, not a reason to refuse.
+            if not tr.established:
                 continue
             if tr.missed > _P["trk_max_missed"]:
                 continue

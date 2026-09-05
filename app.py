@@ -48,7 +48,7 @@ from core_pipeline import (  # noqa: F401
 try:
     from config import VERSION_FULL, DUR as _DUR, FPS as _FPS, RES as _RES
 except Exception:
-    VERSION_FULL = "v11.0.4 (SoftStable · brightness-only · Seamless-CPU base)"
+    VERSION_FULL = "v11.1.0 (Continuum · every frame composited)"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -369,7 +369,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
     img_refs = gr.State([None, None, None, None])
     vid_refs = gr.State([None, None, None, None])
 
-    gr.HTML('<div class="app-hdr"><h1>🎬 Swamitech Phoenix</h1><p>Aligned-space compositing · Carry-through tracking · Phoenix v11.0.4 (SoftStable)</p></div>')
+    gr.HTML('<div class="app-hdr"><h1>🎬 Swamitech Phoenix</h1><p>Aligned-space compositing · Every-frame reuse · Phoenix v11.1.0 (Continuum)</p></div>')
 
     with gr.Tabs():
         with gr.Tab("Image"):
@@ -444,15 +444,15 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
 
             gr.HTML('<span class="sec-lbl">Quick Start Presets</span>')
             preset = gr.Radio(
-                ["⚡ Speed", "⭐ Balanced", "🚀 Optimized (CPU · Recommended)", "🛡️ Stable (least flicker)", "📱 Mobile HQ (680p)", "💎 Quality", "🏆 HQ"],
+                ["⚡ Speed", "⭐ Balanced", "🚀 Optimized (CPU · Recommended)", "🛡️ Stable (most detail)", "📱 Mobile HQ (680p)", "💎 Quality", "🏆 HQ"],
                 value="🚀 Optimized (CPU · Recommended)",
                 label="Choose a preset — the selected one stays highlighted"
             )
             gr.HTML('''<div class="hint">
-• <b>Speed</b>: 640p · Swap=3 (fastest, more flicker risk)<br>
+• <b>Speed</b>: 640p · Swap=3 (fastest; expression refreshes less often)<br>
 • <b>Balanced</b>: 720p · Swap=1<br>
 • <b>Optimized (Recommended)</b>: 720p · self-managed skip/det · HF Pro CPU default<br>
-• <b>Stable</b>: 720p · Swap=1 · re-detect every 1 (least face flicker)<br>
+• <b>Stable</b>: 720p · Swap=1 · re-detect every 1 (face refreshed every frame)<br>
 • <b>Mobile HQ</b>: 680p · Ultra · Swap=1 · no enhancer<br>
 • <b>Quality / HQ</b>: higher quality · Swap=1<br>
 💡 Lower <b>Swap every N</b> = smoother face, slower. Use Speed Controls below to fine-tune.
@@ -464,7 +464,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
             v_res = gr.Dropdown(list(RES.keys()), value="720p (HD)", label="Resolution")
             v_q = gr.Radio(["Fast","Balanced","Optimized","Best","Ultra"], value="Optimized", label="Quality")
             gr.HTML('''<div class="hint">
-💡 <b>Optimized</b> — HF Pro CPU default (v11.0.4 SoftStable): skip≈5, det every 2nd keyframe, ultrafast encode, no HI-probe unless faces are missing. Ignores manual Swap/Re-detect dropdowns. Best speed+quality after Seamless.
+💡 <b>Optimized</b> — HF Pro CPU default (v11.1.0 Continuum): the swap network runs every ~5th frame, but <b>every</b> output frame is still composited from the cached aligned result using its own geometry, mask and lighting. Raising the skip interval costs expression freshness, not face presence or placement.
 </div>''')
             gr.HTML('<span class="sec-lbl">Speed settings</span>')
             v_settings_summary = gr.HTML(
@@ -474,7 +474,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
                 v_swap = gr.Dropdown(["Auto","1","2","3","4","6","8","10"], value="Auto", label="Swap every N (manual)")
                 v_det = gr.Dropdown(["Auto","1","2","3","4","6","8"], value="Auto", label="Re-detect every N (manual)")
                 v_det_int = gr.Dropdown(["2","4","6","8","12","16"], value="2", label="Det Interval (manual)")
-            gr.HTML('<div class="hint"><b>Auto</b> lets the Quality preset above drive the frame-skip (this is what makes Fast/Balanced/Optimized actually faster). Setting an explicit number overrides the preset — <b>Swap=1</b> + <b>Re-detect=1</b> = least flicker but slowest. Multi-face jobs always process every frame regardless, for correctness.</div>')
+            gr.HTML('<div class="hint"><b>Auto</b> lets the Quality preset above drive the frame-skip (this is what makes Fast/Balanced/Optimized actually faster). Setting an explicit number overrides the preset — <b>Swap=1</b> + <b>Re-detect=1</b> refreshes the face on every frame: the most expression detail, and the slowest. Since v11.1.0 every output frame is composited whatever these are set to, so a higher number costs expression freshness rather than face presence or placement. Multi-face jobs always process every frame regardless, for correctness.</div>')
             v_enh = gr.Dropdown(
                 [
                     "None",
@@ -693,7 +693,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
         api_name="swap_image",
     )
 
-    gr.HTML('<div class="app-ftr">Swamitech Phoenix v11.0.4 “SoftStable” · Aligned-space compositing · Occlusion-aware tracking · CPU throughput</div>')
+    gr.HTML('<div class="app-ftr">Swamitech Phoenix v11.1.0 “Continuum” · Every frame composited · Occlusion-aware tracking · CPU throughput</div>')
 
     # Events
     im_detect.click(detect_image, [im_tgt], [im_prev, im_st, img_refs, im_df1, im_df2, im_df3, im_df4], api_name=False)
