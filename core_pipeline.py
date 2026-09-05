@@ -870,13 +870,56 @@ def _geom_lerp(a, b, t):
     return out
 
 
-def _geom_for_frame(timeline, g, taper):
+def _geom_for_frame(timeline, g, taper, max_bracket=None):
     """Geometry for output frame ``g`` from a slot's key-frame timeline.
 
     ``timeline`` is an ordered list of ``(global_frame_index, record)``. A slot
     that is only anchored on one side (the face has just entered, or has just
     been lost) holds its last known geometry and fades out over ``taper``
     frames rather than disappearing between one frame and the next.
+
+    Staleness (how long ago this identity was actually seen, which drives
+    both the ``taper`` cutoff and the fade) is always measured against the
+    last REAL detection, never against however recently the tracker merely
+    EXTRAPOLATED one. That distinction is the fix for a reported "ghost face"
+    defect: while a subject is turned away for longer than a brief occlusion,
+    _carry_pairs() keeps producing a fresh-looking predicted entry on almost
+    every detector call, for as long as its own, much larger miss budget
+    (trk_max_missed) allows. Each of those entries is a NAIVE CONSTANT-
+    VELOCITY extrapolation, which has no way to know it is wrong and simply
+    keeps compounding once the subject's real motion stops being a straight
+    line (a head turn, rolling over). An earlier version of this function
+    measured staleness against the newest entry in the timeline regardless of
+    whether it was real or extrapolated - so every fresh (but by then
+    thoroughly wrong) predicted entry reset the fade to full alpha, and the
+    face was rendered with high confidence at a position that had long since
+    parted ways with the subject: a face floating in empty space, disconnected
+    from any body. Reproduced directly: with that version, a synthetic 100
+    frame "turned away" gap rendered at alpha=1.00 throughout with position
+    error growing UNBOUNDED (350px+ and climbing). Anchoring staleness to the
+    last real sighting instead caps both the exposure time and the drift.
+
+    ``max_bracket`` bounds a DIFFERENT case: two real detections bracketing a
+    gap (obs_lo and obs_hi both present). Interpolating between two real,
+    confirmed points is normally safe regardless of gap length - both ends
+    are true. It stops being safe once the gap is long enough that the
+    subject's real path in between is no longer well approximated by a
+    straight line - a turn, a roll, a round trip back to nearly the starting
+    position. There is no way to detect that from the two endpoints alone: a
+    round trip's average velocity looks identical to "barely moved" (measured
+    directly - a 130-frame turn-and-back scored the same near-zero velocity
+    mismatch as an 18-frame linear dropout). Frame count is therefore the
+    only signal available, but it cannot be a fixed number of frames: under a
+    sparse detection cadence (e.g. the Optimized preset's ~10-frame keyframe
+    spacing) a routine one-second occlusion and a several-second deliberate
+    turn-away can produce the SAME raw span - measured directly, an 18-frame
+    real dropout produced brackets up to 30 frames wide purely from cadence
+    spacing. `max_bracket` is therefore expressed in OUTPUT FRAMES already
+    converted from a fixed TIME budget (seconds) at the call site, so it
+    scales with fps/quality instead of being tuned against one preset's
+    cadence and breaking on another. Beyond it, this falls back to the same
+    near-edge hold and fade as the one-sided case, rather than a confident
+    full-span interpolation.
     """
     if not timeline:
         return None
@@ -895,23 +938,83 @@ def _geom_for_frame(timeline, g, taper):
     # between two real ones only drags the interpolation toward the tracker's
     # lag; the real pair on either side describes the motion better.
     observed = [e for e in timeline if e[1].get("det")]
-    lo, hi = _bracket(observed)
-    if lo is None or hi is None:
-        lo, hi = _bracket(timeline)
+    obs_lo, obs_hi = _bracket(observed)
+
+    if obs_lo is not None and obs_hi is not None:
+        span = float(obs_hi[0] - obs_lo[0])
+        # A short dip between two real detections is safe to interpolate
+        # across in full: the two endpoints anchor it, and real motion over a
+        # fraction of a second is well approximated by a straight line - this
+        # is what keeps a brief detector dropout smooth. A LONG dip is not:
+        # nothing constrains the subject's actual path in between, and once a
+        # real detection eventually resumes, this branch previously bridged
+        # however long that gap was with a confident, full-alpha straight
+        # line - which is the reported "ghost" defect from a THIRD angle:
+        # rather than drifting via extrapolation (the one-sided case above)
+        # or lingering past a chunk boundary (the trim above), it glides in a
+        # straight line between two real sightings while the subject's actual
+        # motion in between - a turn, a roll - is anything but straight.
+        #
+        # Bounded the same way the one-sided case is bounded: render only
+        # within `taper` frames of EITHER real endpoint, using a hold near
+        # whichever endpoint is closer (not a blend across the unconstrained
+        # middle) with the same quadratic fade. The deep middle of a long
+        # gap renders nothing - the original frame - rather than a guess.
+        budget = float(max_bracket) if max_bracket else float("inf")
+        if span > budget:
+            dist_lo = g - obs_lo[0]
+            dist_hi = obs_hi[0] - g
+            if dist_lo <= dist_hi:
+                edge, side = dist_lo, obs_lo
+            else:
+                edge, side = dist_hi, obs_hi
+            if taper > 0 and edge > taper:
+                return None
+            rec = dict(side[1])
+            rec["det"] = False
+            if taper > 0:
+                rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (edge / float(taper)) ** 2))
+            return rec if rec["alpha"] > 0.02 else None
+        t = 0.0 if span <= 0 else (g - obs_lo[0]) / span
+        return _geom_lerp(obs_lo[1], obs_hi[1], t)
+
+    if obs_lo is not None:
+        # obs_hi is None: this identity has not been seen for REAL since
+        # obs_lo, and has not been confirmed again yet (an ongoing gap, not a
+        # bracketed dip). taper/fade are computed from obs_lo - the last real
+        # sighting - not from whatever the tracker most recently guessed.
+        real_dist = g - obs_lo[0]
+        if taper > 0 and real_dist > taper:
+            return None
+        # Still inside the short grace window: use the MOST RECENT entry
+        # (which may be an extrapolated one, and is typically a better
+        # position estimate for these few frames than the stale real
+        # observation alone) for placement, but drive alpha from real_dist,
+        # not from that entry's own recency - so a fresh extrapolation cannot
+        # look "just seen" and stay at full opacity indefinitely.
+        lo, _hi_all = _bracket(timeline)
+        side = lo if lo is not None else obs_lo
+        rec = dict(side[1])
+        rec["det"] = False
+        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (real_dist / float(taper)) ** 2))
+        return rec if rec["alpha"] > 0.02 else None
+
+    # No real detection anywhere in this timeline yet - never established, or
+    # history was trimmed past it. Fall back to whatever is available; this
+    # is the pre-existing cold-start path and is unchanged.
+    lo, hi = _bracket(timeline)
     if lo is not None and hi is not None:
         span = float(hi[0] - lo[0])
         t = 0.0 if span <= 0 else (g - lo[0]) / span
         return _geom_lerp(lo[1], hi[1], t)
     side = lo if lo is not None else hi
+    if side is None:
+        return None
     dist = abs(g - side[0])
     if taper > 0 and dist > taper:
         return None
     rec = dict(side[1])
     if dist > 0:
-        # Anchored on one side only: this is an extrapolation, whatever the
-        # anchor was. Leaving det=True here (inherited from a real detection
-        # several frames back) made every downstream "is this observed?" check
-        # silently pass for held geometry.
         rec["det"] = False
         rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (dist / float(taper)) ** 2))
     return rec if rec["alpha"] > 0.02 else None
@@ -3120,11 +3223,34 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _last_swap_bboxes.append(bb.copy())
                             last_bboxes_ref[0] = list(_last_swap_bboxes)
 
-                    if not pairs:
-                        # Detector saw a head-turn/partial and pairing dropped
-                        # the identity match. Carry the last locked slot so
-                        # the original face does not flash through.
-                        pairs = _carry_pairs(_tracker, smap, max_faces, advance=False)
+                    # Carry forward any slot that pairing did NOT cover this
+                    # frame - not only when EVERY slot failed to pair.
+                    #
+                    # The previous check ("if not pairs") only carried when the
+                    # WHOLE list came back empty, so a slot that fails to pair
+                    # while a DIFFERENT slot in the same frame succeeds got
+                    # nothing at all: no real pair, no carried one either - a
+                    # silent hole in the one guarantee this engine is built
+                    # around ("a slot always gets carried through a miss").
+                    # Measured directly: a heavily-occluded identity in a
+                    # two-face scene (a near-total overlap, its own visible
+                    # sliver too narrow for a reliable landmark read) went 82
+                    # CONSECUTIVE frames with NOTHING recorded for it, purely
+                    # because the OTHER identity kept pairing successfully
+                    # every single frame and so the all-or-nothing check never
+                    # tripped. That is what a downstream fix (bounding how long
+                    # a gap may be bridged) surfaced as a visible defect - the
+                    # gap this closes was always there, just never this long
+                    # before a slot's own kps could get rejected outright.
+                    pairs = list(pairs or [])
+                    covered = {sj for _pf, psrc in pairs
+                              for sj, sface in smap.items() if psrc is sface}
+                    missing = set(smap.keys()) - covered
+                    if missing:
+                        have_srcs = {id(psrc) for _pf, psrc in pairs}
+                        for pf, psrc in _carry_pairs(_tracker, smap, max_faces, advance=False):
+                            if getattr(pf, "_slot", None) in missing and id(psrc) not in have_srcs:
+                                pairs.append((pf, psrc))
                     _record_geometry(pairs or [], g)
                     # A pair that comes back predicted means the detector ran
                     # and this identity was not among what it found.
@@ -3158,12 +3284,20 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # geometry on top of it is how a face ends up painted on a body
             # after its owner has left the shot.
             taper = int(max(3, min(2 * max(1, skip_n, swap_gap_base), 12)))
+            # How long a gap BETWEEN TWO REAL DETECTIONS is still safe to
+            # bridge with a full, confident interpolation - expressed as a
+            # TIME budget (see _geom_for_frame's docstring for why a fixed
+            # frame count cannot work here) and converted to output frames at
+            # the actual output fps, so it does not have to be re-tuned
+            # whenever fps or the detection cadence preset changes.
+            max_bracket_frames = max(taper + 1, int(round(out_fps * 1.5)))
 
             def _records_at(g):
                 """Every slot's geometry for output frame ``g``."""
                 out = {}
                 for slot in sorted(smap.keys()):
-                    rec = _geom_for_frame(_geom_hist.get(slot) or [], g, taper)
+                    rec = _geom_for_frame(_geom_hist.get(slot) or [], g, taper,
+                                          max_bracket=max_bracket_frames)
                     if rec is not None:
                         out[slot] = rec
                 return out
@@ -3519,7 +3653,30 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 for slot in _geom_hist:
                     h = _geom_hist[slot]
                     idx = max((i for i, (gi, _r) in enumerate(h) if gi <= keep_from), default=None)
-                    _geom_hist[slot] = h[idx:] if idx is not None else h[-1:]
+                    trimmed = h[idx:] if idx is not None else h[-1:]
+                    # ALWAYS keep the single most recent REAL (det=True) entry
+                    # too, however far back it falls, even once everything
+                    # else around it has been trimmed away. Without this, a
+                    # long run of carried/predicted entries (a subject turned
+                    # away for longer than one chunk) leaves the most recent
+                    # survivor of the trim above as a CARRIED entry, and the
+                    # last real sighting is discarded entirely. The next
+                    # chunk's _geom_for_frame then has no "observed" anchor to
+                    # measure staleness against, falls through to its
+                    # cold-start fallback, and can bracket that stale carried
+                    # position against a distant FUTURE real detection -
+                    # interpolating confidently across the whole remaining
+                    # gap. That is the same reported "ghost face" defect
+                    # re-entering through the one boundary the render-time fix
+                    # (_geom_for_frame's real_dist check) cannot see across,
+                    # because by then the real anchor it depends on is simply
+                    # gone. A single retained dict per slot costs nothing.
+                    last_real_idx = max(
+                        (i for i, (_gi, r) in enumerate(h) if r.get("det")), default=None)
+                    if last_real_idx is not None and (
+                            not trimmed or h[last_real_idx][0] < trimmed[0][0]):
+                        trimmed = [h[last_real_idx]] + trimmed
+                    _geom_hist[slot] = trimmed
                 for slot in _aligned_hist:
                     _aligned_hist[slot] = (_aligned_hist[slot] or [])[-1:]
 

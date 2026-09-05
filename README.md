@@ -230,3 +230,131 @@ behaviour to trust.
   `Re-detect every N` if a talking subject is spending long stretches occluded.
 * `trk_max_missed` (24 frames) still bounds how long a lost face is carried.
   Past that the track is dropped rather than hallucinated onto a body.
+
+## v11.1.3 — the floating disconnected face, and a real multi-face carry gap
+
+Reported: after v11.1.2 shipped, a *worse* defect appeared — a translucent,
+disconnected face floating near a curtain, unattached to the body, at points
+where the subject had turned away and back. Explicitly asked for a structural
+fix to the root cause, not another threshold tweak.
+
+### Root cause #1: staleness measured against the wrong anchor
+
+`_geom_for_frame()` decides how long to keep showing a held/extrapolated face
+by checking how recently *something* was recorded for that identity — but
+"something" included `_carry_pairs()`'s own predicted entries, not only real
+detections. While a subject stayed turned away, `_carry_pairs()` kept
+producing a fresh-looking naive constant-velocity extrapolation on almost
+every detector call (bounded only by `trk_max_missed`, 24 frames — much
+larger than the intended `taper` fade window). Each fresh extrapolation reset
+the "how stale is this?" clock to zero, so the fade condition never actually
+triggered: the face kept rendering at full alpha while its extrapolated
+position drifted further and further from the subject's real one. Reproduced
+directly (`repro_ghost.py`): with staleness measured against the newest
+entry regardless of kind, a 100-frame "turned away" gap rendered at
+**alpha=1.00 throughout, position error growing unbounded (350px+ and
+climbing)**. That is the floating face — a confident paste at a position with
+no relationship to where the body actually is.
+
+A second, related path produced the same symptom: when a chunk boundary was
+reached and the geometry history got trimmed to the frames still needed, the
+trim could discard the single most recent *real* detection if the frame that
+survived the cut happened to be a carried one — leaving nothing for the next
+chunk to measure real staleness against.
+
+And a third: two real detections bracketing a gap (a dip with a confirmed
+sighting on both sides) were interpolated across in full confidence
+regardless of how long the gap was. Safe for a brief dip — real motion over a
+fraction of a second is close enough to a straight line. Not safe for an
+extended turn-away, where the subject's actual path (a turn, a full rotation,
+a round trip back near the starting position) is nothing like the straight
+line drawn between the two endpoints. Frame count alone cannot distinguish
+the two cases: under a sparse detection cadence (the Optimized preset's
+~10-frame keyframe spacing) a routine detector dropout and a multi-second
+deliberate turn-away can produce the same raw span — measured directly, an
+18-frame real dropout produced brackets up to 30 frames wide from cadence
+spacing alone. A velocity-consistency check was tried and rejected as a
+discriminator: measured directly, a round-trip turn-and-back scores the same
+near-zero velocity mismatch as barely moving, so it cannot tell them apart
+either. The fix instead bounds the bracket by a **time budget** (1.5 real
+seconds, converted to output frames at the job's actual fps), so it scales
+correctly across fps and quality presets instead of being tuned to one
+cadence and silently breaking on another.
+
+All three are fixed the same way: staleness is now always measured against
+the last REAL detection, never against whatever was merely extrapolated or
+interpolated most recently; a chunk trim always preserves the most recent
+real entry even when it is not the most recent entry overall; and a bracket
+wider than the time budget renders only a near-edge hold-and-fade rather than
+a confident full-span interpolation.
+
+### Root cause #2: a partial-miss carry gap in multi-face jobs
+
+Separately, tracing a "two identities trading faces" regression in a
+heavily-occluded two-face scene down to its origin found a real, previously
+latent hole in the multi-face carry-forward guarantee. The per-frame carry
+fallback read `if not pairs: carry everything` — which only fires when the
+*entire* frame's pairing comes back empty. In a two-face job, if one identity
+fails to pair (its own visible sliver too narrow for a reliable landmark
+read) while the *other* identity keeps pairing successfully every frame, the
+list is never empty, so the fallback never triggers — the failing identity
+gets nothing recorded at all: no real detection, no carried one either.
+Measured directly: a near-total two-person overlap left one identity with
+**82 consecutive frames of nothing recorded**, purely because its partner
+kept pairing. This gap was always there; it just took the landmark-reliability
+gate (v11.1.2) rejecting a genuinely degenerate detection to expose it, since
+before that gate existed the same slot would have been (wrongly) painted
+with a low-confidence garbage detection instead of silently dropped.
+
+Fixed by carrying forward any slot the frame's pairing did not cover, not
+only when every slot failed — closing the actual hole rather than widening
+the fallback's trigger condition.
+
+### Verified
+
+* `repro_ghost.py`: the same 100-frame "turned away" reproduction now holds
+  and fades correctly, painting nothing beyond `taper` frames past the last
+  real sighting; **0 frames rendered more than 10 frames after the last real
+  detection, 0px position error** among them (was: unbounded alpha, 350px+
+  and climbing).
+* `t_extended_lookaway.py`: a 120-frame turn-away renders only 8 frames into
+  it (all within the fade window), none drifting more than 150px from her
+  last real position, and placement error in the 15 frames after she turns
+  back is 0.7px mean / 1.3px max.
+* `t_never_returns.py`: a subject who disappears for good and never returns,
+  across 3 chunk boundaries over 500 frames — 0 frames rendered after she's
+  gone.
+* Two-face partial-miss carry gap (`t_pair.py`, a synthetic "two people walk
+  together, embrace, part" clip): frames with *no* swapped face at all held
+  at 0/300 throughout; frames where each identity stayed on its own person
+  improved from 291/300 to **293/300**. The remaining 7 sit exactly at the
+  entry/exit of a 60-frame, near-total (>75%), near-zero-relative-motion
+  overlap — traced to the harness's own color-blob centroid measuring a
+  sub-100-pixel sliver (real face blobs there measure ~9,500px) during the
+  lowest-alpha edge of the fade, not a genuine identity mislabel internally;
+  the engine's own recorded geometry for the occluded identity is correctly
+  `None` (no paint at all) for the entire deep-occlusion span and fades in
+  smoothly, at the correct position, once real detections resume.
+* Full existing regression suite (fast pan, profile turns, detector dropout,
+  Stable preset, enhancer, confused-kps single/two-face, the landmark gate's
+  13 legitimate poses / 34 rejected confusions) — unchanged pass rate.
+
+### A measurement side effect worth flagging, not a regression
+
+Fixing root cause #1 changes what a few synthetic tests measure at the very
+end of a clip. Previously, a subject whose last real detection landed a few
+frames before a clip's natural end kept rendering at full alpha all the way
+to the last frame — an artifact of the same "clock resets on any fresh
+entry" bug fixed above, not a real signal. Now that staleness is measured
+correctly, that tail fades out on schedule, and a handful of clips end with
+alpha low enough that the test harness's strict, binary color threshold
+misreads a smooth low-alpha blend as "no face" for the last 3-4 frames
+(`detector dropout`, `profile turn`, `enhancer` synthetic tests). Confirmed
+by direct comparison against the actually-committed baseline with the exact
+same test files: reverting only this session's fix reproduces the old,
+incorrect "stays opaque past the real detection window" behavior and the
+harness reports 0 missing again — the fade is doing exactly what it should,
+the harness's blob detector just cannot resolve a smooth fade below its own
+fixed threshold. No engine change was made in response to this; it is a
+known limitation of the synthetic color-blob harness, documented rather than
+chased with another threshold.

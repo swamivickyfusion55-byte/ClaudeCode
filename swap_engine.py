@@ -59,7 +59,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.1.2-continuous"
+ENGINE_VERSION = "aequus-1.1.3-continuous"
 
 log = logging.getLogger("swamitech.engine")
 
