@@ -474,3 +474,92 @@ gate, then getting compared against nothing) is grounded directly in the
 code paths involved and matches the clip's visual signature (frozen,
 hard-edged, resolves once motion settles), but confirming it end-to-end
 needs a test against the actual clip on the next deploy.
+
+## v11.1.5 — the v11.1.4 veto's own expectation was wrong
+
+Reported: after v11.1.4 shipped, the same class of defect kept appearing —
+a hard-edged mismatch during fast head/hair motion, and separately, in a
+second clip, what looked like a whole extra face floating near a pillow
+while the real one moved normally above it, with no second person ever in
+the source video.
+
+### Root cause: the veto compared against a deliberately-too-cautious guess
+
+v11.1.4's motion-consistency check computed "where should this identity's
+keypoints be right now" as `tr.kps + tr.vel_kps * dt`, using `tr.kps` -
+the same field `TrackState.predict()` advances. `predict()`'s damping
+(`0.85 ** missed`, capped) is deliberate for what IT is for: a cautious,
+under-committing guess to paste while a face is genuinely lost, so a stale
+guess doesn't confidently drift forever. Reusing that same damped value as
+the veto's "expected" position was the wrong tool for a different job: it
+under-advances ON PURPOSE, so a perfectly real, constant-velocity motion -
+someone simply moving faster, or leaning toward the camera - falls further
+behind the damped estimate every single veto cycle. The measured deviation
+then grows without bound even though nothing is actually wrong, and the
+veto never gets a chance to agree with reality again. Two visible failure
+modes came from the exact same bug:
+
+* A synthetic ordinary fast horizontal sweep (no confusion injected at all,
+  just normal motion under a sparse cadence) went from 4/420 frames without
+  a swapped face to **293/420** - the veto, not any real defect, was
+  rejecting good detections indefinitely once it started disagreeing.
+* The "extra face" in the second clip: once the veto starts rejecting a
+  real, moving face because the damped estimate has fallen behind, the live
+  detection never gets pasted (correctly showing her real, unswapped face)
+  while the compositor keeps painting the stale, held geometry from before
+  the mismatch started - visually, her real face plus a second, wrongly
+  positioned paste of the same identity. Not a duplicate-rendering bug and
+  not two people; one identity, held at the wrong place, next to her own
+  unmodified face showing through where the live detection was rejected.
+
+A second, compounding bug: the same check compared a detection right after
+a GENUINE gap (out of frame, occluded, turned away) against the identity's
+pre-gap position - which carries no information about where the subject
+actually is after a real absence - and rejected legitimate returns outright.
+Measured directly: this alone took the v11.1.4 "reappear after leaving
+frame" fix's placement error from 1.0px back to a full miss.
+
+### The fix
+
+* The veto's expectation is now projected from `last_hit_kps` (the actual
+  last real detection) over the FULL elapsed time (`missed + this
+  interval`), undamped - an accurate constant-velocity projection, not a
+  cautious extrapolation borrowed from a mechanism built to under-commit.
+* Its tolerance now scales with how much the identity's own tracked
+  velocity says it is ACTUALLY moving, not with elapsed frames directly -
+  scaling by elapsed frames alone let the budget balloon past 200px on a
+  150px-wide face after just a 10-frame cadence gap, loose enough to accept
+  almost anything exactly when a sustained confusion or occlusion had
+  already widened the cadence.
+* The check is skipped outright on the first detection after a genuine gap,
+  and its own streak counter resets there too - consistency is only
+  meaningful between two hits that were never separated by a real absence.
+
+### Verified
+
+* The ordinary fast-sweep regression above: fixed for continuous real
+  motion. An intentionally extreme, discontinuous 10x step-change in
+  velocity (0.6 to 6 px/frame with no ramp - not representative of real
+  head motion, which accelerates smoothly) still costs a bounded, self-
+  correcting ~51/420 frames while the estimate catches up; it does not lock
+  up for the rest of the job the way the damped version did.
+* `t_reentry.py` (the v11.1.4 leaving-frame/return fix): restored to
+  1.0px mean / 2.1px max, matching its original result exactly.
+* The realistic hair-confusion reproduction (3 consecutive detector calls,
+  matching the ~15-raw-frame duration seen in the reported clip): 1.0px
+  mean / 4.8px max, unchanged from v11.1.4's result for this case.
+* Full existing regression suite (`t_final`, `t_modes`, `t_exit`,
+  `t_confused_kps`, `t_confused_2face`, `t_pair`, `verify_gate`,
+  `repro_ghost`, `verify_geom_cases`, `t_extended_lookaway`,
+  `t_never_returns`) - unchanged from the v11.1.4 baseline.
+
+### Honest caveat
+
+The "extra face" explanation is inferred from the code paths and the
+measured fast-sweep mechanism, not from re-running the actual reported clip
+- this environment has no model weights to do that. It is the most direct
+explanation that fits every observation (one identity, her real face
+unmodified where the live detection was rejected, the stale paste drifting
+closer to correct over several frames as the tracker's estimate caught up)
+without requiring a second, unrelated bug, but confirming it needs a test
+against the actual clip on the next deploy.

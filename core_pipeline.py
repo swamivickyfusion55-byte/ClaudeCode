@@ -3149,7 +3149,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # detection rather than the most recent entry of any
                     # kind: a real gap invalidates the stale anchor outright
                     # rather than letting distance alone decide.
-                    if _no_face_streak[0] > 0:
+                    _after_real_gap = _no_face_streak[0] > 0
+                    if _after_real_gap:
                         prev_kps_state[0] = None
                         prev_bbox_state[0] = None
                     _no_face_streak[0] = 0
@@ -3219,7 +3220,26 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # uses for "how long may a competing signal override
                         # the established one before conceding" - this is
                         # that same hysteresis idiom, not a new tuned number.
-                        if pairs and len(pairs) == 1:
+                        # A detection right after a genuine gap has nothing
+                        # valid to be judged against: last_hit_kps/vel_kps
+                        # describe wherever this identity was BEFORE it went
+                        # undetectable, and after any real absence - out of
+                        # frame, a hard occlusion, a turned-away stretch -
+                        # that position and velocity carry no information
+                        # about where the subject actually is now. Comparing
+                        # anyway made a legitimate return look exactly like
+                        # the inconsistent reading this check exists to
+                        # catch, and rejected it: measured directly, this
+                        # broke the v11.1.4 "reappear after leaving frame"
+                        # fix outright (a clean reappearance 40 frames later
+                        # started showing no face at all instead of the
+                        # correct swap). The fresh detection becomes the new
+                        # trusted anchor unconditionally; consistency is only
+                        # meaningful between two hits that were never
+                        # separated by a real absence.
+                        if _after_real_gap:
+                            _kps_veto_streak[0] = 0
+                        if pairs and len(pairs) == 1 and not _after_real_gap:
                             _pf0, _psrc0 = pairs[0]
                             _tr0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
                             _new_kps = getattr(_pf0, "kps", None)
@@ -3227,22 +3247,53 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _tr0.kps is not None and _new_kps is not None and
                                     _tr0.kps.shape == np.asarray(_new_kps).shape and
                                     _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5))):
+                                # Project from the last REAL hit's own
+                                # keypoints over the FULL elapsed time
+                                # (missed + this interval), undamped - not
+                                # from tr.kps/.predict(), whose decaying-
+                                # confidence damping is deliberate for what
+                                # it is FOR (a cautious guess to paste while
+                                # genuinely lost) but is the wrong tool here:
+                                # it under-advances on purpose, so a
+                                # perfectly real, constant-velocity motion
+                                # falls further "behind" the damped estimate
+                                # every single veto cycle, and the measured
+                                # deviation grows without bound even though
+                                # nothing is actually wrong. Measured
+                                # directly: using the damped estimate turned
+                                # an ordinary fast sweep into 293/420 frames
+                                # without a swapped face, because the veto
+                                # never had a chance to agree with reality
+                                # again once it started disagreeing.
+                                _elapsed = float(_tr0.missed) + float(_det_dt[0])
                                 _expected = _tr0.kps
-                                if _tr0.vel_kps is not None:
-                                    _expected = _tr0.kps + _tr0.vel_kps * float(_det_dt[0])
+                                _est_speed = 0.0
+                                if _tr0.vel_kps is not None and _tr0.last_hit_kps is not None:
+                                    _expected = _tr0.last_hit_kps + _tr0.vel_kps * _elapsed
+                                    _est_speed = float(np.mean(np.linalg.norm(_tr0.vel_kps, axis=1))) * _elapsed
                                 _face_w = max(1.0, float(_pf0.bbox[2] - _pf0.bbox[0]))
                                 _dev = float(np.mean(np.linalg.norm(
                                     np.asarray(_new_kps, np.float32) - _expected, axis=1)))
-                                # The tolerance widens with elapsed frames: a
-                                # sparse detection cadence can put many
-                                # output frames between two detector calls,
-                                # so the same linear projection naturally
-                                # accumulates more slack over a longer
-                                # interval - a fixed pixel budget would
-                                # either reject ordinary fast motion under a
-                                # sparse cadence or fail to catch a genuine
-                                # bad read under a dense one.
-                                _budget = _face_w * (0.35 + 0.10 * float(_det_dt[0]))
+                                # Budget grows with how much this face is
+                                # ACTUALLY estimated to be moving, not with
+                                # elapsed frames alone. Scaling by elapsed
+                                # frames directly let the budget balloon
+                                # exactly when it should not: a sustained
+                                # confusion (or a genuine occlusion) that
+                                # widens the detector cadence made the
+                                # tolerance loose enough to accept almost
+                                # anything, precisely as the confusion got
+                                # longer - measured directly, a 10-frame gap
+                                # widened the budget past 200px on a 150px-
+                                # wide face, well past the ~70px error this
+                                # check exists to catch. Tying it to the
+                                # track's own estimated displacement instead
+                                # means a fast-moving face still gets
+                                # generous slack (correctly), but a mostly
+                                # still one does not get more lenient just
+                                # because the detector happened to skip a
+                                # few extra frames.
+                                _budget = _face_w * 0.22 + 0.5 * _est_speed
                                 if _dev > _budget:
                                     _tr0.predict(float(_det_dt[0]))
                                     _kps_veto_streak[0] += 1
