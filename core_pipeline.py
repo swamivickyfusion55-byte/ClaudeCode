@@ -2189,12 +2189,44 @@ def _pairs_for_frame(
             if _score(ranked[0]) >= 0.10:
                 best = ranked[0]
         elif ref0 is not None:
-            best = max(faces, key=lambda f: float(np.dot(f.normed_embedding, ref0)))
+            ranked = sorted(faces, key=lambda f: float(np.dot(f.normed_embedding, ref0)), reverse=True)
+            # No prev_bbox to lean on (before the first successful bind) -
+            # identity similarity alone has to clear a real bar. Unbounded
+            # here meant this branch, like the _open_score fallback below,
+            # would hand the swap to whatever face-shaped thing the detector
+            # found with the highest (however low) similarity - see the
+            # comment on `if ref0 is not None:` below for why that matters
+            # once an identity exists.
+            if float(np.dot(ranked[0].normed_embedding, ref0)) >= 0.10:
+                best = ranked[0]
         elif prev_bbox is not None:
             ranked = sorted(faces, key=lambda f: _box_center_dist_norm(prev_bbox, f.bbox))
             if _box_center_dist_norm(prev_bbox, ranked[0].bbox) < 0.70:
                 best = ranked[0]
         if best is None:
+            if ref0 is not None:
+                # An identity IS already established, but nothing this frame
+                # cleared minimum confidence against it. The old behaviour
+                # fell through to _open_score below regardless - a fallback
+                # meant for the one-time cold-start bootstrap (no reference
+                # to check against yet), which does not look at identity or
+                # position AT ALL, only how frontal/confident/large a
+                # detection is. Once ref0 exists, that fallback will happily
+                # hand the swap to ANY OTHER face-shaped thing the detector
+                # reports - a false-positive detection elsewhere in frame,
+                # a hand, a face-shaped shadow - whenever the real face is
+                # merely at a hard angle or motion-blurred for a moment and
+                # scores below the bar. Measured directly against a reported
+                # clip: this is what put the swap on a spurious detection
+                # near a pillow while the subject's real, unmodified face
+                # kept showing normally a few inches away - not a duplicate
+                # paste, one identity painted in the wrong place because
+                # nothing here required it to actually BE that identity.
+                # No reliable candidate this frame is not a reason to guess
+                # at the most face-like blob in frame; it is exactly the
+                # existing "no detection" case, which already holds the last
+                # good geometry and fades rather than painting a guess.
+                return []
             def _open_score(f):
                 area = _area(f)
                 front = _frontal_score(f)

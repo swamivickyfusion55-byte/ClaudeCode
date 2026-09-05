@@ -667,3 +667,89 @@ rather than silence. Confirming it needs a test against real footage,
 specifically footage combining a leaving-frame/return moment WITH a
 fast hair/hand occlusion in the same clip, since that combination is what
 exercised both halves of the old disagreement at once.
+
+## v11.1.7 — the swap could be handed to ANY face-shaped thing in frame
+
+The v11.1.6 structural fix (one geometry system instead of two) was real
+and stayed in - the same "extra face" signature still reported afterward
+had a second, independent cause that v11.1.6 never touched, in a part of
+the pipeline none of the v11.1.3-v11.1.6 rounds had looked at: single-face
+candidate SELECTION, not geometry smoothing or motion consistency.
+
+### Root cause
+
+`_pairs_for_frame`'s single-face path scores every detected candidate
+against the locked identity and the last known position. When the best
+score fails to clear a minimum bar, `best` stays `None` - and the code
+unconditionally fell through to an `_open_score` fallback that picks
+whichever detected candidate looks most frontal, confident, and large,
+with **no identity or position check at all**:
+
+```python
+if best is None:
+    best = max(faces, key=_open_score)   # front/det/area only
+```
+
+That fallback is correct for the ONE case it was written for: true cold
+start, before any reference embedding has ever been established, when
+there is nothing yet to check identity against. It is wrong every other
+time it fires - and it fires unconditionally whenever the scored path's
+confidence dips below the bar, identity already locked or not. A moment
+where the tracked face is at a hard angle or motion-blurred (a real,
+ordinary thing that happens on any video) drops its own score below the
+bar; if the detector ALSO reports anything else remotely face-shaped
+elsewhere in frame that same moment - a false-positive on a hand, a
+shadow, a pillow crease - this fallback hands it the swap with zero
+regard for whether it is actually the tracked person. Verified directly
+against the exact function: a synthetic frame with only a false-positive
+detection (valid-looking keypoints, an unrelated random embedding, no
+relation to the locked identity) scored 0.0 against the locked identity,
+failed the bar, and the old code selected it anyway via `_open_score`.
+
+This produced exactly the reported symptom and nothing else: her real,
+unmodified face keeps showing normally (nothing was ever swapped onto
+it this frame), while the swap gets confidently painted onto the
+unrelated region the detector also reported - one identity, in the wrong
+place, next to itself unmodified. Not a duplicate render, not a geometry
+or motion-consistency bug (which is why v11.1.3 through v11.1.6, all
+aimed at geometry and motion, never touched it).
+
+### The fix
+
+`_open_score` now fires only on true cold start - `ref0 is None`, meaning
+no identity has ever been locked yet. Once an identity exists and nothing
+this frame clears minimum confidence against it, that is treated as
+`return []`: the existing "no reliable detection this frame" case, which
+already holds the last good geometry and fades rather than painting
+anything - the same standard applied everywhere else in this engine, now
+applied here too. The narrower no-`prev_bbox` branch (identity score
+alone, before the first successful bind) got the same minimum-confidence
+floor for the same reason.
+
+### Verified
+
+* Direct reproduction at the function level: a spurious-only detection
+  (no real face reported that call) scores 0.0 against the locked
+  identity; the old code selected it via `_open_score`, the new code
+  returns no pair.
+* Full existing regression suite (`t_final`, `t_e2e`, `t_modes`, `t_exit`,
+  `t_confused_kps`, `t_confused_2face`, `t_pair`, `t_reentry`,
+  `t_hair_confusion`, `verify_gate`, `repro_ghost`, `verify_geom_cases`,
+  `t_extended_lookaway`, `t_never_returns`) - unchanged from the v11.1.6
+  baseline; this fix only changes behavior in the specific case it targets
+  (a scored candidate failing the bar with an identity already locked),
+  which none of the existing tests happen to construct.
+
+### Honest caveat
+
+Same as every round: not verified against the real detector or the
+reported clips - no model weights in this environment. This is the first
+fix in this whole engagement that targets candidate SELECTION rather than
+geometry or motion, found by reading the one code path in the single-face
+pipeline that had not yet been examined after geometry smoothing (v11.1.6)
+and motion consistency (v11.1.4/v11.1.5) were both ruled out by the clip
+still showing the same symptom afterward. If it recurs a third time after
+this, the next place to look is upstream of the compositor entirely: what
+the actual face detector reports for the specific frames involved, which
+requires the real model and cannot be narrowed further from this
+environment.
