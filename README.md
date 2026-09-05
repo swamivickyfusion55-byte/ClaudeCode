@@ -563,3 +563,107 @@ unmodified where the live detection was rejected, the stale paste drifting
 closer to correct over several frames as the tracker's estimate caught up)
 without requiring a second, unrelated bug, but confirming it needs a test
 against the actual clip on the next deploy.
+
+## v11.1.6 — the actual structural fix: one geometry, not two
+
+Asked directly for a structural analysis after the issue persisted through
+three consecutive round-by-round fixes (v11.1.4, v11.1.5, and the veto
+tuning within it). Each round fixed the specific failure just reported and
+each round was followed by a new, related one - a pattern that means the
+individual fixes were treating symptoms of one design flaw, not the flaw
+itself.
+
+### The actual root cause
+
+The single-face path had **two independent, separately-maintained "smoothed
+face position" systems** live at once, fed similar but not identical inputs,
+updated in a different order, with no synchronization between them:
+
+1. **`TrackState`** (`swap_engine.py`) - `tr.bbox` / `tr.kps`, EMA and
+   One-Euro-filter smoothed, updated by `tracker.bind()` from the RAW
+   detection.
+2. **`_stabilize_face_geometry`** (`core_pipeline.py`) - a second, separate
+   blend toward `prev_kps_state` / `prev_bbox_state`, running AFTER
+   `tracker.bind()` and mutating the detection's geometry IN PLACE - this
+   second value, not TrackState's, was what actually got composited.
+
+Every defect chased across v11.1.3-v11.1.5 traces back to these two
+systems disagreeing:
+
+* The floating/frozen-face reports (v11.1.3, v11.1.4) were `prev_kps_state`
+  / `prev_bbox_state` surviving a gap that `TrackState` itself handles
+  correctly, then blending a fresh, correct detection toward stale data.
+* The v11.1.4 motion-consistency veto compared a live detection against
+  `TrackState`'s history (`tr.kps`) - a DIFFERENT position than whatever
+  `_stabilize_face_geometry` had actually painted last frame. A check that
+  passes is meaningless if it is not checking the thing that got rendered.
+* Fixing the veto's own internals (v11.1.5, twice) kept working around
+  symptoms of that same disconnect - a reappearance the veto now handled
+  correctly could still be repainted through a stale `_stabilize_face_geometry`
+  blend one line later, and vice versa.
+
+Two systems tracking the same fact, on different schedules, are not more
+stable than one - they are a standing opportunity for exactly this kind of
+report to keep recurring in a new shape each time only one of the two gets
+patched.
+
+### The fix
+
+`_stabilize_face_geometry` is removed from the single-face path entirely,
+along with its state (`prev_kps_state`, `prev_bbox_state`, and the
+chunk-boundary reseeding that existed only to keep it working across a
+chunk cut). An accepted real detection is now painted with its own raw
+geometry - **exactly how the multi-face path has always worked**, which
+never had a second smoothing layer and has been comparatively stable
+throughout this entire engagement. `_kps_reliable()` (the roll-corrected
+pitch + landmark-fit-error check from v11.1.2) is the sole gate on whether
+a detection is geometrically sane; it tests a detection against itself, not
+against history, so it cannot go stale.
+
+The one thing that check cannot catch - keypoints that are individually
+self-consistent but describe the wrong pose for THIS identity right now
+(hair pulling the landmark read sideways) - is still worth catching, so the
+v11.1.5 motion-consistency veto is kept, but now reads and writes only
+`TrackState` fields: the same, single state `_pairs_for_frame`'s selection
+step and `tracker.bind()` both already use. There is now exactly one
+position for this check, the bind() call right after it, and the compositor
+to ever agree or disagree about - not two.
+
+### Verified
+
+Full regression suite, including every test written across v11.1.3-v11.1.5:
+* `t_reentry` (leaving frame and returning): 1.0px mean / 2.1px max -
+  identical to its best-ever result, now achieved with no special-cased
+  "reset on gap" logic at all, because there is no second, separately-aged
+  piece of state left to need resetting.
+* Realistic hair-confusion reproduction (3 detector calls, matching the
+  reported clip's duration): 1.0px mean / 4.8px max - unchanged from
+  v11.1.5.
+* The ordinary fast-sweep regression the veto itself risks: back to the
+  original 4/420 baseline exactly (previously 51/420 even after the v11.1.5
+  fix, since that fix's own veto - correct in isolation - was still only
+  ever checked against `TrackState`, one of the two disagreeing systems;
+  with the other one gone, the same veto no longer has anything to
+  disagree with).
+* `t_final`, `t_modes`, `t_exit`, `t_confused_kps`, `t_confused_2face`,
+  `t_pair`, `verify_gate`, `repro_ghost`, `verify_geom_cases`,
+  `t_extended_lookaway`, `t_never_returns` - unchanged.
+* The intentionally extreme, discontinuous 10x-instant-speed-jump stress
+  case (not representative of real head motion) still costs the same
+  bounded, self-correcting ~51/420 frames documented in v11.1.5 while the
+  veto's estimate catches up - accepted then and unchanged now, since it
+  is a property of the veto's own motion model, not of the two-systems bug
+  this round fixes.
+
+### Honest caveat
+
+Unchanged from v11.1.5: none of this has been run against the real face
+detector or the reported clips - this environment has no model weights.
+The structural diagnosis (two independently-updated position trackers,
+one driving what renders, one driving what the veto judges) is grounded
+directly in the code paths every prior round's fix touched, and explains
+why each fix in isolation kept being followed by a new, related failure
+rather than silence. Confirming it needs a test against real footage,
+specifically footage combining a leaving-frame/return moment WITH a
+fast hair/hand occlusion in the same clip, since that combination is what
+exercised both halves of the old disagreement at once.

@@ -684,30 +684,6 @@ def _box_center_dist_norm(b1, b2):
     return float(np.linalg.norm(c1 - c2) / diag)
 
 
-def _stabilize_face_geometry(face, prev_kps, prev_bbox, alpha=0.35):
-    if face is None:
-        return None, None
-    cur_bbox = face.bbox.astype(np.float32).copy()
-    if prev_bbox is not None:
-        cdist = _box_center_dist_norm(prev_bbox, cur_bbox)
-        if cdist < 0.60:
-            face.bbox = (prev_bbox * (1.0 - alpha) + cur_bbox * alpha).astype(np.float32)
-    new_bbox = face.bbox.astype(np.float32).copy()
-
-    kps = getattr(face, "kps", None)
-    new_kps = None
-    if kps is not None:
-        kps = kps.astype(np.float32)
-        if prev_kps is not None and prev_kps.shape == kps.shape:
-            dist = float(np.mean(np.linalg.norm(kps - prev_kps, axis=1)))
-            face_w = max(1.0, float(new_bbox[2] - new_bbox[0]))
-            if dist < face_w * 0.18:
-                kps = prev_kps * (1.0 - alpha) + kps * alpha
-        face.kps = kps.astype(np.float32)
-        new_kps = face.kps.copy()
-    return new_kps, new_bbox
-
-
 def _motion_class(motion_val):
     if motion_val < 2.5: return "STATIC"
     if motion_val < 6.0: return "LOW"
@@ -2971,19 +2947,17 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # match then locks onto that. Re-projecting the last crop taken
             # while the face was visible is the right thing to keep doing.
             key_swap_ok = {}
-            # Only carry the last real bbox into this new chunk as a
-            # stabilization anchor if it is still fresh - i.e. the subject
-            # was being seen right up to the chunk boundary. If a gap was
-            # already open when this chunk started (out of frame / occluded
-            # since before the cut), seeding from it is the same stale-anchor
-            # mistake the per-frame reset below exists to prevent, just
-            # reached from the other side of a chunk boundary instead of a
-            # detector gap within one.
-            prev_primary_bbox = (_last_swap_bboxes[0]
-                                  if _last_swap_bboxes and _no_face_streak[0] == 0
-                                  else None)
-            prev_kps_state = [None]
-            prev_bbox_state = [prev_primary_bbox]
+            # No separate per-chunk "last position" state here on purpose.
+            # _tracker (a single MultiFaceTracker created once for the whole
+            # job, not per chunk) already IS the one place this identity's
+            # last-seen geometry lives - _tracker.tracks[0].obs_bbox is the
+            # last RAW real detection, correctly available or correctly
+            # absent across a chunk boundary with no extra bookkeeping. A
+            # second, separately-maintained "previous bbox" here was a stale
+            # copy of the same fact, on its own reseeding schedule, and had
+            # to be independently re-invalidated at both a chunk boundary
+            # and a detector gap (see the removed history below). One source
+            # of truth instead of two that can silently disagree.
 
             def _tick():
                 # Each completed key frame represents skip_n output frames of
@@ -3130,29 +3104,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         det_done = min(lim, max(0, g + 1))
                         _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
                         continue
-                    # A real detection just ended a genuine gap (the subject
-                    # was undetectable for at least one full frame - out of
-                    # frame, a hard occlusion). prev_kps_state/prev_bbox_state
-                    # below still hold wherever the face was BEFORE it
-                    # disappeared. _stabilize_face_geometry blends a new
-                    # detection toward whatever those hold whenever it looks
-                    # "close enough" (a fixed, distance-only gate) - which a
-                    # reappearing face in roughly its old screen position
-                    # trivially clears, however long it was gone. That treats
-                    # a jump across unconstrained motion as ordinary frame-to-
-                    # frame jitter, holding the rendered geometry partway
-                    # between "where it used to be" and "where it actually is
-                    # now" for several frames - a warped, doubled-looking
-                    # paste right at the point of return. This is the
-                    # analogous fix, one stage earlier in the pipeline, to
-                    # anchoring _geom_for_frame's fade on the last REAL
-                    # detection rather than the most recent entry of any
-                    # kind: a real gap invalidates the stale anchor outright
-                    # rather than letting distance alone decide.
                     _after_real_gap = _no_face_streak[0] > 0
-                    if _after_real_gap:
-                        prev_kps_state[0] = None
-                        prev_bbox_state[0] = None
                     _no_face_streak[0] = 0
 
                     if multi_face_safe:
@@ -3162,81 +3114,82 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             dt_frames=_det_dt[0],
                         )
                     else:
+                        # prev_bbox is used only to help pick the right
+                        # candidate when the detector reports more than one
+                        # face-like region this frame - NOT to smooth or
+                        # blend the geometry that gets painted (see the
+                        # single source of truth note at this chunk's start).
+                        # tr.obs_bbox is the track's own last RAW real
+                        # detection, correctly present or correctly None
+                        # across any gap with nothing extra to invalidate.
+                        _tr0_ = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
                         pairs = _pairs_for_frame(
                             faces, smap, refs,
                             max_faces=max_faces,
-                            prev_bbox=prev_bbox_state[0],
+                            prev_bbox=_tr0_.obs_bbox if _tr0_ is not None else None,
                             frame_bgr=frm,
                             prev_bboxes=[_slot_prev_bboxes.get(j) for j in sorted(smap.keys())],
                             locked_emb=_locked_emb[0],
                         )
-                        # Reject a live detection whose 5 keypoints land far
-                        # from where this identity's own recent, established
-                        # motion says they should be - BEFORE it reaches
-                        # tracker.bind() and poisons that history.
+                        # Motion-consistency veto: reject a live detection
+                        # whose 5 keypoints land far from where THIS
+                        # identity's own tracked motion says they should be,
+                        # before it reaches tracker.bind() and poisons that
+                        # history. _kps_reliable() upstream already rejects
+                        # keypoints that are not mutually consistent with ANY
+                        # rigid pose - a degenerate/impossible read. It
+                        # cannot catch a read that fits a pose fine but is
+                        # the WRONG pose for this identity right now: hair
+                        # sweeping across the face mid-turn can pull the
+                        # landmark regression onto a plausible-looking
+                        # configuration that is not where the eyes and mouth
+                        # actually are, for as long as the hair keeps
+                        # confusing the same few reads in a similar way.
                         #
-                        # _kps_reliable() upstream already rejects kps that are
-                        # not mutually consistent with ANY rigid pose - it
-                        # catches a degenerate/impossible read. It cannot catch
-                        # a read that fits a pose just fine but is the WRONG
-                        # pose for this identity right now: hair sweeping across
-                        # the face mid-turn can pull the detector's landmark
-                        # regression onto a plausible-looking configuration that
-                        # simply is not where her eyes and mouth actually are.
-                        # That passes every existing gate - self-consistent,
-                        # correct identity (embedding similarity survives
-                        # partial occlusion), roughly the right bounding box -
-                        # while pasting a paste that looks frozen and
-                        # hard-edged relative to the real, continuing motion,
-                        # for as long as the hair keeps confusing the same few
-                        # frames of landmark reads in a similar way.
-                        # _stabilize_face_geometry's own gate runs the wrong
-                        # way for this: it blends toward the previous reading
-                        # only when the new one is CLOSE, and uses a large
-                        # jump completely unblended and at full confidence -
-                        # exactly backwards when the large jump is the
-                        # unreliable one. Motion-compensate the comparison
-                        # (established velocity, not a static last position)
-                        # so genuine fast motion is not mistaken for this.
-                        # This veto must not be able to lock up forever. A
-                        # naive linear projection of established velocity
-                        # falls further behind the longer it has to
-                        # extrapolate without a real update to correct it -
-                        # so a rejection that skips updating the track
-                        # (leaving its position/velocity frozen) makes EVERY
-                        # later frame, including perfectly good real motion,
-                        # look inconsistent too: the gap can only grow, never
-                        # close, and the swap silently stops for the rest of
-                        # the job. Measured directly: without the two
-                        # safeguards below (predicting the track forward on
-                        # a veto, and conceding after a bounded run of them),
-                        # injecting this exact failure mode into an ordinary
-                        # fast horizontal sweep took an end-to-end regression
-                        # test from 4/420 frames without a swapped face to
-                        # 293/420 - the veto, not hair, was then the thing
-                        # permanently losing the face. Bounding the veto to
-                        # `trk_flip_frames` consecutive detector calls reuses
-                        # the SAME constant the multi-face tracker already
-                        # uses for "how long may a competing signal override
-                        # the established one before conceding" - this is
-                        # that same hysteresis idiom, not a new tuned number.
-                        # A detection right after a genuine gap has nothing
-                        # valid to be judged against: last_hit_kps/vel_kps
-                        # describe wherever this identity was BEFORE it went
-                        # undetectable, and after any real absence - out of
-                        # frame, a hard occlusion, a turned-away stretch -
-                        # that position and velocity carry no information
-                        # about where the subject actually is now. Comparing
-                        # anyway made a legitimate return look exactly like
-                        # the inconsistent reading this check exists to
-                        # catch, and rejected it: measured directly, this
-                        # broke the v11.1.4 "reappear after leaving frame"
-                        # fix outright (a clean reappearance 40 frames later
-                        # started showing no face at all instead of the
-                        # correct swap). The fresh detection becomes the new
-                        # trusted anchor unconditionally; consistency is only
-                        # meaningful between two hits that were never
-                        # separated by a real absence.
+                        # This reads and writes ONLY TrackState fields
+                        # (tr.kps/.vel_kps/.last_hit_kps/.missed) - the same,
+                        # single state _tracker.bind() below updates and
+                        # _pairs_for_frame's selection above already reads
+                        # (tr.obs_bbox). Earlier attempts at this check
+                        # instead compared against _stabilize_face_geometry's
+                        # OWN, separately-blended "previous position" - a
+                        # second smoothing pass downstream of this one, fed
+                        # different inputs on a different schedule, that
+                        # could itself go stale and disagree with whatever
+                        # this check had just approved. That divergence, not
+                        # any single threshold, was the root of the hard-
+                        # edged/frozen/duplicate-looking paste reports; that
+                        # second pass is gone now (a real detection is
+                        # painted with its own raw geometry once accepted,
+                        # exactly like the multi-face path already does), so
+                        # there is only one position for this check, the
+                        # bind() call right after it, and the compositor to
+                        # ever agree or disagree about.
+                        #
+                        # Two failure modes were measured directly while
+                        # building this and are guarded against explicitly:
+                        # (1) comparing against tr.kps advanced by
+                        # TrackState.predict()'s deliberately damped,
+                        # under-committing extrapolation - correct for a
+                        # cautious carry-forward guess, wrong for judging a
+                        # NEW detection, since real constant-velocity motion
+                        # then falls further behind every veto cycle and the
+                        # measured deviation grows unbounded even though
+                        # nothing is wrong. Fixed by projecting from
+                        # last_hit_kps (the actual last real detection) over
+                        # the full elapsed time, undamped, and by advancing
+                        # the track's own prediction on every veto so it
+                        # keeps pace. (2) comparing a detection right after a
+                        # GENUINE gap against the pre-gap position, which
+                        # carries no information about where the subject is
+                        # after a real absence - skipped outright below.
+                        # Bounding how many consecutive detector calls the
+                        # veto may override before conceding reuses
+                        # `trk_flip_frames`, the same constant the multi-face
+                        # tracker already uses for "how long may a competing
+                        # signal override the established one before
+                        # conceding" - the same hysteresis idiom, not a new
+                        # tuned number.
                         if _after_real_gap:
                             _kps_veto_streak[0] = 0
                         if pairs and len(pairs) == 1 and not _after_real_gap:
@@ -3247,24 +3200,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _tr0.kps is not None and _new_kps is not None and
                                     _tr0.kps.shape == np.asarray(_new_kps).shape and
                                     _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5))):
-                                # Project from the last REAL hit's own
-                                # keypoints over the FULL elapsed time
-                                # (missed + this interval), undamped - not
-                                # from tr.kps/.predict(), whose decaying-
-                                # confidence damping is deliberate for what
-                                # it is FOR (a cautious guess to paste while
-                                # genuinely lost) but is the wrong tool here:
-                                # it under-advances on purpose, so a
-                                # perfectly real, constant-velocity motion
-                                # falls further "behind" the damped estimate
-                                # every single veto cycle, and the measured
-                                # deviation grows without bound even though
-                                # nothing is actually wrong. Measured
-                                # directly: using the damped estimate turned
-                                # an ordinary fast sweep into 293/420 frames
-                                # without a swapped face, because the veto
-                                # never had a chance to agree with reality
-                                # again once it started disagreeing.
                                 _elapsed = float(_tr0.missed) + float(_det_dt[0])
                                 _expected = _tr0.kps
                                 _est_speed = 0.0
@@ -3274,25 +3209,15 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                 _face_w = max(1.0, float(_pf0.bbox[2] - _pf0.bbox[0]))
                                 _dev = float(np.mean(np.linalg.norm(
                                     np.asarray(_new_kps, np.float32) - _expected, axis=1)))
-                                # Budget grows with how much this face is
-                                # ACTUALLY estimated to be moving, not with
-                                # elapsed frames alone. Scaling by elapsed
-                                # frames directly let the budget balloon
-                                # exactly when it should not: a sustained
-                                # confusion (or a genuine occlusion) that
-                                # widens the detector cadence made the
-                                # tolerance loose enough to accept almost
-                                # anything, precisely as the confusion got
-                                # longer - measured directly, a 10-frame gap
-                                # widened the budget past 200px on a 150px-
-                                # wide face, well past the ~70px error this
-                                # check exists to catch. Tying it to the
-                                # track's own estimated displacement instead
-                                # means a fast-moving face still gets
-                                # generous slack (correctly), but a mostly
-                                # still one does not get more lenient just
-                                # because the detector happened to skip a
-                                # few extra frames.
+                                # Budget scales with how much this identity's
+                                # OWN tracked velocity says it is actually
+                                # moving, not with elapsed frames directly -
+                                # scaling by elapsed frames alone let the
+                                # budget balloon past 200px on a 150px-wide
+                                # face after just a 10-frame cadence gap,
+                                # loose enough to accept almost anything
+                                # exactly when a sustained confusion or
+                                # occlusion had already widened the cadence.
                                 _budget = _face_w * 0.22 + 0.5 * _est_speed
                                 if _dev > _budget:
                                     _tr0.predict(float(_det_dt[0]))
@@ -3363,29 +3288,36 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # three high-sim embeddings arrived — they never do
                         # on a side view.
 
+                    # A real, accepted detection is painted with its own RAW
+                    # geometry - no extra blend-toward-history step here.
+                    # That step (_stabilize_face_geometry, since removed) was
+                    # a second, independently-maintained "smoothed position"
+                    # alongside TrackState's own (tr.bbox/tr.kps, EMA and
+                    # One-Euro-filtered in swap_engine.py), fed slightly
+                    # different inputs in a different order, with no
+                    # synchronization between the two. That divergence - not
+                    # any single threshold in either one - was the root of
+                    # the hard-edged/frozen/duplicate-looking paste reports:
+                    # whichever of the two happened to still hold stale data
+                    # could silently outvote the other. Trusting the raw,
+                    # gated detection directly matches how the multi-face
+                    # path already works, which has not needed a second
+                    # smoothing layer.
                     if pairs:
-                        primary = pairs[0][0]
-                        stab_alpha = 0.25 if mclass in ("STATIC", "LOW") else 0.45
-                        new_kps, new_bbox = _stabilize_face_geometry(
-                            primary, prev_kps_state[0], prev_bbox_state[0], alpha=stab_alpha
-                        )
-                        if new_kps is not None: prev_kps_state[0] = new_kps
-                        if new_bbox is not None:
-                            prev_bbox_state[0] = new_bbox
-                            # Update the slot that actually received the source face.
-                            # This prevents bbox history from swapping when detector
-                            # ordering changes.
-                            for pf, psrc in pairs:
-                                for sj, sface in smap.items():
-                                    if psrc is sface:
-                                        _slot_prev_bboxes[sj] = pf.bbox.astype(np.float32).copy()
-                                        break
-                            _last_swap_bboxes.clear()
-                            for sj in sorted(smap.keys()):
-                                bb = _slot_prev_bboxes.get(sj)
-                                if bb is not None:
-                                    _last_swap_bboxes.append(bb.copy())
-                            last_bboxes_ref[0] = list(_last_swap_bboxes)
+                        # Update the slot that actually received the source face.
+                        # This prevents bbox history from swapping when detector
+                        # ordering changes.
+                        for pf, psrc in pairs:
+                            for sj, sface in smap.items():
+                                if psrc is sface:
+                                    _slot_prev_bboxes[sj] = pf.bbox.astype(np.float32).copy()
+                                    break
+                        _last_swap_bboxes.clear()
+                        for sj in sorted(smap.keys()):
+                            bb = _slot_prev_bboxes.get(sj)
+                            if bb is not None:
+                                _last_swap_bboxes.append(bb.copy())
+                        last_bboxes_ref[0] = list(_last_swap_bboxes)
 
                     # Carry forward any slot that pairing did NOT cover this
                     # frame - not only when EVERY slot failed to pair.
