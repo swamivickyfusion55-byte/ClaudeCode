@@ -2632,6 +2632,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         _det_cache, _det_counter = [], [0]
         _no_face_streak = [0]
+        _kps_veto_streak = [0]
         _last_gray = [None]
         _last_gray_full = [None]
         _last_motion_class = ["MEDIUM"]
@@ -2970,7 +2971,17 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # match then locks onto that. Re-projecting the last crop taken
             # while the face was visible is the right thing to keep doing.
             key_swap_ok = {}
-            prev_primary_bbox = _last_swap_bboxes[0] if _last_swap_bboxes else None
+            # Only carry the last real bbox into this new chunk as a
+            # stabilization anchor if it is still fresh - i.e. the subject
+            # was being seen right up to the chunk boundary. If a gap was
+            # already open when this chunk started (out of frame / occluded
+            # since before the cut), seeding from it is the same stale-anchor
+            # mistake the per-frame reset below exists to prevent, just
+            # reached from the other side of a chunk boundary instead of a
+            # detector gap within one.
+            prev_primary_bbox = (_last_swap_bboxes[0]
+                                  if _last_swap_bboxes and _no_face_streak[0] == 0
+                                  else None)
             prev_kps_state = [None]
             prev_bbox_state = [prev_primary_bbox]
 
@@ -3119,6 +3130,28 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         det_done = min(lim, max(0, g + 1))
                         _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
                         continue
+                    # A real detection just ended a genuine gap (the subject
+                    # was undetectable for at least one full frame - out of
+                    # frame, a hard occlusion). prev_kps_state/prev_bbox_state
+                    # below still hold wherever the face was BEFORE it
+                    # disappeared. _stabilize_face_geometry blends a new
+                    # detection toward whatever those hold whenever it looks
+                    # "close enough" (a fixed, distance-only gate) - which a
+                    # reappearing face in roughly its old screen position
+                    # trivially clears, however long it was gone. That treats
+                    # a jump across unconstrained motion as ordinary frame-to-
+                    # frame jitter, holding the rendered geometry partway
+                    # between "where it used to be" and "where it actually is
+                    # now" for several frames - a warped, doubled-looking
+                    # paste right at the point of return. This is the
+                    # analogous fix, one stage earlier in the pipeline, to
+                    # anchoring _geom_for_frame's fade on the last REAL
+                    # detection rather than the most recent entry of any
+                    # kind: a real gap invalidates the stale anchor outright
+                    # rather than letting distance alone decide.
+                    if _no_face_streak[0] > 0:
+                        prev_kps_state[0] = None
+                        prev_bbox_state[0] = None
                     _no_face_streak[0] = 0
 
                     if multi_face_safe:
@@ -3136,6 +3169,86 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             prev_bboxes=[_slot_prev_bboxes.get(j) for j in sorted(smap.keys())],
                             locked_emb=_locked_emb[0],
                         )
+                        # Reject a live detection whose 5 keypoints land far
+                        # from where this identity's own recent, established
+                        # motion says they should be - BEFORE it reaches
+                        # tracker.bind() and poisons that history.
+                        #
+                        # _kps_reliable() upstream already rejects kps that are
+                        # not mutually consistent with ANY rigid pose - it
+                        # catches a degenerate/impossible read. It cannot catch
+                        # a read that fits a pose just fine but is the WRONG
+                        # pose for this identity right now: hair sweeping across
+                        # the face mid-turn can pull the detector's landmark
+                        # regression onto a plausible-looking configuration that
+                        # simply is not where her eyes and mouth actually are.
+                        # That passes every existing gate - self-consistent,
+                        # correct identity (embedding similarity survives
+                        # partial occlusion), roughly the right bounding box -
+                        # while pasting a paste that looks frozen and
+                        # hard-edged relative to the real, continuing motion,
+                        # for as long as the hair keeps confusing the same few
+                        # frames of landmark reads in a similar way.
+                        # _stabilize_face_geometry's own gate runs the wrong
+                        # way for this: it blends toward the previous reading
+                        # only when the new one is CLOSE, and uses a large
+                        # jump completely unblended and at full confidence -
+                        # exactly backwards when the large jump is the
+                        # unreliable one. Motion-compensate the comparison
+                        # (established velocity, not a static last position)
+                        # so genuine fast motion is not mistaken for this.
+                        # This veto must not be able to lock up forever. A
+                        # naive linear projection of established velocity
+                        # falls further behind the longer it has to
+                        # extrapolate without a real update to correct it -
+                        # so a rejection that skips updating the track
+                        # (leaving its position/velocity frozen) makes EVERY
+                        # later frame, including perfectly good real motion,
+                        # look inconsistent too: the gap can only grow, never
+                        # close, and the swap silently stops for the rest of
+                        # the job. Measured directly: without the two
+                        # safeguards below (predicting the track forward on
+                        # a veto, and conceding after a bounded run of them),
+                        # injecting this exact failure mode into an ordinary
+                        # fast horizontal sweep took an end-to-end regression
+                        # test from 4/420 frames without a swapped face to
+                        # 293/420 - the veto, not hair, was then the thing
+                        # permanently losing the face. Bounding the veto to
+                        # `trk_flip_frames` consecutive detector calls reuses
+                        # the SAME constant the multi-face tracker already
+                        # uses for "how long may a competing signal override
+                        # the established one before conceding" - this is
+                        # that same hysteresis idiom, not a new tuned number.
+                        if pairs and len(pairs) == 1:
+                            _pf0, _psrc0 = pairs[0]
+                            _tr0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                            _new_kps = getattr(_pf0, "kps", None)
+                            if (_tr0 is not None and _tr0.established and
+                                    _tr0.kps is not None and _new_kps is not None and
+                                    _tr0.kps.shape == np.asarray(_new_kps).shape and
+                                    _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5))):
+                                _expected = _tr0.kps
+                                if _tr0.vel_kps is not None:
+                                    _expected = _tr0.kps + _tr0.vel_kps * float(_det_dt[0])
+                                _face_w = max(1.0, float(_pf0.bbox[2] - _pf0.bbox[0]))
+                                _dev = float(np.mean(np.linalg.norm(
+                                    np.asarray(_new_kps, np.float32) - _expected, axis=1)))
+                                # The tolerance widens with elapsed frames: a
+                                # sparse detection cadence can put many
+                                # output frames between two detector calls,
+                                # so the same linear projection naturally
+                                # accumulates more slack over a longer
+                                # interval - a fixed pixel budget would
+                                # either reject ordinary fast motion under a
+                                # sparse cadence or fail to catch a genuine
+                                # bad read under a dense one.
+                                _budget = _face_w * (0.35 + 0.10 * float(_det_dt[0]))
+                                if _dev > _budget:
+                                    _tr0.predict(float(_det_dt[0]))
+                                    _kps_veto_streak[0] += 1
+                                    pairs = []
+                        if pairs:
+                            _kps_veto_streak[0] = 0
                         # The single-face path keeps its own well-tested pairing
                         # (startup identity lock, reference embeddings), but it
                         # still gets the track's temporal memory so its mask and

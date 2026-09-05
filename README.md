@@ -358,3 +358,119 @@ the harness's blob detector just cannot resolve a smooth fade below its own
 fixed threshold. No engine change was made in response to this; it is a
 known limitation of the synthetic color-blob harness, documented rather than
 chased with another threshold.
+
+## v11.1.4 — the paste that goes wrong-but-confident, not gone
+
+Reported: after v11.1.3, most of the flickering/ghosting reports were
+resolved, but a real clip still showed a hard-edged, warped patch across the
+cheek/jaw that stayed frozen in almost the same screen position for ~15
+frames while the head, hair and hand kept moving underneath, clearing once
+the motion settled. Framed by the user as "the face moves out of frame and
+comes back" — the actual clip never left the frame; a fast head/hair motion
+produced the same failure signature the exit/re-entry case does.
+
+### Root cause #1: a stale stabilization anchor survives any gap
+
+Two independent per-frame smoothing layers exist in the single-face path.
+`TrackState`'s own EMA is one; a second, separate pass —
+`_stabilize_face_geometry()`, blending a live detection toward
+`prev_kps_state` / `prev_bbox_state` when it looks "close enough" — decides
+what geometry the compositor actually uses. Neither is reset by anything
+short of the detector finding literally nothing: `prev_kps_state` /
+`prev_bbox_state` sit untouched through any gap (out of frame, a hard
+occlusion, a rejected read) and, on return, get blended against whatever the
+identity's position was BEFORE the gap — treating a jump across unconstrained
+motion as ordinary frame-to-frame jitter, exactly the failure fixed for
+`_geom_for_frame` in v11.1.3, one stage earlier in the pipeline. The same
+staleness existed across a chunk boundary too: the next chunk unconditionally
+re-seeded `prev_bbox_state` from the last known bbox regardless of how old it
+already was when the chunk cut.
+
+Fixed by invalidating both whenever a real gap (the detector finding nothing
+for at least one frame) just ended, and by only carrying the last bbox into a
+new chunk when the subject was still being seen right up to the cut.
+
+### Root cause #2: a self-consistent detection can still be the wrong one
+
+The v11.1.2 landmark-reliability gate (`_kps_reliable`) catches keypoints
+that are not mutually consistent with any rigid pose — a detector regression
+pushed somewhere impossible. It cannot catch keypoints that fit a pose just
+fine but are the WRONG pose for this identity right now: hair sweeping
+across part of the face mid-turn can pull the landmark regression onto a
+plausible-looking configuration that simply is not where the eyes and mouth
+actually are. That reading passes every existing gate — self-consistent,
+correct identity (embedding similarity survives partial occlusion), roughly
+the right bounding box — and nothing compared it against where this
+identity's own recent, established motion said it should be. When hair
+drapes over the same region for several consecutive frames, the detector can
+report a similarly-wrong reading each time, painting a confidently-placed
+but wrong patch that looks frozen relative to the real, continuing motion —
+matching the clip exactly.
+
+Added a check to the single-face live-detection path: compare a new
+detection's keypoints against the track's own motion-compensated expected
+position (established velocity, not a static last position, so genuine fast
+motion is not mistaken for this) before it reaches `tracker.bind()`. A
+reading that deviates past a tolerance — which widens with elapsed frames,
+since a longer gap between detector calls under a sparse cadence naturally
+means more legitimate displacement — is treated as unreliable and routed
+into the existing hold/carry-and-fade path instead of accepted as ground
+truth.
+
+### A veto that cannot lock up forever
+
+The first version of this check rejected outright, with no bound. Measured
+directly: injecting the same failure into an ordinary fast horizontal sweep
+(no hair, no gate, just normal motion under a sparse cadence) took an
+end-to-end regression test from 4/420 frames without a swapped face to
+**293/420**. The mechanism: rejecting a detection skipped updating the
+track, so its position and velocity stayed frozen at whatever they were
+before the first rejection; every later frame — including perfectly good
+real motion — was then compared against that same frozen expectation, the
+gap could only widen, and the swap silently stopped for the rest of the job.
+The veto, not the hair, was what permanently lost the face.
+
+Fixed by treating a veto exactly like a genuine detector miss — advancing
+the track's own decaying-confidence extrapolation and its `missed` counter
+on every veto — and by bounding how many consecutive detector calls the veto
+may override before conceding, reusing `trk_flip_frames` (5), the same
+constant the multi-face tracker already uses for "how long may a competing
+signal override the established one before conceding." Not a new tuned
+number; the same hysteresis idiom applied where the single-face path was
+missing it.
+
+### Verified
+
+* `t_e2e.py`, `t_final.py`, `t_modes.py`, `t_exit.py`, `t_confused_kps.py`,
+  `t_confused_2face.py`, `t_pair.py`, `verify_gate.py`, `repro_ghost.py`,
+  `verify_geom_cases.py`, `t_extended_lookaway.py`, `t_never_returns.py` —
+  identical results to the v11.1.3 baseline; the fast-sweep lockup above is
+  fixed (back to 4/420) and does not recur.
+* A synthetic reproduction of the reported failure — a detector that keeps
+  finding the right bounding box but reports keypoints translated ~70px off
+  (self-consistent, so every prior gate accepts it) for 3 consecutive
+  detector calls, matching the ~15-raw-frame duration and Optimized preset's
+  cadence in the reported clip: **14.1px mean / 143.5px max** placement
+  error without the fix, **1.0px mean / 4.8px max** with it.
+* The same reproduction stretched to an intentionally extreme 14 consecutive
+  detector calls (far beyond anything in the reported clip) to check the
+  bounded-veto behaves safely rather than perfectly: 72.6px mean / 102.1px
+  max — worse than the realistic case once the veto concedes, but bounded,
+  and critically does not reproduce the 293/420 lockup. A real, sustained
+  mismatch this long is expected to look imperfect for the frames beyond the
+  veto's budget, not silently drop the face for the remainder of the video.
+* A synthetic re-entry test (face undetectable for 40 frames, reappearing
+  ~40px from where it left, well inside the old blending gate's radius):
+  1.0px mean / 2.1px max placement error across the 15 frames after return.
+
+### Honest caveat
+
+None of this could be run against the real face detector or the reported
+clip itself — this environment has no model weights. Every number above
+comes from the synthetic harness used throughout this project: a detector
+stand-in that reports exactly the keypoints a test script injects. The
+mechanism (a self-consistent-but-wrong reading surviving every existing
+gate, then getting compared against nothing) is grounded directly in the
+code paths involved and matches the clip's visual signature (frozen,
+hard-edged, resolves once motion settles), but confirming it end-to-end
+needs a test against the actual clip on the next deploy.
