@@ -753,3 +753,73 @@ this, the next place to look is upstream of the compositor entirely: what
 the actual face detector reports for the specific frames involved, which
 requires the real model and cannot be narrowed further from this
 environment.
+
+## v11.1.8 — the detector cadence itself was not fps-aware
+
+The user's own hypothesis, checked directly rather than assumed: every
+reported clip has been ~24fps, and the reports keep clustering around
+rapid movement. Worth checking on its own merits regardless of whether it
+explained the specific clips already fixed in v11.1.6/v11.1.7.
+
+### What was actually wrong
+
+`SKIP_N` (`{"Fast": 6, "Balanced": 4, "Optimized": 5, ...}`) and the
+"Optimized" tier's cadence are a RAW FRAME COUNT - "detect every 5
+frames" - with no reference to how much real time 5 frames spans. Verified
+directly: an identical 60-frame synthetic clip produced exactly 10
+detector calls whether encoded at 24fps or 30fps - the same number of
+calls, spread over 2.5 real seconds at 24fps versus 2.0 real seconds at
+30fps. **25% more real time between detector calls at 24fps for the
+identical nominal quality setting**, and therefore 25% more opportunity
+for genuine motion to invalidate the linear velocity/interpolation math
+used everywhere between two real detections - none of which is itself
+fps-aware. `taper` and `max_bracket_frames` were already converted to a
+real-time budget for exactly this class of problem in v11.1.3; this is
+the same fix one level earlier, at how often the detector is asked to
+look at all, not just how long a gap between two of its answers may be
+trusted.
+
+It also means every regression test in this project, all the way back to
+v11.1.0, ran at the synthetic harness's default of 30fps and so could not
+possibly have caught this - a real, verifiable blind spot in how
+everything up to this point was validated, independent of whether it
+explains any specific reported clip.
+
+### The fix
+
+The table-driven cadence (`SKIP_N["Optimized"]` and the "Auto" `swap_n`
+path for other quality tiers) is now rescaled by the ratio of the job's
+actual fps to 30 - the fps this table was tuned against and the synthetic
+harness's own default. An explicit numeric override (a user literally
+typing a frame count into Swap-every-N) is left untouched, since that
+number means exactly what it says regardless of fps. Verified directly:
+the same 60-frame clip now produces 12 detector calls at 24fps and 10 at
+30fps - a constant ~167ms between calls at both, instead of 208ms vs
+167ms before.
+
+### Verified
+
+* Direct mechanism check: detector-call real-time spacing is now constant
+  across 24/30/60fps on an identical clip (was 25%/50% looser at 24fps
+  before, relative to 30fps/60fps respectively).
+* Full existing regression suite, run at its 30fps default (the reference
+  fps this fix rescales against, so `_fps_scaled(n) == n` there) -
+  byte-for-byte unchanged from the v11.1.7 baseline, confirming this
+  costs nothing at the fps every prior test in this project has run at.
+
+### Honest caveat
+
+This one is weaker than prior rounds' verification, and worth saying
+plainly rather than overstating: I could not build a clean synthetic
+before/after demonstration of the fps fix's benefit under genuine rapid
+movement specifically - the test harness's video writer and the
+pipeline's frame-count accounting disagreed with each other once pushed
+to extreme synthetic velocities, in a way traced to the harness's own
+plumbing rather than the server code this project ships, and not worth
+half-fixing under this round's time budget rather than reporting
+honestly. What IS directly verified is the underlying mechanism this fix
+targets (detector cadence is now fps-invariant in real time, provably, at
+the exact numbers involved) and that it changes nothing at the reference
+fps. Whether it measurably improves the reported clips specifically can
+only be confirmed by testing this build against footage at 24fps with
+rapid movement, on the real detector, which this environment cannot do.

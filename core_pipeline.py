@@ -2569,13 +2569,38 @@ def _run_job_body(jid, src_paths, vp, cfg):
         def _cxl():
             with _lock: return jobs.get(jid, {}).get('cancel', False)
 
+        fps = cfg['fps']
+        # SKIP_N and the Optimized tier's cadence are tuned as a RAW FRAME
+        # COUNT - e.g. "detect every 5 frames" - with no reference to how
+        # much real time 5 frames actually spans. That is silently wrong the
+        # moment the source isn't the fps the number was tuned against: at
+        # 24fps, 5 frames is 208ms between detector calls; at 30fps it is
+        # 167ms - 25% more real time for the same nominal "Optimized"
+        # quality, and therefore 25% more opportunity for genuine motion to
+        # invalidate the linear interpolation/carry/consistency-veto math in
+        # between two real detections, none of which is itself fps-aware.
+        # taper and max_bracket_frames were already converted to a real-time
+        # budget for exactly this reason (v11.1.3) - this is the same fix
+        # applied one level earlier, to how often the detector is asked to
+        # look at all, not just how long a gap between two of its answers
+        # may be trusted. Rescaled relative to 30fps, the fps this table's
+        # numbers were tuned against (also this project's synthetic test
+        # harness default - every existing regression test up to this point
+        # ran at 30fps and so could not have caught this).  Only the
+        # TABLE-DRIVEN cadence is rescaled; an explicit numeric override
+        # (a user literally typing a frame count) means exactly that number
+        # of frames and is left alone.
+        _REF_FPS = 30.0
+        def _fps_scaled(n):
+            return max(1, int(round(int(n) * float(fps) / _REF_FPS)))
+
         if quality == "Optimized":
             # Self-managed CPU tier: ignore literal "1" dropdown defaults so
             # skip/det actually engage. det_int is in KEYFRAME space.
-            skip_n = SKIP_N["Optimized"]
+            skip_n = _fps_scaled(SKIP_N["Optimized"])
             base_det_int = 2
         else:
-            skip_n = _skip_n(quality) if cfg.get('swap_n') == 'Auto' else int(cfg.get('swap_n', 5))
+            skip_n = _fps_scaled(_skip_n(quality)) if cfg.get('swap_n') == 'Auto' else int(cfg.get('swap_n', 5))
             if cfg.get('det_n') not in (None, '', 'Auto'):
                 try: base_det_int = max(1, int(cfg.get('det_n', 2)))
                 except Exception: base_det_int = 2
@@ -2614,7 +2639,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # Best/Ultra map to 1 here, so those tiers keep swapping every frame.
             swap_gap_base = int(SKIP_N.get(quality, 1) or 1)
 
-        fps = cfg['fps']
         cpu_n = os.cpu_count() or 4
         # Detection/tracking run sequentially before workers; ORT+OpenCV+x264
         # already consume _native_threads. Default VIDEO_WORKERS=1 on HF CPU.
