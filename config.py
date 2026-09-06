@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.2.3 "SolidFace" configuration (CinemaQA + full-strength paste)."""
+"""Swamitech Phoenix v11.2.5 "HoldThrough+Grace" configuration (no original-face flash on motion)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -58,6 +58,19 @@ VIDEO_WORKERS = 1
 # Set to 1 = detect every keyframe when Auto (least flicker, more CPU).
 # Higher values (e.g. 3) are a speed default for Auto on constrained CPU.
 DET_SKIP_INTERVAL = 1
+
+# How long a tracked identity may be held/faded once real detection stops
+# (occlusion, a fast pan, a genuine multi-frame detector miss) before the
+# render loop gives up and shows the original frame instead. Longer trades
+# more exposure to a stale/drifting held position if the subject genuinely
+# left (the frame-edge/containment checks in _run_job_body still catch that
+# case regardless of this value, and a sustained content-visibility failure
+# like occlusion is separately routed back to the short floor - see
+# _ACTIVE_REJECT_STREAK in core_pipeline.py) for far fewer needless reverts
+# during ordinary, brief tracking gaps that HoldThrough's bbox-overlap
+# rescues cannot help with (those need SOME detected box to compare
+# against; a genuine multi-frame miss has none).
+REACQUIRE_GRACE_SEC = 3.0
 FACE_ROI_PAD = 0.22
 FACE_EMA_ALPHA = 0.40
 COLOR_MATCH_SCALE = 0.25
@@ -97,8 +110,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.3"
-BUILD = "SolidFace · fixed rapid-motion reacquire deadlock"
+VERSION = "v11.2.5"
+BUILD = "HoldThrough+Grace · genuine detector-miss gaps also held through"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass
@@ -168,6 +181,6 @@ ENGINE_TUNABLES = {
     "trk_max_missed":   24,      # carry-through budget before the track gives up
     "trk_alpha":        0.42,    # bbox smoothing on update
     # One-Euro landmark smoothing (keys must exist in swap_engine._P to apply)
-    "kps_min_cutoff":   0.06,
-    "kps_beta":         0.015,
+    "kps_min_cutoff":   0.08,
+    "kps_beta":         0.040,
 }

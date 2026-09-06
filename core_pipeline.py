@@ -846,13 +846,28 @@ def _geom_lerp(a, b, t):
     return out
 
 
-def _geom_for_frame(timeline, g, taper, max_bracket=None):
+def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
     """Geometry for output frame ``g`` from a slot's key-frame timeline.
 
     ``timeline`` is an ordered list of ``(global_frame_index, record)``. A slot
     that is only anchored on one side (the face has just entered, or has just
     been lost) holds its last known geometry and fades out over ``taper``
     frames rather than disappearing between one frame and the next.
+
+    ``end_gap``, when not None, is how many more output frames the ENTIRE
+    job will ever produce after this one (0 == this is the last frame). Pass
+    it only once the source is truly exhausted - no future chunk can ever
+    supply a fresh real detection here. It exists for one narrow case: the
+    one-sided hold below cuts off ``taper`` frames after the last real
+    sighting because a long-silent identity might really have left the shot.
+    At the true end of the clip that ambiguity does not matter - there is no
+    "rest of the video" left for a wrong guess to keep drifting through - so
+    when the entire remaining clip is itself no longer than the normal grace
+    window, the fade is stretched to land exactly on the last frame instead
+    of hard-cutting a few frames early purely because of where the detector
+    cadence happened to place the last real hit. A disappearance with real
+    video left afterward is untouched: end_gap would then exceed taper and
+    this never fires.
 
     Staleness (how long ago this identity was actually seen, which drives
     both the ``taper`` cutoff and the fade) is always measured against the
@@ -960,7 +975,10 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None):
         # bracketed dip). taper/fade are computed from obs_lo - the last real
         # sighting - not from whatever the tracker most recently guessed.
         real_dist = g - obs_lo[0]
-        if taper > 0 and real_dist > taper:
+        eff_taper = taper
+        if end_gap is not None and taper > 0 and end_gap <= taper:
+            eff_taper = max(taper, real_dist + end_gap)
+        if eff_taper > 0 and real_dist > eff_taper:
             return None
         # Still inside the short grace window: use the MOST RECENT entry
         # (which may be an extrapolated one, and is typically a better
@@ -972,7 +990,7 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None):
         side = lo if lo is not None else obs_lo
         rec = dict(side[1])
         rec["det"] = False
-        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (real_dist / float(taper)) ** 2))
+        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (real_dist / float(eff_taper)) ** 2))
         return rec if rec["alpha"] > 0.02 else None
 
     # No real detection anywhere in this timeline yet - never established, or
@@ -1985,8 +2003,15 @@ def _kps_reliable(f) -> bool:
         # 0.20 is this project's own previously-measured number, with the
         # stated margin above every legitimate pose this docstring already
         # swept (worst case 0.103) still intact.
-        if fit is None or fit > 0.20:
+        if fit is None:
             return False
+        # v11.2.4: 0.20 rejected talking / open-mouth / mild motion-blur
+        # because a similarity fit cannot model a dropping jaw. Eyes+nose
+        # still valid (vert already passed) → allow through 0.32.
+        if fit > 0.32:
+            return False
+        if fit > 0.20:
+            return vert >= 0.16
         return True
     except Exception:
         return False
@@ -2009,16 +2034,39 @@ def _face_swap_allowed(f) -> bool:
     det = float(getattr(f, "det_score", 0.5) or 0.5)
 
     # v11.1.10 HairGate: while paste-frozen (exit OR reacquire confirmation),
-    # disallow BOTH predicted and live paste — show original, never hair.
+    # disallow predicted paste. A LIVE detection that still overlaps the last
+    # real head is the face coming back — paint it now, do not wait for a
+    # second confirm hit (that wait is the "original face for a few seconds").
     if tr is not None and getattr(tr, "_paste_frozen", False):
+        if predicted:
+            return False
+        try:
+            anchor = getattr(tr, "last_hit_bbox", None)
+            if anchor is None:
+                anchor = getattr(tr, "obs_bbox", None)
+            if anchor is not None and _bbox_iou(f.bbox, anchor) >= 0.15:
+                return det >= 0.18
+        except Exception:
+            pass
         return False
 
     if not predicted:
-        # Real detector hit. Keep lying-down and soft-profile faces.
-        if det < 0.20:
+        # Real detector hit. Keep lying-down, talking, and soft-profile faces.
+        if det < 0.18:
             return False
-        # Fail-closed landmark gate (was: missing kps allowed at det>=0.45).
         if not _kps_reliable(f):
+            # Expression / motion-blur landmarks: still paint if this is the
+            # same head we were already swapping. Reject only a new, bad box.
+            try:
+                anchor = None
+                if tr is not None:
+                    anchor = getattr(tr, "last_hit_bbox", None)
+                    if anchor is None:
+                        anchor = getattr(tr, "obs_bbox", None)
+                if anchor is not None and _bbox_iou(f.bbox, anchor) >= 0.22:
+                    return True
+            except Exception:
+                pass
             return False
         return True
 
@@ -2545,6 +2593,12 @@ try:
     SKIP_N = dict(_CFG_SKIP_N)
 except Exception:
     SKIP_N = {"Fast": 6, "Balanced": 4, "Optimized": 5, "Best": 1, "Ultra": 1}
+
+try:
+    from config import REACQUIRE_GRACE_SEC as _CFG_REACQUIRE_GRACE_SEC
+    REACQUIRE_GRACE_SEC = float(_CFG_REACQUIRE_GRACE_SEC)
+except Exception:
+    REACQUIRE_GRACE_SEC = 3.0
 
 def _skip_n(quality): return SKIP_N.get(quality, 5)
 
@@ -3327,9 +3381,26 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # gap instead of painting - exactly the behaviour wanted
                     # here, reused rather than reinvented.
                     _n_before_kps_gate = len(faces)
-                    faces = [f for f in faces if _kps_reliable(f)]
-                    if len(faces) < _n_before_kps_gate:
-                        stats["kps_rejected"] = stats.get("kps_rejected", 0) + (_n_before_kps_gate - len(faces))
+                    _reliable = [f for f in faces if _kps_reliable(f)]
+                    if _reliable:
+                        faces = _reliable
+                    elif faces:
+                        # Do not empty the list: that is an original-face
+                        # flash. Keep the candidate that still overlaps the
+                        # live track (talking / motion blur / open mouth).
+                        _tr_pre = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                        _anc_pre = getattr(_tr_pre, "last_hit_bbox", None) if _tr_pre is not None else None
+                        if _anc_pre is not None:
+                            _ov = []
+                            for _fpre in faces:
+                                try:
+                                    if _bbox_iou(_fpre.bbox, _anc_pre) >= 0.22:
+                                        _ov.append(_fpre)
+                                except Exception:
+                                    pass
+                            faces = _ov or faces[:1]
+                    if _reliable is not None and len(_reliable) < _n_before_kps_gate:
+                        stats["kps_rejected"] = stats.get("kps_rejected", 0) + (_n_before_kps_gate - len(_reliable))
 
                     stats["detector_calls"] += 1
                     stats["det_times"].append((time.perf_counter() - t_det0) * 1000)
@@ -3364,11 +3435,36 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # under motion blur). Prefer original this frame.
                     if _after_real_gap:
                         _n_gap = len(faces)
-                        faces = [
-                            f for f in faces
-                            if _kps_reliable(f)
-                            and float(getattr(f, "det_score", 0.0) or 0.0) >= 0.32
-                        ]
+                        _tr_gap = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                        _anchor_gap = None
+                        if _tr_gap is not None:
+                            _anchor_gap = getattr(_tr_gap, "last_hit_bbox", None)
+                        _kept = []
+                        for f in faces:
+                            if not _kps_reliable(f):
+                                # Same-head return: keep even if landmarks wobble
+                                # (open mouth / motion blur). HairGate only
+                                # drops a first-return that does NOT overlap.
+                                if _anchor_gap is not None:
+                                    try:
+                                        if _bbox_iou(f.bbox, _anchor_gap) >= 0.20:
+                                            _kept.append(f)
+                                            continue
+                                    except Exception:
+                                        pass
+                                continue
+                            det_f = float(getattr(f, "det_score", 0.0) or 0.0)
+                            if det_f >= 0.32:
+                                _kept.append(f)
+                                continue
+                            if _anchor_gap is not None:
+                                try:
+                                    if _bbox_iou(f.bbox, _anchor_gap) >= 0.20 and det_f >= 0.18:
+                                        _kept.append(f)
+                                        continue
+                                except Exception:
+                                    pass
+                        faces = _kept
                         if len(faces) < _n_gap:
                             stats["hair_gate_gap"] = stats.get("hair_gate_gap", 0) + (
                                 _n_gap - len(faces)
@@ -3511,31 +3607,65 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _tr0.kps is not None and _new_kps is not None and
                                     _tr0.kps.shape == np.asarray(_new_kps).shape and
                                     _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5))):
-                                _elapsed = float(_tr0.missed) + float(_det_dt[0])
-                                _expected = _tr0.kps
-                                _est_speed = 0.0
-                                if _tr0.vel_kps is not None and _tr0.last_hit_kps is not None:
-                                    _expected = _tr0.last_hit_kps + _tr0.vel_kps * _elapsed
-                                    _est_speed = float(np.mean(np.linalg.norm(_tr0.vel_kps, axis=1))) * _elapsed
-                                _face_w = max(1.0, float(_pf0.bbox[2] - _pf0.bbox[0]))
-                                _dev = float(np.mean(np.linalg.norm(
-                                    np.asarray(_new_kps, np.float32) - _expected, axis=1)))
-                                # Budget scales with how much this identity's
-                                # OWN tracked velocity says it is actually
-                                # moving, not with elapsed frames directly -
-                                # scaling by elapsed frames alone let the
-                                # budget balloon past 200px on a 150px-wide
-                                # face after just a 10-frame cadence gap,
-                                # loose enough to accept almost anything
-                                # exactly when a sustained confusion or
-                                # occlusion had already widened the cadence.
-                                _budget = _face_w * 0.22 + 0.5 * _est_speed
-                                if _dev > _budget:
-                                    _tr0.predict(float(_det_dt[0]))
-                                    _kps_veto_streak[0] += 1
-                                    pairs = []
+                                # Same physical head (bbox overlap) → expression,
+                                # open mouth, or a rapid yaw. Never veto that;
+                                # vetoing is what flashes the original face.
+                                _same_head_now = False
+                                try:
+                                    _anc = getattr(_tr0, "last_hit_bbox", None)
+                                    if _anc is None:
+                                        _anc = getattr(_tr0, "bbox", None)
+                                    if _anc is not None:
+                                        _same_head_now = _bbox_iou(_anc, _pf0.bbox) >= 0.28
+                                except Exception:
+                                    _same_head_now = False
+                                if not _same_head_now:
+                                    _elapsed = float(_tr0.missed) + float(_det_dt[0])
+                                    _expected = _tr0.kps
+                                    _est_speed = 0.0
+                                    if _tr0.vel_kps is not None and _tr0.last_hit_kps is not None:
+                                        _expected = _tr0.last_hit_kps + _tr0.vel_kps * _elapsed
+                                        _est_speed = float(np.mean(np.linalg.norm(_tr0.vel_kps, axis=1))) * _elapsed
+                                    _face_w = max(1.0, float(_pf0.bbox[2] - _pf0.bbox[0]))
+                                    # Eyes + nose only. Mouth corners jump on
+                                    # every open-mouth / talk frame and were
+                                    # inflating mean deviation enough to veto
+                                    # a perfectly good head.
+                                    _new_a = np.asarray(_new_kps, np.float32)
+                                    _exp_a = np.asarray(_expected, np.float32)
+                                    _nuse = min(3, _new_a.shape[0], _exp_a.shape[0])
+                                    _dev = float(np.mean(np.linalg.norm(
+                                        _new_a[:_nuse] - _exp_a[:_nuse], axis=1)))
+                                    _budget = _face_w * 0.35 + 0.80 * _est_speed
+                                    if _dev > _budget:
+                                        _tr0.predict(float(_det_dt[0]))
+                                        _kps_veto_streak[0] += 1
+                                        pairs = []
                         if pairs:
                             _kps_veto_streak[0] = 0
+                        # If the veto emptied the pair but the detector still
+                        # sees a face overlapping the last head, keep it.
+                        if (not pairs) and faces and max_faces == 1:
+                            _tr_keep = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                            _anc_k = None
+                            if _tr_keep is not None:
+                                _anc_k = getattr(_tr_keep, "last_hit_bbox", None)
+                                if _anc_k is None:
+                                    _anc_k = getattr(_tr_keep, "bbox", None)
+                            if _anc_k is not None:
+                                _best_keep = None
+                                _best_iou = 0.0
+                                for _fk in faces:
+                                    try:
+                                        _iu = _bbox_iou(_fk.bbox, _anc_k)
+                                    except Exception:
+                                        _iu = 0.0
+                                    if _iu > _best_iou:
+                                        _best_iou, _best_keep = _iu, _fk
+                                if _best_keep is not None and _best_iou >= 0.22:
+                                    _only = smap.get(0) or next(iter(smap.values()))
+                                    pairs = [(_best_keep, _only)]
+                                    _kps_veto_streak[0] = 0
                         # The single-face path keeps its own well-tested pairing
                         # (startup identity lock, reference embeddings), but it
                         # still gets the track's temporal memory so its mask and
@@ -3709,12 +3839,27 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # whether each face is visible still stands.
                     key_swap_ok[k] = dict(_seen_ok)
 
-            # One-sided hold: only long enough to bridge to the next key frame.
-            # The tracker's own carry budget already decides how long a lost
-            # face may be predicted for; stacking a further ~0.8 s of held
-            # geometry on top of it is how a face ends up painted on a body
-            # after its owner has left the shot.
-            taper = int(max(3, min(2 * max(1, skip_n, swap_gap_base), 12)))
+            # One-sided hold: how long a lost identity may be held/faded
+            # before the render loop gives up and reverts to the original
+            # frame. This used to be capped at ~12 output frames (well under
+            # 0.5s at most fps/preset combinations), which was short enough
+            # that an ordinary detection gap - a fast pan, a genuine
+            # multi-frame detector miss - could exceed it and revert to the
+            # original face for a few frames even though the subject never
+            # left the shot. This is a DIFFERENT failure mode than what the
+            # HoldThrough bbox-overlap rescues above address: those rescue a
+            # frame where the detector still reports SOMETHING but an
+            # earlier gate was wrongly distrusting it; this covers a
+            # genuine detector miss with nothing at all to rescue. The
+            # frame-edge/containment checks in _run_job_body's render loop
+            # are what actually catch a genuine departure (subject walks out
+            # of frame) regardless of this value, so lengthening it mainly
+            # trades a longer worst-case hold on a stale position - for a
+            # non-edge-touching failure like a hard scene cut - against far
+            # fewer needless reverts during ordinary gaps. Never shorter than
+            # the previous cadence-derived floor.
+            _cadence_taper = int(max(3, min(2 * max(1, skip_n, swap_gap_base), 12)))
+            taper = max(_cadence_taper, int(round(out_fps * REACQUIRE_GRACE_SEC)))
             # How long a gap BETWEEN TWO REAL DETECTIONS is still safe to
             # bridge with a full, confident interpolation - expressed as a
             # TIME budget (see _geom_for_frame's docstring for why a fixed
@@ -3723,14 +3868,47 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # whenever fps or the detection cadence preset changes.
             # v11.2.0 CinemaQA: 0.55s (was 0.7s ReentrySafe / 1.5s Continuum).
             # Reacquire wipes timelines; this bounds any residual real–real gap.
-            max_bracket_frames = max(taper + 1, int(round(out_fps * 0.55)))
+            #
+            # Deliberately floored on _cadence_taper, NOT the (now much
+            # larger) one-sided-hold `taper` above: this bounds a DIFFERENT
+            # risk - confidently straight-line-bridging a gap between two
+            # real detections when the subject's actual path in between was
+            # not straight (a turn, a roll, a round trip). A longer
+            # one-sided hold grace period has nothing to do with that and
+            # must not loosen it.
+            max_bracket_frames = max(_cadence_taper + 1, int(round(out_fps * 0.55)))
+
+            # Measured directly in an earlier round: applying the long grace
+            # window unconditionally let a sustained hand/object occlusion
+            # paste the swap on top of the occluder for far longer than
+            # before. _no_face_streak already counts consecutive KEY-FRAME
+            # DETECTOR CALLS that found nothing paintable at all (genuinely
+            # empty, or every candidate rejected) - it does NOT increment for
+            # a cadence-skipped key frame the detector was never asked to
+            # look at. A streak past a couple of calls means the content
+            # itself is actively failing the visibility check right now
+            # (occlusion, looking away, a degenerate read), which is exactly
+            # the case the short, original taper was already tuned to bound;
+            # a single blip (typical of ordinary motion blur during a brief
+            # camera move) is not enough to demote, so genuine tracking gaps
+            # still get the long grace window.
+            _ACTIVE_REJECT_STREAK = 2
 
             def _records_at(g):
                 """Every slot's geometry for output frame ``g``."""
+                # Only once no future chunk can ever supply another real
+                # detection (source exhausted or the requested duration is
+                # already met) is it safe to tell _geom_for_frame how close
+                # ``g`` is to the clip's actual last frame - see its
+                # end_gap docstring for why that only softens the true-EOF
+                # tail and never a genuine mid-video disappearance.
+                end_gap = (lim - 1 - g) if (eof or produced >= lim) else None
+                eff_taper = _cadence_taper if _no_face_streak[0] >= _ACTIVE_REJECT_STREAK else taper
                 out = {}
                 for slot in sorted(smap.keys()):
-                    rec = _geom_for_frame(_geom_hist.get(slot) or [], g, taper,
-                                          max_bracket=max_bracket_frames)
+                    rec = _geom_for_frame(_geom_hist.get(slot) or [], g, eff_taper,
+                                          max_bracket=max_bracket_frames,
+                                          end_gap=end_gap)
                     if rec is not None:
                         out[slot] = rec
                 return out

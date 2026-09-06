@@ -59,7 +59,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.2.3-solid-face"
+ENGINE_VERSION = "aequus-1.2.5-hold-through-grace"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -445,6 +445,23 @@ def skin_confidence(aligned_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
         return np.ones(mask.shape, np.float32)
 
 
+def _bb_iou(a, b) -> float:
+    """Axis-aligned IoU for two [x1,y1,x2,y2] boxes. 0 on any failure."""
+    try:
+        ax1, ay1, ax2, ay2 = [float(v) for v in np.asarray(a, np.float32).reshape(4)]
+        bx1, by1, bx2, by2 = [float(v) for v in np.asarray(b, np.float32).reshape(4)]
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        if inter <= 0.0:
+            return 0.0
+        area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(1.0, (bx2 - bx1) * (by2 - by1))
+        return float(inter / (area_a + area_b - inter + 1e-6))
+    except Exception:
+        return 0.0
+
+
 # --------------------------------------------------------------------------
 # Per-identity temporal memory
 # --------------------------------------------------------------------------
@@ -574,7 +591,7 @@ class TrackState:
                 ix = max(0.0, min(x2, W) - max(x1, 0.0))
                 iy = max(0.0, min(y2, H) - max(y1, 0.0))
                 contain = float(max(0.0, min(1.0, (ix * iy) / area)))
-                if contain < 0.70:
+                if contain < 0.38:
                     self._paste_frozen = True
                     self.confirm_hits = 0  # v11.1.10: must re-confirm on return
             except Exception:
@@ -645,6 +662,29 @@ class TrackState:
             if (int(self.missed) >= int(_P.get("trk_max_missed", 24) or 24)
                     or cdist > 0.75 * max(lw, lhgt)):
                 reacquire = True
+        # v11.2.4 HoldThrough: overlapping boxes are a turn / talk / open
+        # mouth, not an exit. HairGate's freeze-until-2-hits is what left
+        # the original face on screen for seconds after a rapid head turn
+        # even though the detector was already reporting the same head.
+        # Only a true teleport (near-zero overlap with both last hit AND
+        # the predicted box) may freeze paste.
+        same_head = False
+        if self.last_hit_bbox is not None:
+            try:
+                same_head = _bb_iou(self.last_hit_bbox, bb) >= 0.18
+            except Exception:
+                same_head = False
+        if (not same_head) and self.bbox is not None:
+            try:
+                same_head = _bb_iou(self.bbox, bb) >= 0.18
+            except Exception:
+                pass
+        if same_head:
+            reacquire = False
+            if self._paste_frozen:
+                self._paste_frozen = False
+                self.confirm_hits = 2
+                self.alpha_ema = 1.0
         # v11.2.0 CinemaQA: sticky until core wipes geom timeline.
         # Previously `= reacquire` cleared the flag on the confirming update
         # *before* _record_geometry could scrub stubs → exit/return ghost glide.
@@ -711,13 +751,17 @@ class TrackState:
             self.last_face = face
             self.hits += 1
             self.missed = 0
-            # HairGate: this frame counts as confirm_hits=1, but stay frozen
-            # until a second reliable update. Bad/unreliable: reset to 0.
+            # v11.2.4: a CLEAN first return (kps_ok) paints immediately.
+            # Waiting for a second consecutive reliable hit is what made
+            # the original face linger for seconds after the subject was
+            # already back. Unreliable first hit still waits one more.
             if kps_ok:
-                self.confirm_hits = 1
+                self.confirm_hits = 2
+                self._paste_frozen = False
+                self.alpha_ema = 1.0
             else:
                 self.confirm_hits = 0
-            self._paste_frozen = True
+                self._paste_frozen = True
             self._confirm_ease = 0
             return
 
