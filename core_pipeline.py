@@ -3477,7 +3477,37 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             _pf0, _psrc0 = pairs[0]
                             _tr0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
                             _new_kps = getattr(_pf0, "kps", None)
-                            if (_tr0 is not None and _tr0.established and
+                            # v11.2.3: a track that just reacquired (see
+                            # TrackState.update()'s "ReentrySafe snap") has
+                            # vel_kps deliberately zeroed - "we don't yet
+                            # know this identity's motion, don't extrapolate
+                            # a guess" is correct for THAT frame's own
+                            # predict(), but here it means the very next
+                            # frame's expected position is the frozen snap
+                            # point itself, with no velocity credit at all.
+                            # During sustained rapid motion (the case this
+                            # veto exists to protect, not reject) the
+                            # subject has plainly kept moving since the
+                            # snap, so a real, correct detection reads as a
+                            # huge "deviation" against a zero-velocity
+                            # expectation and gets vetoed - which never lets
+                            # update() run to record real velocity or clear
+                            # HairGate's confirm_hits, so the SAME zero-
+                            # velocity state persists and the very next
+                            # candidate gets vetoed too. Measured directly:
+                            # a face oscillating at up to ~55px/frame
+                            # deadlocked in exactly this cycle and never
+                            # painted again for the rest of a 200-frame
+                            # clip. No reliable velocity yet is the same
+                            # "nothing to compare against" case
+                            # _after_real_gap already skips this veto for -
+                            # reused here rather than reinvented.
+                            _no_vel_basis = (
+                                _tr0 is not None
+                                and (_tr0.vel_kps is None
+                                     or not bool(np.any(np.abs(_tr0.vel_kps) > 1e-6)))
+                            )
+                            if (_tr0 is not None and _tr0.established and not _no_vel_basis and
                                     _tr0.kps is not None and _new_kps is not None and
                                     _tr0.kps.shape == np.asarray(_new_kps).shape and
                                     _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5))):

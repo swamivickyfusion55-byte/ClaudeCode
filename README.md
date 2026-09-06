@@ -1019,3 +1019,136 @@ path (`build_mask()` / `skin_confidence()` / `_face_looks_marginal()` in
 `swap_engine.py` and `core_pipeline.py`), which was left untouched this
 round since it moved opacity *up*, not down, in the v11.2.1 sync and so
 is a less likely source of the reported weakness.
+
+## v11.2.3 — rapid movement could deadlock a track in the frozen state permanently
+
+Direct user report, immediately after v11.2.2 shipped: the new face still
+reverts to the original at times during rapid movement and open mouth.
+Reproduced directly with this project's own `t_fps_rapid.py` (a face
+oscillating sinusoidally up to ~55px/frame, an intentionally extreme
+stress test rather than typical footage) — and found something much
+worse than "at times": **176 of 200 frames (88%) showed no swap at all**,
+with only 2 real swap-network invocations in the whole clip and every
+recorded reacquire event's own velocity estimate stuck at exactly zero,
+never recovering. The pre-sync v11.2.0 baseline, run through the same
+test, already showed a real (pre-existing, not new) weakness here -
+101-119/200 missing - but nothing close to this.
+
+### Root cause: two of ReentrySafe/HairGate's own mechanisms zero a
+### track's velocity right when sustained rapid motion needs it most
+
+`TrackState.update()`'s reacquire path (v11.1.9 ReentrySafe) explicitly
+zeroed both `vel_bbox` and `vel_kps` on every reacquire snap ("we don't
+know this identity's motion yet, don't guess"). That is the right call
+for a track that was genuinely lost and is starting fresh. It is the
+wrong call for the much more common way a reacquire actually fires during
+sustained rapid motion: the subject never stopped moving, they just
+covered more distance between two sparse-cadence detector calls than a
+CONSTANT-velocity projection expected - exactly what `core_pipeline.py`'s
+existing motion-consistency veto also has to reason about.
+
+The zeroed velocity then poisoned two downstream checks that both assume
+"whatever is already in vel_kps/vel_bbox is a real prior worth trusting":
+
+1. The motion-consistency veto in `core_pipeline.py` projects an expected
+   position from `last_hit_kps + vel_kps * elapsed`. With `vel_kps`
+   forced to zero, the expected position stayed pinned at the reacquire
+   snap point no matter how far the subject had genuinely moved since -
+   so the very next real, correct detection during continued fast motion
+   read as a huge deviation and got vetoed. A vetoed frame never reaches
+   `update()`, so `vel_kps` never gets a chance to become non-zero -
+   deadlock.
+2. `vel_kps`'s own EMA (`v if self.vel_kps is None else vel_kps*0.6 +
+   v*0.4`) already distinguishes "no estimate yet" (`None`) from "a real
+   prior" - but the reacquire path set it to `zeros_like(kp)`, not
+   `None`, so the very first genuine velocity reading after a reacquire
+   was itself damped 60% toward that false zero. `vel_bbox`'s own EMA has
+   no such distinction at all (always blends unconditionally), so the
+   same zeroing damped it there too, on every reacquire, without
+   exception.
+
+### The fix
+
+* The motion-consistency veto now skips itself when the track has no
+  reliable velocity basis yet (`vel_kps` is `None` or all-zero) — the
+  same "nothing to compare against, trust the candidate" principle the
+  veto already applies right after a real detector gap (`_after_real_gap`),
+  extended to cover a just-reacquired track for the same reason.
+* `vel_kps` is reset to `None` on reacquire instead of an explicit zero
+  vector, restoring the same fresh-start (undamped) treatment a genuine
+  first-time establishment already gets from the existing EMA.
+* The reacquire path's own `missed >= 8` OR-clause (forcing a re-confirm
+  purely on elapsed frame count, regardless of position) is raised to
+  match `trk_max_missed` (24) - the same bar `_predicted_miss_budget()`
+  and this class' own missed-tracking already use for "how long may a
+  gap be trusted." The flat, unrelated "8" could fire well before that on
+  nothing but a couple of veto-rejected frames, forcing an unnecessary
+  reacquire-and-reconfirm cycle at the exact moment a good detection
+  arrived to end the gap.
+* Tried and **reverted**: keeping the pre-gap `vel_bbox` instead of
+  zeroing it, on the reasoning that the subject likely kept moving.
+  Measured directly and found worse (176/200 again) - at a genuine
+  direction reversal (a sine wave's peak/trough, exactly where a
+  reacquire is likeliest), the pre-gap velocity points the WRONG way, so
+  projecting forward with it overshoots further than assuming no
+  velocity at all. Reverted to zero for `vel_bbox` specifically; noted
+  here so a future round does not re-attempt the same fix and re-measure
+  the same regression.
+
+### Verified
+
+* Same `t_fps_rapid.py` stress test: 176/200 → 141/200 missing frames,
+  swap-network calls 2 → 10, and — the qualitative change that matters
+  most — the failure mode changed from a permanent, whole-clip deadlock
+  (never recovers after the first reacquire) to intermittent recovery
+  (the track successfully re-establishes multiple times through the
+  clip, even though sustained sinusoidal motion still occasionally
+  re-triggers it). The remaining gap versus the pre-sync baseline's
+  101-119/200 is a pre-existing constant-velocity-model limitation this
+  round did not introduce and does not attempt to fully close (see honest
+  caveat).
+* Full existing regression suite (`t_final`, `t_e2e`, `t_exit`,
+  `t_confused_kps`, `t_confused_2face`, `t_pair`, `t_reentry`,
+  `t_hair_confusion`, `verify_gate`, `repro_ghost`, `verify_geom_cases`,
+  `t_extended_lookaway`, `t_modes`, `t_never_returns`) unchanged in
+  outcome.
+
+### Honest caveat
+
+**"Open mouth" specifically was investigated and NOT reproduced.** A
+direct synthetic check — moving the ArcFace mouth-corner keypoints down
+and outward by up to 40px at typical crop scale, simulating a wide mouth
+open, and feeding that through the real `landmark_fit_error()` — found
+the fit error DECREASES as the mouth opens in that model, staying well
+under every threshold this project uses. That does not mean open-mouth
+reverts are not real; it means the mechanism, if it is a mechanism this
+project's synthetic tools can represent at all, was not found this
+round. The more likely explanation, unverified: an open mouth is often
+accompanied by head motion (talking, laughing, turning to react to
+someone), and what actually gets reported as "open mouth reverts" may be
+the rapid-motion deadlock this entry fixes, triggered by the head motion
+that happens to co-occur with the expression, not by the mouth shape
+itself. If open-mouth reverts persist on their own, with the head
+otherwise still, that would be strong evidence against this explanation
+and worth a dedicated follow-up with an actual clip showing it in
+isolation - this sandbox has no way to manufacture that case blind.
+
+The residual rapid-motion gap versus baseline (141 vs ~110/200 on the
+synthetic stress test) is a real, pre-existing limitation of this
+pipeline's motion model: `vel_bbox`/`vel_kps` are a single constant-
+velocity estimate, smoothed by a fixed-weight EMA, with no
+representation of acceleration or direction reversal. Sustained,
+continuously-accelerating motion (a mathematical sine wave; a person
+swinging their head rhythmically) will keep finding the edges of that
+model no matter how the surrounding thresholds are tuned. Closing that
+gap fully would mean adding an actual acceleration term or a proper
+filter (a per-axis alpha-beta or Kalman filter in place of the flat EMA)
+to `TrackState`, not another threshold adjustment - a larger, riskier
+change than this round's time budget and lack of real-footage validation
+justify attempting blind. Typical real "rapid movement" (a single fast
+head turn, a quick gesture) is a brief, transient event rather than a
+sustained periodic oscillation, so the practical impact of this residual
+gap should be substantially smaller than the worst-case synthetic number
+above suggests - but that is reasoning from the mechanism, not a
+measurement against the user's own footage, which this sandbox cannot
+run.

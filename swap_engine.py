@@ -59,7 +59,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.2.2-solid-face"
+ENGINE_VERSION = "aequus-1.2.3-solid-face"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -627,7 +627,22 @@ class TrackState:
                 exp_cx += 0.5 * (float(self.vel_bbox[0]) + float(self.vel_bbox[2])) * elapsed
                 exp_cy += 0.5 * (float(self.vel_bbox[1]) + float(self.vel_bbox[3])) * elapsed
             cdist = float(math.hypot(cx1 - exp_cx, cy1 - exp_cy))
-            if (int(self.missed) >= 8
+            # v11.2.3: this OR clause's own flat "8" disagreed with
+            # trk_max_missed (24, the budget _predicted_miss_budget() and
+            # this same class' own .missed > trk_max_missed checks use for
+            # "how long may a gap be trusted"). The position-based cdist
+            # check above is the primary signal for "did the identity
+            # actually move elsewhere"; missed alone should only force a
+            # re-confirm once a gap is long enough that even good position
+            # tracking stops being trustworthy - the same bar the rest of
+            # this class already uses, not a stricter, unrelated one.
+            # Measured directly: on sustained rapid oscillating motion, a
+            # handful of motion-veto-rejected frames alone could push
+            # missed past 8 while the track was still being correctly
+            # predicted through the gap, forcing an unnecessary reacquire
+            # (and its 2-hit HairGate confirm delay) at the exact moment a
+            # good real detection arrived to end the gap.
+            if (int(self.missed) >= int(_P.get("trk_max_missed", 24) or 24)
                     or cdist > 0.75 * max(lw, lhgt)):
                 reacquire = True
         # v11.2.0 CinemaQA: sticky until core wipes geom timeline.
@@ -637,6 +652,18 @@ class TrackState:
             self._reacquired = True
 
         if reacquire:
+            # v11.2.3 tried keeping the pre-gap vel_bbox here instead of
+            # zeroing it, reasoning the subject likely kept moving through
+            # the gap. Measured directly and found WORSE on sustained
+            # oscillating motion: at a reversal point in the motion (the
+            # exact moment a reacquire is likely, since that is where the
+            # constant-velocity assumption breaks hardest) the pre-gap
+            # velocity points the WRONG WAY, so projecting forward with it
+            # overshoots in the opposite direction - worse than assuming
+            # no velocity at all. Reverted to zero; the real fix for this
+            # class of failure is a motion model that represents
+            # acceleration/reversal, not a better guess at which stale
+            # velocity to keep, which is out of scope here.
             self.vel_bbox = np.zeros(4, np.float32)
             self.obs_bbox = bb.copy()
             self.last_hit_bbox = bb.copy()
@@ -645,7 +672,24 @@ class TrackState:
             if kps is not None:
                 kp = np.asarray(kps, np.float32).copy()
                 self.kps = kp
-                self.vel_kps = np.zeros_like(kp)
+                # v11.2.3: None, not zeros. update()'s own velocity EMA
+                # ("v if self.vel_kps is None else vel_kps*0.6 + v*0.4")
+                # treats an existing vel_kps as a real prior to blend with -
+                # a zeroed vector is not "no estimate yet", it is "was
+                # stationary", and got treated as such: the FIRST genuine
+                # velocity reading after a reacquire was damped 60% toward
+                # that false zero, understating a subject who kept moving
+                # right through the reacquire. That understated velocity is
+                # exactly what core_pipeline.py's motion-consistency veto
+                # uses for its expected-position budget, so a second real,
+                # correct detection could still get vetoed on nothing more
+                # than this residual damping - measured directly as the
+                # repeated short-recovery/long-dropout cycle a sustained
+                # fast, oscillating motion produced even after the veto's
+                # own zero-velocity skip (immediately below/elsewhere) was
+                # added. None restores the same fresh-start treatment a
+                # genuine first-time establishment already gets.
+                self.vel_kps = None
                 self.last_hit_kps = kp.copy()
             lmk = getattr(face, "landmark_2d_106", None)
             if lmk is not None:

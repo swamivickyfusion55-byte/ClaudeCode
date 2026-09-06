@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.2.2 "SolidFace" configuration (CinemaQA + full-strength paste)."""
+"""Swamitech Phoenix v11.2.3 "SolidFace" configuration (CinemaQA + full-strength paste)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -97,8 +97,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.2"
-BUILD = "SolidFace · fixed reacquire velocity + geometry wipe over-trigger"
+VERSION = "v11.2.3"
+BUILD = "SolidFace · fixed rapid-motion reacquire deadlock"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass
