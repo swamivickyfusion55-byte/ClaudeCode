@@ -1313,3 +1313,121 @@ video file. None of this sandbox has a Jarvislabs account or network
 access to verify against. Manual mode (you start the instance, paste the
 URL) sidesteps the biggest unknown (auto-provisioning) entirely and is
 the recommended way to start.
+
+## v11.3.1 — fewer needless reverts to the original face, without reopening the occlusion/ghost-face fixes
+
+Direct user report: while the camera moves, the original face reappears
+until tracking "stabilizes." Investigating this surfaced two separate
+things, one a false lead and one a real, narrower defect.
+
+### The false lead
+
+A large synthetic investigation (this repo's own test scripts, not
+shipped code) initially found what looked like a serious defect: ~19% of
+frames on a perfectly still synthetic clip showed no swap at all, in a
+periodic pattern. That finding did not hold up. The test harness's fake
+encoder (`harness.py`, scratchpad-only) hardcoded the frame size it uses
+to reconstruct output frames from the raw byte stream to 960×540,
+regardless of what resolution a test actually requested. Nearly every
+diagnostic script requested 720p (1280×720) — a real mismatch that
+reconstructed 266 bogus "frames" out of an actual 150-frame output,
+sliced at the wrong byte boundaries. Fixing that harness bug and re-running
+the same still-clip and camera-shake reproductions showed zero anomalies.
+**No pipeline code changed as a result of this thread** — the shipped
+compositor was correct the whole time.
+
+### The real, narrower defect
+
+With the harness fixed, one genuine issue remained: the last 2-5 frames of
+a clip (out of 150+, only with cadence-based presets like Optimized/
+Balanced, never Best/Fast) could still revert to the original face. Root
+cause in `_geom_for_frame` (`core_pipeline.py`): a track anchored only on
+one side (real detection stopped, nothing bracketing it from the other
+side) fades out and disappears once more than `taper` frames have passed
+since the last real sighting — by design, since there is no way to tell
+"subject walked away" from "still there, just not reconfirmed yet" from
+position alone. At true end-of-video that ambiguity does not exist: there
+is no "rest of the video" left for a wrong guess to keep drifting through,
+so cutting off early was pure loss. `_geom_for_frame` now accepts an
+`end_gap` (frames remaining in the whole job after this one), and when the
+entire remaining clip is itself within the taper's own scale, the fade is
+stretched to land exactly on the true last frame instead of hard-cutting a
+few frames early.
+
+### The grace window itself, and the two ways it can go wrong
+
+The same one-sided-hold `taper` also governs the *ordinary* mid-clip case
+— a brief real-detection gap during a fast pan or a missed detector call —
+which is what the original report actually described. It was capped at
+~12 output frames (under 0.5s at most fps/preset combinations): short
+enough that a routine gap could revert to the original face for a few
+frames even though the subject never left the shot, then "stabilize" once
+tracking caught up. `REACQUIRE_GRACE_SEC` (`config.py`, default 3.0s) now
+sets a much longer floor for this case specifically.
+
+Raising it blindly reopens two risks this codebase has already paid to
+close once:
+
+* **Ghost-face drift.** A held/extrapolated position confidently painted
+  after the subject actually left, or during a genuine turn-away, can
+  drift unboundedly (the v11.1.3 "floating disconnected face" defect this
+  project already fixed measured 350px+ and climbing). Position-based
+  checks in the render loop (frame-edge / containment) still catch an
+  actual walked-off-frame departure regardless of `taper`'s value —
+  confirmed unchanged via `t_exit.py` (0 frames painted after the subject
+  fully leaves). A non-edge-touching case (sustained turn-away, still in
+  frame) is bounded by a different, existing signal below.
+* **Painting over an occluder.** Measured directly: applying the long
+  grace window unconditionally let a sustained hand/object occlusion
+  (`t_occlusion.py`, a fixture already in this repo validating the
+  content-based occlusion gate added in the pre-v11.1 line) paste the swap
+  on top of the occluder for far longer than before — 0/90 frames showing
+  any paste became 63/90, with over 80% of the pasted area sitting
+  directly on the occluder itself at the frames checked. This is the same
+  "wrong-but-confident, not gone" failure family as v11.1.4/v11.1.5.
+
+The fix decouples the two cases using a signal that already existed:
+`_no_face_streak`, a counter of consecutive KEY-FRAME DETECTOR CALLS that
+found nothing paintable at all (genuinely empty, or every candidate
+rejected by `_kps_reliable`) — it does not increment for a key frame the
+detector was never asked to look at (a cadence skip). A streak of 2 or
+more such calls means the content itself is actively failing the
+visibility check right now (occlusion, looking away, a degenerate read),
+which is exactly what the original short taper was already tuned to
+bound, so that case keeps it. A single blip — typical of ordinary motion
+blur during a brief camera move, where the detector still succeeds most of
+the time — is not enough to demote, so a genuine tracking gap still gets
+the long grace window.
+
+### Verified
+
+* `t_occlusion.py`: restored exactly to the pre-change baseline (90/90
+  frames correctly show no paste during sustained occlusion, mean
+  placement error 0.8px) — the decoupling fully closes the regression it
+  first exposed.
+* `t_extended_lookaway.py`: 0 frames drifted >150px from the last real
+  position during a 120-frame turn-away window; clean, accurate recovery
+  once she turns back (mean 0.6px, max 1.5px).
+* `t_exit.py`: 0 frames still painting a face after the subject fully
+  leaves the frame — unchanged.
+* The end-of-clip fix verified clean across N ∈ {90, 150, 300}, fps ∈
+  {24, 30}, and quality ∈ {Fast, Optimized, Best} — 0 reverted frames in
+  every combination that previously showed 2-5.
+* A camera-shake reproduction (erratic jitter for the first ~1.25s, then
+  still) shows 0 reverted frames during or after the shake.
+* Full existing regression suite (`t_final`, `t_e2e`, `t_exit`, `t_pair`,
+  `t_pair2`, `t_confused_2face`, `t_confused_kps`, `t_hair_confusion`,
+  `t_reentry`, `verify_gate`, `verify_geom_cases`) unchanged in outcome.
+
+### Honest caveat
+
+Everything above is synthetic — painted rectangles standing in for faces,
+in this project's own test harness. The original report was made against
+real footage that this project will not re-analyze (a minor-safety
+concern was raised earlier and the file was deleted); no code change here
+has been checked against that specific clip, or any other real footage.
+The synthetic reproductions attempted (still clip, camera shake, extended
+turn-away, sustained occlusion) no longer show the reported symptom, which
+rules out the specific mechanisms those scenarios exercise — it does not
+constitute proof that no related defect exists in real footage outside
+what these scenarios cover.

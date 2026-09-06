@@ -859,13 +859,32 @@ def _geom_lerp(a, b, t):
     return out
 
 
-def _geom_for_frame(timeline, g, taper, max_bracket=None):
+def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
     """Geometry for output frame ``g`` from a slot's key-frame timeline.
 
     ``timeline`` is an ordered list of ``(global_frame_index, record)``. A slot
     that is only anchored on one side (the face has just entered, or has just
     been lost) holds its last known geometry and fades out over ``taper``
     frames rather than disappearing between one frame and the next.
+
+    ``end_gap``, when not None, is how many more output frames the ENTIRE
+    job will ever produce after this one (0 == this is the last frame). Pass
+    it only once the source is truly exhausted - no future chunk can ever
+    supply a fresh real detection here. It exists for one narrow case: the
+    one-sided hold below cuts off ``taper`` frames after the last real
+    sighting because a long-silent identity might really have left the shot,
+    and nothing about position alone can tell "walked away" from "still
+    there, detector just has not run again yet" apart. Mid-video that
+    ambiguity has to be resolved conservatively (see the ghost-face history
+    below). At the true end of the clip it does not: there is no "walked
+    away and stayed gone for the rest of a long video" to protect against,
+    because there is no rest of the video - remaining exposure is capped by
+    end_gap itself. So when the entire remaining clip is itself no longer
+    than the normal grace window, the fade is stretched to land exactly on
+    the last frame instead of hard-cutting a few frames early purely because
+    of where the detector cadence happened to place the last real hit. A
+    disappearance with real video left afterward is untouched: end_gap would
+    then exceed taper and this never fires.
 
     Staleness (how long ago this identity was actually seen, which drives
     both the ``taper`` cutoff and the fade) is always measured against the
@@ -973,7 +992,10 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None):
         # bracketed dip). taper/fade are computed from obs_lo - the last real
         # sighting - not from whatever the tracker most recently guessed.
         real_dist = g - obs_lo[0]
-        if taper > 0 and real_dist > taper:
+        eff_taper = taper
+        if end_gap is not None and taper > 0 and end_gap <= taper:
+            eff_taper = max(taper, real_dist + end_gap)
+        if eff_taper > 0 and real_dist > eff_taper:
             return None
         # Still inside the short grace window: use the MOST RECENT entry
         # (which may be an extrapolated one, and is typically a better
@@ -985,7 +1007,7 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None):
         side = lo if lo is not None else obs_lo
         rec = dict(side[1])
         rec["det"] = False
-        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (real_dist / float(taper)) ** 2))
+        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (real_dist / float(eff_taper)) ** 2))
         return rec if rec["alpha"] > 0.02 else None
 
     # No real detection anywhere in this timeline yet - never established, or
@@ -2559,6 +2581,12 @@ try:
 except Exception:
     SKIP_N = {"Fast": 6, "Balanced": 4, "Optimized": 5, "Best": 1, "Ultra": 1}
 
+try:
+    from config import REACQUIRE_GRACE_SEC as _CFG_REACQUIRE_GRACE_SEC
+    REACQUIRE_GRACE_SEC = float(_CFG_REACQUIRE_GRACE_SEC)
+except Exception:
+    REACQUIRE_GRACE_SEC = 3.0
+
 def _skip_n(quality): return SKIP_N.get(quality, 5)
 
 def _adaptive_swap_gap(base_gap, motion_class, quality):
@@ -3722,12 +3750,25 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # whether each face is visible still stands.
                     key_swap_ok[k] = dict(_seen_ok)
 
-            # One-sided hold: only long enough to bridge to the next key frame.
-            # The tracker's own carry budget already decides how long a lost
-            # face may be predicted for; stacking a further ~0.8 s of held
-            # geometry on top of it is how a face ends up painted on a body
-            # after its owner has left the shot.
-            taper = int(max(3, min(2 * max(1, skip_n, swap_gap_base), 12)))
+            # One-sided hold: how long a lost identity may be held/faded
+            # before the render loop gives up and reverts to the original
+            # frame. v11.3.1: this used to be capped at ~12 output frames
+            # (well under 0.5s at most fps/preset combinations), which was
+            # short enough that an ordinary detection gap - a fast pan, a
+            # missed detector call, brief camera shake - could exceed it and
+            # revert to the original face for a few frames even though the
+            # subject never left the shot. Reports described exactly that:
+            # the original face reappearing mid-shot while the camera moved,
+            # then the swap "stabilizing" back once tracking caught up. The
+            # frame-edge/containment checks in _run_job_body's render loop
+            # are what actually catch a genuine departure (subject walks out
+            # of frame) regardless of this value, so lengthening it mainly
+            # trades a longer worst-case hold on a stale position - for a
+            # non-edge-touching failure like a hard scene cut - against far
+            # fewer needless reverts during ordinary gaps. Never shorter than
+            # the previous cadence-derived floor.
+            _cadence_taper = int(max(3, min(2 * max(1, skip_n, swap_gap_base), 12)))
+            taper = max(_cadence_taper, int(round(out_fps * REACQUIRE_GRACE_SEC)))
             # How long a gap BETWEEN TWO REAL DETECTIONS is still safe to
             # bridge with a full, confident interpolation - expressed as a
             # TIME budget (see _geom_for_frame's docstring for why a fixed
@@ -3736,14 +3777,50 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # whenever fps or the detection cadence preset changes.
             # v11.2.0 CinemaQA: 0.55s (was 0.7s ReentrySafe / 1.5s Continuum).
             # Reacquire wipes timelines; this bounds any residual real–real gap.
-            max_bracket_frames = max(taper + 1, int(round(out_fps * 0.55)))
+            #
+            # Deliberately floored on _cadence_taper, NOT the (now much
+            # larger, v11.3.1) one-sided-hold `taper` above: this bounds a
+            # DIFFERENT risk - confidently straight-line-bridging a gap
+            # between two real detections when the subject's actual path
+            # in between was not straight (a turn, a roll, a round trip). A
+            # longer one-sided hold grace period has nothing to do with that
+            # and must not loosen it.
+            max_bracket_frames = max(_cadence_taper + 1, int(round(out_fps * 0.55)))
+
+            # v11.3.1: measured directly - applying the long grace window
+            # unconditionally let a sustained hand/object occlusion paste
+            # the swap on top of the occluder for far longer than before
+            # (a persistent single-face occlusion went from 0/90 frames
+            # showing any paste to 63/90, most of the pasted area sitting
+            # ON the occluder itself). _no_face_streak already counts
+            # consecutive KEY-FRAME DETECTOR CALLS that found nothing
+            # paintable at all (genuinely empty, or every candidate
+            # rejected by _kps_reliable) - it does NOT increment for a
+            # cadence-skipped key frame the detector was never asked to
+            # look at. A streak past a couple of calls means the content
+            # itself is actively failing the visibility check right now
+            # (occlusion, looking away, a degenerate read), which is
+            # exactly the case the short, original taper was already
+            # tuned to bound; a single blip (typical of ordinary motion
+            # blur during a brief camera move) is not enough to demote,
+            # so genuine tracking gaps still get the long grace window.
+            _ACTIVE_REJECT_STREAK = 2
 
             def _records_at(g):
                 """Every slot's geometry for output frame ``g``."""
+                # Only once no future chunk can ever supply another real
+                # detection (source exhausted or the requested duration is
+                # already met) is it safe to tell _geom_for_frame how close
+                # ``g`` is to the clip's actual last frame - see its
+                # end_gap docstring for why that only softens the true-EOF
+                # tail and never a genuine mid-video disappearance.
+                end_gap = (lim - 1 - g) if (eof or produced >= lim) else None
+                eff_taper = _cadence_taper if _no_face_streak[0] >= _ACTIVE_REJECT_STREAK else taper
                 out = {}
                 for slot in sorted(smap.keys()):
-                    rec = _geom_for_frame(_geom_hist.get(slot) or [], g, taper,
-                                          max_bracket=max_bracket_frames)
+                    rec = _geom_for_frame(_geom_hist.get(slot) or [], g, eff_taper,
+                                          max_bracket=max_bracket_frames,
+                                          end_gap=end_gap)
                     if rec is not None:
                         out[slot] = rec
                 return out

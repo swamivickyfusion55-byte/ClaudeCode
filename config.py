@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.3.0 "SolidFace" configuration (CinemaQA + full-strength paste)."""
+"""Swamitech Phoenix v11.3.1 "SolidFace" configuration (CinemaQA + full-strength paste)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -69,6 +69,17 @@ VIDEO_WORKERS = 1
 # Set to 1 = detect every keyframe when Auto (least flicker, more CPU).
 # Higher values (e.g. 3) are a speed default for Auto on constrained CPU.
 DET_SKIP_INTERVAL = 1
+
+# How long a tracked identity may be held/faded once real detection stops
+# (occlusion, a fast pan, a missed detector call) before the render loop
+# gives up and shows the original frame instead. Longer trades more exposure
+# to a stale/drifting held position if the subject genuinely left (the
+# frame-edge/containment checks in _run_job_body still catch that case
+# regardless of this value) for far fewer needless reverts during ordinary,
+# brief tracking gaps. v11.3.1: raised from a cadence-derived ~0.1-0.5s to a
+# flat multi-second grace window after reports of the original face
+# reappearing mid-shot during camera movement.
+REACQUIRE_GRACE_SEC = 3.0
 FACE_ROI_PAD = 0.22
 FACE_EMA_ALPHA = 0.40
 COLOR_MATCH_SCALE = 0.25
@@ -108,8 +119,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.3.0"
-BUILD = "SolidFace · optional Jarvislabs remote-GPU adapter"
+VERSION = "v11.3.1"
+BUILD = "SolidFace · fewer needless reverts to the original face"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

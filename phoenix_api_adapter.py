@@ -1,5 +1,5 @@
 """
-Phoenix Mobile API adapter for Swamitech Phoenix v11.3.0 SolidFace.
+Phoenix Mobile API adapter for Swamitech Phoenix v11.3.1 SolidFace.
 
 Stable Gradio API surface:
   phoenix_submit_video
@@ -23,7 +23,7 @@ from core_pipeline import _lock, jobs, submit_video
 try:
     from config import VERSION_FULL
 except Exception:
-    VERSION_FULL = "v11.3.0 (SolidFace)"
+    VERSION_FULL = "v11.3.1 (SolidFace)"
 
 _JOB_RE = re.compile(r"\bJob\s+([A-Z0-9]{8})\b")
 
