@@ -499,6 +499,19 @@ def _device_status_text():
     cuda = _cuda_available()
     zg = _is_zerogpu_space()
     active = _loaded_device[0] or "—"
+    if pref == "jarvislabs":
+        try:
+            from jarvislabs_adapter import GOVERNOR as _JL_GOVERNOR
+            snap = _JL_GOVERNOR.usage_snapshot()
+            mode = (
+                "Jarvislabs GPU (remote) — budget left: "
+                f"{snap['day']['remaining']:.1f}h today, "
+                f"{snap['week']['remaining']:.1f}h this week, "
+                f"{snap['month']['remaining']:.1f}h this month"
+            )
+        except Exception as e:
+            mode = f"Jarvislabs GPU (remote) — adapter unavailable ({str(e)[:60]})"
+        return f"🖥 Device: {mode}"
     if pref == "cpu":
         mode = "CPU only (selected)"
     elif cuda:
@@ -4646,6 +4659,8 @@ def _load_ui_session(request=None):
 
 def _parse_device_mode(mode):
     s = (mode or "").lower()
+    if "jarvislabs" in s:
+        return "jarvislabs"
     return "cpu" if ("cpu only" in s or s.strip() == "cpu") else "gpu"
 
 
@@ -4659,8 +4674,21 @@ def submit_video(s1, s2, s3, s4, vid, secs, fps, res, quality, enhancer, swap_n,
     _device_pref[0] = pref
     want_gpu = pref == "gpu"
     use_gpu = _gpu_worth_trying(want_gpu)
+    want_jarvislabs = pref == "jarvislabs"
 
-    if not use_gpu:
+    # Cheap, local-only, no-network check - decides whether it is even worth
+    # trying the remote path below, and lets the immediate return message
+    # accurately say which device will actually run the job instead of
+    # promising remote GPU and silently falling back.
+    jarvislabs_allowed, jarvislabs_reason = (False, "not selected")
+    if want_jarvislabs:
+        try:
+            from jarvislabs_adapter import GOVERNOR as _JL_GOVERNOR
+            jarvislabs_allowed, jarvislabs_reason = _JL_GOVERNOR.can_start()
+        except Exception as e:
+            jarvislabs_allowed, jarvislabs_reason = False, f"adapter unavailable: {e}"
+
+    if not use_gpu and not (want_jarvislabs and jarvislabs_allowed):
         try: MODELS.get(prefer_gpu=False)
         except Exception as e:
             return f"❌ Model load failed: {e}", _hist_html(), gr.update(choices=_get_done_choices()), _video_progress_html(), _device_status_text()
@@ -4709,6 +4737,28 @@ def submit_video(s1, s2, s3, s4, vid, secs, fps, res, quality, enhancer, swap_n,
         )
     except Exception as e:
         logging.warning(f"session persist: {e}")
+
+    if want_jarvislabs:
+        if not jarvislabs_allowed:
+            # Cap already exhausted (or adapter unavailable) - go straight to
+            # local CPU, exactly like the normal path below, but say why in
+            # the message so "why did this run on CPU" has an answer.
+            VIDEO_EXECUTOR.submit(_run_job_body, jid, src_paths, vp, cfg)
+            return (
+                f"✓ Job {jid} on CPU · {face_mode} · Jarvislabs GPU unavailable ({jarvislabs_reason})",
+                _hist_html(),
+                gr.update(choices=_get_done_choices()),
+                _video_progress_html(),
+                _device_status_text(),
+            )
+        VIDEO_EXECUTOR.submit(_run_job_remote_or_fallback, jid, src_paths, vp, cfg)
+        return (
+            f"✓ Job {jid} started · {face_mode} · device=Jarvislabs GPU (remote)",
+            _hist_html(),
+            gr.update(choices=_get_done_choices()),
+            _video_progress_html(),
+            _device_status_text(),
+        )
 
     if use_gpu and HAS_SPACES and _is_zerogpu_space():
         try:
@@ -4762,3 +4812,32 @@ if HAS_SPACES:
 else:
     def _run_job_on_gpu(jid, src_paths, vp, cfg):
         return _run_job_body(jid, src_paths, vp, cfg)
+
+
+def _run_job_remote_or_fallback(jid, src_paths, vp, cfg):
+    """Runs on VIDEO_EXECUTOR's background thread (submitted from
+    submit_video()'s "jarvislabs" branch) - tries the remote Jarvislabs GPU
+    job end to end (governor check already passed synchronously before this
+    was even submitted; this call still re-checks, since time has passed),
+    and on ANY failure (network, remote error, cap crossed between the sync
+    pre-check and now) falls back to ordinary local CPU processing rather
+    than leaving the job stuck. Mirrors _run_job_on_gpu's fallback
+    philosophy ("GPU failed - continuing on CPU"), done asynchronously here
+    instead of blocking submit_video()'s return, because a remote video job
+    can run for minutes and the rest of this app's UI already knows how to
+    show live progress for a job running on VIDEO_EXECUTOR.
+    """
+    try:
+        from jarvislabs_adapter import run_job_on_jarvislabs
+        run_job_on_jarvislabs(jid, src_paths, vp, cfg, jobs, _lock)
+    except Exception as e:
+        logging.warning("Jarvislabs remote job failed for %s, falling back to local CPU: %s", jid, e)
+        with _lock:
+            if jid in jobs:
+                jobs[jid].update(
+                    status="processing", progress=1,
+                    message=f"Remote GPU unavailable ({str(e)[:140]}) — continuing on CPU…",
+                )
+        cfg2 = dict(cfg)
+        cfg2["use_gpu"] = False
+        _run_job_body(jid, src_paths, vp, cfg2)

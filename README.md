@@ -1152,3 +1152,164 @@ gap should be substantially smaller than the worst-case synthetic number
 above suggests - but that is reasoning from the mechanism, not a
 measurement against the user's own footage, which this sandbox cannot
 run.
+
+## v11.3.0 — optional Jarvislabs remote-GPU adapter, with a hard usage cap
+
+Requested directly: a way to run jobs on a GPU rented from Jarvislabs
+(India-based, INR/per-minute billing) instead of this Space's CPU, capped
+at 3h/day, 12h/week (Sunday-Saturday), and 50h/month so the feature can
+never overspend past what was budgeted, however it gets used.
+
+### New files
+
+* **`gpu_usage_governor.py`** - the actual safety mechanism. Tracks every
+  remote-GPU session in a small JSON ledger and refuses to start a new one
+  if doing so could push the day, week (Sun-Sat), or month over its cap -
+  all three enforced independently, so a wide-open monthly budget never
+  papers over an exhausted daily one. A job already running is allowed to
+  finish even if a cap boundary passes under it (killing a half-done video
+  to save a few minutes of GPU time is a worse outcome than letting it
+  finish and blocking the next one); a crashed/killed session that never
+  reached its own cleanup step is auto-closed and still counted, not lost.
+  Fully self-contained - no network, no Jarvislabs account needed to run
+  or verify it. Run `python gpu_usage_governor.py` directly: it exercises
+  its own cap logic (daily/weekly/monthly enforcement independently,
+  persistence across restarts, crashed-session recovery) with no external
+  dependency, and prints ALL SELF-TESTS PASSED on success - confirmed
+  passing as of this commit.
+* **`jarvislabs_adapter.py`** - runs on the Space (CPU) side. Two parts,
+  deliberately separable:
+  - `RemoteJobClient` - a plain HTTP client against `jarvislabs_server.py`
+    below. **Verified end-to-end in this repo's own test scripts**: a real
+    Flask server on a real local port, a real multipart upload, real JSON
+    status polling, and a byte-exact file download, all the way through
+    `run_job_on_jarvislabs()`'s full orchestration (governor check, submit,
+    poll, download, mirror into the same `jobs[jid]` dict the rest of the
+    app already reads for history/progress/download) and the cap actually
+    refusing a job once the ledger says the day is spent - not a mocked
+    unit test, an actual server process being hit over real HTTP.
+  - `InstanceManager` - optional, auto-starts/pauses the Jarvislabs
+    instance itself via Jarvislabs' own `jarvislabs` Python SDK, so a job
+    can run without you manually starting the instance first. **NOT
+    verified against a live account** - this sandbox has no Jarvislabs
+    credentials or network access to their API. Built from the SDK's own
+    published usage example (`from jarvislabs import Client;
+    client.instances.create(gpu_type=...)`); the exact `gpu_type` strings,
+    required arguments, and - critically - which attribute actually carries
+    the instance's HTTP endpoint URL are flagged as unconfirmed directly in
+    `InstanceManager`'s docstring, with a checklist of what to confirm
+    against your real account. If it fails for any reason it falls back
+    automatically to manual mode below; it is an optimization, never a
+    hard dependency.
+* **`jarvislabs_server.py`** - deploy this ON the Jarvislabs instance, not
+  the Space. A thin Flask wrapper around this repo's own
+  `phoenix_api_adapter.py` (already existed, built for the Phoenix Mobile
+  bridge) - `submit_video`/`job_status`/`download`/`cancel` become plain
+  HTTP/JSON routes. No pipeline logic is duplicated or reimplemented;
+  `core_pipeline.py`/`swap_engine.py` run completely unmodified on that
+  box, the only difference from the Space being `onnxruntime-gpu` instead
+  of `onnxruntime` so `_cuda_available()` is True there.
+* **`requirements-jarvislabs-server.txt`** - just `flask`, installed
+  alongside (not instead of) this repo's normal `requirements.txt` on the
+  Jarvislabs instance only. The Space's own `requirements.txt` gained one
+  new explicit line (`requests`, likely already present transitively, now
+  pinned directly since the adapter depends on it) and a commented-out
+  optional `jarvislabs` SDK line for auto-provisioning.
+
+### Wiring into the existing app
+
+A third `device_mode` option, `"Jarvislabs GPU (remote)"`, sits alongside
+the existing `"GPU if available"`/`"CPU only"` radio in the Video tab.
+`core_pipeline._parse_device_mode()` recognizes it; `submit_video()` does
+a **synchronous, local-only, no-network** governor check first (so the
+immediate response accurately says which device will run the job, never
+silently promising remote GPU and falling back later), then either:
+- cap already spent → straight to local CPU, same as always, with a
+  message saying why: `"Jarvislabs GPU unavailable (<reason>)"`.
+- cap has room → submits `_run_job_remote_or_fallback` to the same
+  background executor every other job already uses. That function tries
+  the full remote round-trip and, on ANY failure (network, remote error, a
+  cap crossed between the sync pre-check and now), falls back to ordinary
+  local CPU processing automatically - mirroring the existing ZeroGPU
+  branch's own "GPU failed - continuing on CPU" philosophy, just done
+  asynchronously since a remote video job can run for minutes and blocking
+  the Gradio request for that long would be a worse experience than the
+  existing polling UI already provides.
+
+`_device_status_text()` shows live remaining budget (`"budget left: X.Xh
+today, X.Xh this week, X.Xh this month"`) whenever Jarvislabs mode is
+selected, reading directly from the same governor ledger that enforces
+the cap - not a separate display number that could drift from what
+actually gets enforced.
+
+### Setup (what you actually do)
+
+**On the Jarvislabs instance** (start it from their dashboard, an A30 or
+similar):
+```bash
+git clone <this repo>
+cd ClaudeCode
+pip install -r requirements.txt
+pip uninstall -y onnxruntime && pip install onnxruntime-gpu
+pip install -r requirements-jarvislabs-server.txt
+python jarvislabs_server.py
+```
+Then, per Jarvislabs' own docs (`docs.jarvislabs.ai/deploy/flask-api`),
+expose port 6006 as an API endpoint from the instance's dashboard - that
+gives you a public URL.
+
+**On the Space**, set one environment variable (Space secrets/settings):
+```
+JARVISLABS_ENDPOINT_URL = <the URL from the step above>
+```
+Select "Jarvislabs GPU (remote)" in the Video tab's device dropdown.
+That's the whole manual-mode setup - no SDK, no API key, no
+auto-provisioning needed to start using it; you start/stop the instance
+yourself from the Jarvislabs dashboard, the Space just needs to know
+where to send jobs while it's up. Optional environment overrides for the
+caps themselves: `PHOENIX_GPU_DAILY_CAP_HOURS`, `PHOENIX_GPU_WEEKLY_CAP_HOURS`,
+`PHOENIX_GPU_MONTHLY_CAP_HOURS` (defaults 3/12/50, matching what was
+asked for).
+
+To additionally enable auto-start/pause instead of manually running the
+instance, set `JARVISLABS_API_KEY` too and install the `jarvislabs` SDK
+(uncomment it in `requirements.txt`) - but read `InstanceManager`'s
+docstring in `jarvislabs_adapter.py` first and confirm its assumptions
+against your actual account before relying on it; if anything is off it
+fails closed to manual mode rather than silently misbehaving.
+
+### Verified
+
+* `gpu_usage_governor.py`'s self-test suite (independent daily/weekly/
+  monthly enforcement, persistence across process restarts, crashed-
+  session recovery) - passes standalone, no external dependency.
+* Full real-HTTP integration test (this repo's own test scripts, not
+  included in the shipped app): a live Flask server + the adapter's HTTP
+  client, exercising submit → multipart upload → status poll → byte-exact
+  download, and separately `run_job_on_jarvislabs()`'s complete
+  orchestration including the local `jobs[jid]` dict ending up in
+  identical shape to a locally-run job (so history/download UI need zero
+  changes) and the governor correctly refusing a job before any network
+  call once the daily cap is spent.
+* Full existing regression suite (`t_final`, `t_e2e`, `t_exit`,
+  `t_confused_kps`, `t_confused_2face`, `t_pair`, `t_reentry`,
+  `t_hair_confusion`, `verify_gate`, `repro_ghost`, `verify_geom_cases`,
+  `t_extended_lookaway`, `t_modes`) unchanged in outcome after wiring the
+  new device_mode branch into `submit_video()` - the existing CPU/GPU/
+  ZeroGPU paths are untouched, this is a new sibling branch, not a
+  modification of them.
+
+### Honest caveat
+
+The `RemoteJobClient` + `jarvislabs_server.py` HTTP contract is real,
+tested, working code - that part will work against an actual Jarvislabs
+instance exactly as it does against the local test server, because the
+contract is entirely this repo's own design on both ends. What is NOT
+verified is anything Jarvislabs-specific: `InstanceManager`'s SDK calls
+(auto-provisioning), the exact behavior of Jarvislabs' own
+dashboard-based "expose as API endpoint" step, and whether their infra
+has any request-size or timeout limit that would affect uploading a large
+video file. None of this sandbox has a Jarvislabs account or network
+access to verify against. Manual mode (you start the instance, paste the
+URL) sidesteps the biggest unknown (auto-provisioning) entirely and is
+the recommended way to start.

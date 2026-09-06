@@ -1,0 +1,14 @@
+# Install this on the JARVISLABS GPU instance, in addition to (not
+# instead of) this repo's own requirements.txt. Run in this order:
+#
+#   pip install -r requirements.txt
+#   pip uninstall -y onnxruntime && pip install onnxruntime-gpu
+#   pip install -r requirements-jarvislabs-server.txt
+#   python jarvislabs_server.py
+#
+# This file is deliberately NOT merged into requirements.txt: your Hugging
+# Face Space (CPU) never runs jarvislabs_server.py, so it never needs
+# Flask, and installing onnxruntime-gpu there would be actively wrong (no
+# GPU to use it, and it can shadow the CPU onnxruntime package).
+
+flask>=3.0.0
