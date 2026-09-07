@@ -2865,6 +2865,12 @@ except Exception:
     BLIND_AFTER_SEC = 0.75
 
 try:
+    from config import RECOVER_DET_SCALE as _CFG_RECOVER_DET_SCALE
+    RECOVER_DET_SCALE = float(_CFG_RECOVER_DET_SCALE)
+except Exception:
+    RECOVER_DET_SCALE = 0.34
+
+try:
     from config import PASTE_FADE_SEC as _CFG_PASTE_FADE_SEC
     PASTE_FADE_SEC = float(_CFG_PASTE_FADE_SEC)
 except Exception:
@@ -3150,6 +3156,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # PASTE_FADE_SEC in config.py for why the fade exists at all.
         _paint_alpha = {j: 0.0 for j in smap.keys()}   # slot -> slewed opacity
         _held_rec = {j: None for j in smap.keys()}     # slot -> last composited record
+        # slot -> is this identity currently considered on-screen enough to
+        # paint. Carries the hysteresis for the frame-edge / containment
+        # tests: without a memory of the previous verdict there is only one
+        # threshold, and a face parked near it flips across it every frame.
+        _edge_on = {j: True for j in smap.keys()}
         _pending_tail = []                             # [(g, frame)] not yet emittable
         _det_dt = [1.0]                                # frames since the last detection
         _last_det_frame = [-1]
@@ -3629,7 +3640,33 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 # Scheduled in OUTPUT-FRAME space. It used to compare `key_ord`,
                 # which is an index within the current chunk and restarts at 0
                 # at every chunk boundary, so the cadence silently reset there.
-                det_due = (g - last_det_g[0]) >= det_n_val * det_mult * max(1, skip_n)
+                _det_period = det_n_val * det_mult * max(1, skip_n)
+                # v11.2.8: look more often while nothing is being painted.
+                #
+                # Once the content gate has suppressed an identity, the ONLY
+                # thing standing between the subject's face reappearing and
+                # the swap resuming is how soon the detector is next asked to
+                # look - so the reported "the original face is shown
+                # momentarily when the face reappears" is exactly one detector
+                # interval of real face, and it is invisible in a test where
+                # the return happens to coincide with a scheduled call.
+                # Measured by sweeping the return frame (t_return.py): a
+                # return landing on a call costs 0 frames, and every other
+                # offset costs 7-11.
+                #
+                # This is close to free. While suppressed the swap network is
+                # not running at all - that is the expensive part, and the
+                # reason the detector cadence is sparse in the first place -
+                # so the budget those skipped swaps were protecting is exactly
+                # what pays for looking more often. Note this TIGHTENS the
+                # cadence rather than loosening it, which is the opposite of
+                # the motion-adaptive experiment recorded above: that one
+                # spent calls hoping to place a face better, this one spends
+                # them to stop showing the wrong face at all.
+                _blind_now = bool(_vis_marks) and _vis_marks[-1][1] is not True
+                if _blind_now:
+                    _det_period = max(1, int(round(_det_period * RECOVER_DET_SCALE)))
+                det_due = (g - last_det_g[0]) >= _det_period
                 need_det = force_initial or det_due or (last_pairs_ref[0] is None)
 
                 if need_det:
@@ -4836,17 +4873,46 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         _want[slot] = (None, 0.0, False)
                         continue
                     if not _r.get("det"):
-                        if (_touches_frame_edge(_r.get("hit_bbox"), frm.shape)
-                                or _touches_frame_edge(_r["bbox"], frm.shape)):
-                            _want[slot] = (None, 0.0, True)
-                            continue
+                        # v11.2.8: this was the last HARD cut left in the
+                        # pipeline. v11.2.5 made every other suppression path
+                        # fade instead of cutting, and deliberately left these
+                        # two alone as "departure" - but a face that is partly
+                        # outside the picture is not departing, it is partly
+                        # outside the picture, and both tests here were single
+                        # thresholds, so a face parked near one flipped across
+                        # it. Measured on t_edge: a face hovering with 45-80%
+                        # of itself on screen produced 3 presence transitions
+                        # and 6 dropped frames - visible flicker, from the
+                        # gates alone, with nothing wrong with the tracking.
+                        #
+                        # Both get hysteresis, and the containment cut becomes
+                        # a fade. The containment ramp already reaches zero at
+                        # the cut point, so cutting there was redundant with
+                        # the ramp AND skipped the slew; letting it fade costs
+                        # nothing and removes the step. A true departure still
+                        # cuts hard, but only once the face is BOTH touching
+                        # the edge and mostly gone, which is what departing
+                        # actually looks like.
                         _keep = _frame_containment(_r["bbox"], frm.shape)
-                        if _keep < 0.60:
-                            _want[slot] = (None, 0.0, True)
+                        _was_on = bool(_edge_on.get(slot, True))
+                        _edge_hit = (_touches_frame_edge(_r.get("hit_bbox"), frm.shape)
+                                     or _touches_frame_edge(_r["bbox"], frm.shape))
+                        # Asymmetric: keep painting until clearly gone, resume
+                        # only once clearly back. The gap between the two is
+                        # what a single threshold did not have.
+                        _lo = 0.55 if _was_on else 0.70
+                        if _edge_hit and _keep < _lo:
+                            _edge_on[slot] = False
+                            _want[slot] = (None, 0.0, True)      # true departure
                             continue
+                        if _keep < _lo:
+                            _edge_on[slot] = False
+                            _want[slot] = (None, 0.0, False)     # fade, not cut
+                            continue
+                        _edge_on[slot] = True
                         if _keep < 0.85:
                             _r = dict(_r)
-                            _r["alpha"] *= (_keep - 0.60) / 0.25
+                            _r["alpha"] *= min(1.0, (_keep - _lo) / max(1e-6, 0.85 - _lo))
                     _want[slot] = (_r, float(_r.get("alpha", 1.0) or 0.0), False)
 
                 _fade_step = 1.0 / max(1.0, float(out_fps) * max(0.05, PASTE_FADE_SEC))
