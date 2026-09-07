@@ -4901,9 +4901,35 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # only once clearly back. The gap between the two is
                         # what a single threshold did not have.
                         _lo = 0.55 if _was_on else 0.70
-                        if _edge_hit and _keep < _lo:
+                        # Whether this identity has been CONFIRMED by a real
+                        # detection recently is what separates the two cases
+                        # that look alike here, and dropping that distinction
+                        # is what v11.2.8's first attempt got wrong: it
+                        # replaced a bare edge-touch cut with a containment
+                        # test, and a subject walking out of frame went from 0
+                        # painted frames to 31, because her held box stayed
+                        # ~83% inside the picture while she was already gone.
+                        #
+                        # A box at the frame edge that the detector has NOT
+                        # recently confirmed is a departure - the geometry is
+                        # coasting on a prediction and the subject is leaving.
+                        # One it HAS confirmed is a face that is genuinely
+                        # there and simply half out of shot, which is the case
+                        # that must not be cut, because cutting it on every
+                        # predicted frame between detections is precisely the
+                        # reported flicker.
+                        _trk = (_tracker.tracks.get(slot)
+                                if hasattr(_tracker, "tracks") else None)
+                        _confirmed = (_trk is not None
+                                      and int(getattr(_trk, "missed", 10 ** 6))
+                                      <= max(2, int(_cadence_taper)))
+                        if _edge_hit and not _confirmed:
                             _edge_on[slot] = False
                             _want[slot] = (None, 0.0, True)      # true departure
+                            continue
+                        if _edge_hit and _keep < _lo:
+                            _edge_on[slot] = False
+                            _want[slot] = (None, 0.0, True)
                             continue
                         if _keep < _lo:
                             _edge_on[slot] = False
