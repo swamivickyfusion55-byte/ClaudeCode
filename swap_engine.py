@@ -59,7 +59,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.2.6-truetrack-alphabeta"
+ENGINE_VERSION = "aequus-1.2.7-eyesopen-content-gate"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -516,7 +516,8 @@ class TrackState:
                  "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps",
                  "fake", "fake_corr", "fake_size", "fake_frame",
                  "_frame_wh", "_paste_frozen", "_reacquired",
-                 "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps")
+                 "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
+                 "skin_ref", "skin_hits")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -533,6 +534,16 @@ class TrackState:
         # residual it measures is contaminated by the display damping.
         self.ab_bbox = None
         self.ab_kps = None
+        # This identity's own remembered face chroma (median Cr, Cb sampled at
+        # its landmarks), learned only from frames where the face was actually
+        # visible. skin_confidence() in this module answers a DIFFERENT
+        # question: it takes its reference from the mask core of the crop it is
+        # handed, so when an occluder covers that core the occluder's colour
+        # BECOMES the reference and it confidently keeps the occluder while
+        # trimming the real skin at the edges. It cannot detect occlusion of
+        # the centre by construction. A reference carried across time can.
+        self.skin_ref = None
+        self.skin_hits = 0
         self.emb = None
         self.hits = 0
         self.missed = 0

@@ -1961,6 +1961,120 @@ def _kps_registration(kps, bbox):
 _REG_JUMP_TOL = 0.22
 
 
+def _face_chroma(frame_bgr, kps, bbox):
+    """Median chroma of the pixels the detector says the FACE is at.
+
+    Samples small patches centred on the five landmarks rather than averaging
+    the whole detection box. The box always contains background, hair and
+    neck, and their proportions swing with pose and framing, so a box-wide
+    average mostly measures the shot. The landmarks are by definition the
+    places the detector believes the eyes, nose and mouth to be - so if a
+    hand, the back of the head or a shoulder is actually there instead, that
+    is precisely what gets sampled. That is the whole point.
+
+    YCrCb, chroma only: luma carries the lighting, which legitimately swings
+    frame to frame; Cr/Cb carry the colour, which does not.
+    """
+    try:
+        if frame_bgr is None or kps is None:
+            return None
+        k = np.asarray(kps, np.float32)
+        if k.ndim != 2 or k.shape[0] < 3:
+            return None
+        b = np.asarray(bbox, np.float32).reshape(4)
+        bw = max(1.0, float(b[2]) - float(b[0]))
+        bh = max(1.0, float(b[3]) - float(b[1]))
+        r = max(1, int(round(0.06 * min(bw, bh))))
+        ycc = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
+        fh, fw = frame_bgr.shape[:2]
+        crs, cbs = [], []
+        for (px, py) in k[:5]:
+            x0, x1 = max(0, int(px) - r), min(fw, int(px) + r + 1)
+            y0, y1 = max(0, int(py) - r), min(fh, int(py) + r + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            patch = ycc[y0:y1, x0:x1]
+            crs.append(float(np.median(patch[:, :, 1])))
+            cbs.append(float(np.median(patch[:, :, 2])))
+        if len(crs) < 3:
+            return None
+        return np.asarray([float(np.median(crs)), float(np.median(cbs))], np.float32)
+    except Exception:
+        return None
+
+
+# How far the sampled chroma may sit from the identity's remembered face
+# chroma before the content is judged to be something other than that face.
+# Measured on t_occlusion, whose occluder separates from the face by 98.4
+# chroma units and holds that separation exactly across the whole occluded
+# window. Ordinary lighting drift on real skin moves Cr/Cb by roughly 10-20,
+# so 30 sits with margin on both sides rather than between two numbers that
+# nearly touch.
+_CHROMA_TOL = 30.0
+# Frames of agreeing evidence before the reference is trusted enough to
+# suppress anything. Until then the gate passes everything and only learns.
+_CHROMA_WARMUP = 3
+
+
+def _content_visible(frame_bgr, f, tr):
+    """Is this identity's actual face present where the detector says it is?
+
+    Returns (verdict, distance). The verdict is True whenever the question
+    cannot be answered - no frame, no landmarks, no reference learned yet.
+    That is deliberate and is the opposite of _kps_reliable's fail-closed
+    stance: _kps_reliable is handed everything it needs and a failure there
+    means the read is degenerate, whereas this gate is frequently asked
+    before it has any reference at all, and a missing reference is not
+    evidence of an occluder. Suppressing on absence of evidence would blank
+    the face at the start of every clip.
+
+    This is the check the pipeline has never actually had. Every existing
+    gate - det_score, _kps_reliable, _frontal_score, _pitch_score,
+    _same_extent, _kps_registration, the motion budget - reasons about the
+    detector's OUTPUT: the box, the landmarks, the score, where they sit and
+    how they move. None of them look at the pixels underneath. A detector
+    that reports a confident, well-posed, correctly-sized, correctly-placed,
+    self-consistent box over the back of someone's head passes every one of
+    them, which is exactly what "a face pasted on the hair when the subject's
+    face is not visible" is.
+    """
+    try:
+        if tr is None:
+            return True, 0.0
+        cur = _face_chroma(frame_bgr, getattr(f, "kps", None), f.bbox)
+        if cur is None:
+            return True, 0.0
+        ref = getattr(tr, "skin_ref", None)
+        if ref is None or int(getattr(tr, "skin_hits", 0) or 0) < _CHROMA_WARMUP:
+            return True, 0.0
+        return (float(np.linalg.norm(cur - np.asarray(ref, np.float32)))
+                <= _CHROMA_TOL), float(np.linalg.norm(cur - np.asarray(ref, np.float32)))
+    except Exception:
+        return True, 0.0
+
+
+def _learn_face_chroma(frame_bgr, f, tr):
+    """Fold an accepted, visible frame into the identity's chroma reference.
+
+    Only ever called for a detection that passed the gate, so an occluder can
+    never teach the reference to accept itself. The EMA is slow enough that a
+    single wrong frame cannot move it far, and fast enough to follow a real
+    lighting change across a few seconds.
+    """
+    try:
+        if tr is None:
+            return
+        cur = _face_chroma(frame_bgr, getattr(f, "kps", None), f.bbox)
+        if cur is None:
+            return
+        ref = getattr(tr, "skin_ref", None)
+        tr.skin_ref = cur if ref is None else (
+            np.asarray(ref, np.float32) * 0.88 + cur * 0.12).astype(np.float32)
+        tr.skin_hits = int(getattr(tr, "skin_hits", 0) or 0) + 1
+    except Exception:
+        pass
+
+
 def _kps_reliable(f) -> bool:
     """False when the 5 landmarks do not describe a paintable face.
 
@@ -2936,6 +3050,19 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         _det_cache, _det_counter = [], [0]
         _no_face_streak = [0]
+        # (output_frame, was_anything_paintable_found) for every detector call,
+        # in order. The hold budget has to be a statement about the frame being
+        # rendered, and neither _no_face_streak nor a single "lost at" marker
+        # can be one: detection for a chunk completes before ANY of that chunk
+        # is rendered, so both hold their END-OF-CHUNK value by the time the
+        # render loop reads them. Measured both ways round - a clip whose
+        # subject turned away and then came back read "visible" at render time
+        # and got the full three-second grace window across the whole
+        # turn-away (49 of 60 frames painted onto hair), while the reverse
+        # ordering faded frames out five frames before anything was wrong with
+        # them. Recording the verdict against the frame it was made at, and
+        # looking it up per frame, is what makes the budget mean what it says.
+        _vis_marks = []
         _kps_veto_streak = [0]
         # Companion to _kps_veto_streak, in OUTPUT FRAMES rather than in
         # detector calls. The streak alone bounds how many consecutive
@@ -3560,6 +3687,14 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
                     if not faces:
                         _no_face_streak[0] += 1
+                        # An empty detector return is the older, simpler way
+                        # for visibility to be lost, and it has to be recorded
+                        # exactly as the content gate's rejections are. Marking
+                        # only the gate's rejections and not these silently
+                        # restored the full three-second grace window for every
+                        # genuine detector miss - measured, a 120-frame
+                        # turn-away went from 43 rendered frames to 106.
+                        _vis_marks.append((g, False))
                         # v11: a detector miss is not a reason to show the real
                         # face again. Carry the tracked geometry for a bounded
                         # number of frames so the swap rides through the gap.
@@ -3579,7 +3714,16 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
                         continue
                     _after_real_gap = _no_face_streak[0] > 0
-                    _no_face_streak[0] = 0
+                    # v11.2.7: the reset moved to AFTER the gates, keyed on a
+                    # candidate actually surviving them. Resetting here - on
+                    # the mere fact that the detector returned a box - is what
+                    # kept the streak pinned at 0/1 through a sustained
+                    # occlusion: the content gate below would raise it to 1,
+                    # this line would zero it on the next call, and the
+                    # >= _ACTIVE_REJECT_STREAK demotion to the short taper
+                    # could never be reached. "The detector returned
+                    # something" and "something paintable is on screen" are
+                    # different facts, and only the second one ends a gap.
 
                     # v11.1.10 HairGate: after a real gap, still skip the
                     # motion-veto vs pre-gap position (below), but refuse to
@@ -4003,6 +4147,61 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     pairs = [(_best_keep, _only)]
                                     _kps_veto_streak[0] = 0
                                     _kps_veto_frames[0] = 0.0
+                        # v11.2.7 CONTENT GATE. Every gate above this line
+                        # reasons about the detector's OUTPUT - the box, the
+                        # landmarks, the score, where they sit, how they move.
+                        # None of them look at the pixels underneath, so a
+                        # confident, well-posed, correctly-sized, correctly-
+                        # placed, self-consistent detection over the back of
+                        # someone's head passes all of them. That is the
+                        # reported "face pasted on the hair when the subject's
+                        # face is not visible", and it is why t_occlusion has
+                        # been reporting 0/90 frames suppressed through every
+                        # round of geometric fixes: the swap was not being
+                        # HELD onto the occluder by a stale anchor, it was
+                        # being freshly re-detected and re-bound on every
+                        # single detector call, 20 of 20.
+                        if frm is not None and pairs:
+                            _kept = []
+                            for _cf, _csrc in pairs:
+                                _ctr = None
+                                for _cj, _csf in smap.items():
+                                    if _csf is _csrc:
+                                        _ctr = (_tracker.tracks.get(_cj)
+                                                if hasattr(_tracker, "tracks") else None)
+                                        break
+                                _anc_e = None
+                                if _ctr is not None:
+                                    _anc_e = getattr(_ctr, "last_hit_bbox", None)
+                                    if _anc_e is None:
+                                        _anc_e = getattr(_ctr, "obs_bbox", None)
+                                _ext_ok = True
+                                if _anc_e is not None:
+                                    _ext_ok = _same_extent(_cf.bbox, _anc_e)
+                                _vis, _dd = _content_visible(frm, _cf, _ctr)
+                                _vis = bool(_vis and _ext_ok)
+                                if _vis:
+                                    _kept.append((_cf, _csrc))
+                            # "The detector returned a box" and "something
+                            # paintable is on screen" are different facts, and
+                            # only the second one ends a gap. _no_face_streak's
+                            # own comment at the taper site already claims to
+                            # count the second - "found nothing paintable at
+                            # all (genuinely empty, OR EVERY CANDIDATE
+                            # REJECTED)" - but the code only ever incremented
+                            # it on an empty detector return, so a
+                            # rejected-but-present candidate left the long
+                            # REACQUIRE_GRACE_SEC window in force and the
+                            # stale face kept painting for three seconds.
+                            if _kept:
+                                _no_face_streak[0] = 0
+                            else:
+                                _no_face_streak[0] += 1
+                            _vis_marks.append((g, bool(_kept)))
+                            pairs = _kept
+                        if pairs and frm is None:
+                            _no_face_streak[0] = 0
+                            _vis_marks.append((g, True))
                         # The single-face path keeps its own well-tested pairing
                         # (startup identity lock, reference embeddings), but it
                         # still gets the track's temporal memory so its mask and
@@ -4014,6 +4213,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                         _sj, _pf, dt_frames=_det_dt[0],
                                         kps_ok=_kps_reliable(_pf),
                                     )
+                                    # Learn only from what was accepted, so an
+                                    # occluder can never teach the reference to
+                                    # accept itself.
+                                    if frm is not None:
+                                        _learn_face_chroma(frm, _pf, _tr)
                                     try:
                                         _pf._track = _tr
                                         _pf._slot = _sj
@@ -4231,6 +4435,39 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # still get the long grace window.
             _ACTIVE_REJECT_STREAK = 2
 
+            def _blind_spans():
+                """Frame ranges over which nothing paintable was ever found.
+
+                Built from the recorded per-call verdicts, so it describes
+                where the subject actually was invisible rather than what the
+                last detector call happened to say. A run must reach
+                _ACTIVE_REJECT_STREAK calls to count - one rejected call is
+                the ordinary motion-blur blip the long grace window exists
+                for, and demoting on it is what used to make brief wobbles
+                look like the face dropping out. Once a run does qualify, the
+                demotion applies from its FIRST call, not from the call that
+                completed it: by render time the whole run is known, and the
+                frames at the start of it were just as blind as the ones at
+                the end.
+                """
+                spans, run = [], []
+                for i, (mg, ok) in enumerate(_vis_marks):
+                    if ok:
+                        if len(run) >= _ACTIVE_REJECT_STREAK:
+                            spans.append((run[0], mg))
+                        run = []
+                    else:
+                        run.append(mg)
+                if len(run) >= _ACTIVE_REJECT_STREAK:
+                    spans.append((run[0], float("inf")))
+                return spans
+
+            def _in_blind_span(g):
+                for a, b in _blind_spans():
+                    if a <= g < b:
+                        return True
+                return False
+
             def _records_at(g):
                 """Every slot's geometry for output frame ``g``."""
                 # Only once no future chunk can ever supply another real
@@ -4240,7 +4477,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 # end_gap docstring for why that only softens the true-EOF
                 # tail and never a genuine mid-video disappearance.
                 end_gap = (lim - 1 - g) if (eof or produced >= lim) else None
-                eff_taper = _cadence_taper if _no_face_streak[0] >= _ACTIVE_REJECT_STREAK else taper
+                _blind = _in_blind_span(g)
+                eff_taper = _cadence_taper if _blind else taper
                 out = {}
                 for slot in sorted(smap.keys()):
                     rec = _geom_for_frame(_geom_hist.get(slot) or [], g, eff_taper,
