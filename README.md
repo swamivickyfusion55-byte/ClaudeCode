@@ -1647,3 +1647,192 @@ too: `FakeFace` hardcodes `det_score = 0.92` and derives perfect canonical
 keypoints from the box, so the detector-score thresholds, the
 `landmark_fit_error` thresholds, **and now the registration threshold** are
 never exercised from the legitimate-pose side by any test in this suite.
+
+## v11.2.7 — the pipeline never looked at the pixels
+
+Four symptoms were reported together: a face pasted on the hair while the
+subject's face was not visible; the paste missed when the face came back,
+then arriving visibly late; and a small face emerging from behind the body
+and travelling toward the hair.
+
+The first three share one cause, and it was sitting in this repo's own test
+suite the whole time. `t_occlusion` had been reporting **0/90 frames
+suppressed** through every round of geometric fixes, and previous entries
+recorded that as an open *product* question — "never show the original face"
+versus "never paste onto an occluder" — rather than as the bug it was.
+
+### What was actually wrong
+
+**Every gate in this pipeline reasons about the detector's OUTPUT.**
+`det_score`, `_kps_reliable`, `_frontal_score`, `_pitch_score`,
+`_same_extent`, `_kps_registration`, the motion budget — box, landmarks,
+score, size, where they sit, how they move. **None of them look at the
+pixels underneath.** A detector reporting a confident, well-posed,
+correctly-sized, correctly-placed, self-consistent box over the back of
+someone's head passes all of them.
+
+Traced directly: during a sustained occlusion the swap was not being *held*
+onto the occluder by a stale anchor, as the previous entry assumed. It was
+being freshly re-detected and re-bound on **every single detector call, 20
+of 20**.
+
+`skin_confidence()` cannot serve as that check, despite looking like it
+should. It takes its reference chroma from the mask core of the crop it is
+handed, so an occluder covering that core *becomes* the reference: it
+confidently keeps the occluder and trims the real skin at the edges. It
+cannot detect occlusion of the centre by construction.
+
+A reference carried across *time* can. `TrackState` now remembers each
+identity's own face chroma, learned only from frames that passed the gate,
+and `_content_visible()` compares the landmark neighbourhoods against it.
+
+### Two more defects of the same shape
+
+Both are the pattern v11.2.6 already hit once — **a check whose own side
+effects defeat it**:
+
+* The extent check in `_face_swap_allowed` runs at **render** time, after
+  the bind has already written the collapsed box into `last_hit_bbox`. It
+  caught exactly one frame and then compared 57px against 57px forever.
+  Moved to bind time, so a detection that fails it never becomes the
+  identity's reference geometry.
+
+* The hold budget was read as **current state** at render time, but
+  detection for a chunk completes before any of that chunk is rendered, so
+  `_no_face_streak` held its end-of-chunk value. On a turn-away-and-return
+  clip that read "visible" and restored the full grace window across the
+  whole turn-away. Per-call verdicts are now recorded against the frame they
+  were made at and looked up per frame.
+
+### Four regressions, all caught by the full suite
+
+This round cost four self-inflicted regressions and one confidently wrong
+theory. Every one surfaced in the full 23-test sweep and **none** in the
+handful of tests that would have been the obvious ones to run. They are
+recorded because the pattern is the lesson.
+
+**1. Conflating two kinds of "no face".** The content gate marked both "the
+detector returned nothing" and "the detector returned a candidate whose
+pixels are not this face" as loss of visibility. They are different facts.
+An empty return is no evidence — a face hidden by motion blur is still
+there, and riding through that is what the grace window is *for*. A rejected
+candidate is positive evidence, because the pixels were looked at.
+`t_modes`' 18-frame dropout went from riding through cleanly to a **91%
+frame-to-frame area step**. Fixed with three-state marks.
+
+**2. A ghost face 411 frames past a subject's exit.** With the two cases
+separated, a subject who leaves for good produces only "no evidence" marks
+forever, so no span formed, nothing bounded the hold, and `_geom_for_frame`'s
+end-of-clip tail softening carried the face to the end of the clip. The
+missing middle: a run of empty returns that **outlasts** the grace window is
+itself evidence.
+
+**3 and 4. Two attempts at reshaping the fade curve, both worse.** The
+theory was that shortening the grace window had steepened the dim, so the
+curve should hold at full strength first and fade later. Measured, that made
+things worse, and smoothing the join made it worse again:
+
+| curve | max slope | `t_rapid_fixed` area step |
+|---|---|---|
+| original `1-(d/t)²` | 2/taper | **0.0% / 0.3%** |
+| hold + quadratic | 3/taper | 13.7% / 547.5% |
+| hold + smoothstep | ~4.5/taper | 41.2% / 1624.2% |
+
+The reason is worth keeping: alpha modulates how much of the pasted face
+clears the visibility threshold, so frame-to-frame **area** change tracks the
+fade's per-frame **slope**, and what matters is that slope's *maximum*, not
+its shape. Travel from 1 to 0 is fixed, so any curve that stays flat
+somewhere is necessarily steeper elsewhere. The original quadratic was
+already near-optimal. Both alternatives are recorded in `_hold_fade`'s
+docstring with their numbers so they are not re-derived.
+
+### The actual fix underneath all of it
+
+One number had been answering two independent questions: how fast a held
+face **dims**, and how long it may be held at all when nothing has been
+seen. Tied together, every value was wrong for one of them — long carried
+the 411-frame ghost, short made every dropout dim to 64% and pop back.
+
+* `REACQUIRE_GRACE_SEC` 3.0 → **2.0** — now only the *fade length*.
+  Generous, so a brief gap sits at 91% opacity instead of 64% and the slope
+  driving area change is halved.
+* `BLIND_AFTER_SEC` = **0.75** (new) — how long a run of empty detector
+  returns may last before it stops being a gap to ride through and becomes
+  evidence the face is gone. Set from the longest genuine dropout in these
+  fixtures (18 frames, 0.6s) and bounds a real absence inside a second.
+
+The 3.0s window was itself introduced in v11.2.5 against needless reverts
+and never measured against the opposite failure — which is the one that got
+reported.
+
+### Measured
+
+| | v11.2.6 | v11.2.7 |
+|---|---|---|
+| `t_occlusion` suppressed | 0/90 | **85/90** |
+| painted onto hair (new `t_reported`) | 60/60 | **18/60** |
+| frames until the swap returns | 0 | **0** |
+| unpainted frames after it is back | 0/40 | **0/40** |
+| `t_extended_lookaway` rendered | 43 | **37** |
+| `t_rapid_fixed` area step max | 0.3% | 0.7% |
+| `t_modes` dropout area / luma p99 | 0.32% / 1.03 | 0.32% / 1.06 |
+
+The 18 frames still painted onto hair are exactly two runs — the fade-out at
+onset and the fade-in before the face returns. A hard cut at either end is
+the flicker v11.2.5 fixed.
+
+`t_reported.py` is new because no existing fixture covered this case:
+`t_occlusion`'s occluder *shrinks* the detector's box, so extent alone
+catches it, while the reported failure keeps a full-size confident box and
+only the pixels disagree.
+
+### Honest caveats
+
+* **Chroma cannot separate a hand from the face it covers**, both being
+  skin. It catches hair, body, clothing and objects — which is what was
+  reported. A same-skin-tone occluder still relies on the extent check.
+* `t_never_returns` renders 28 frames past a vanishing subject, against 3 on
+  v11.2.6. `BLIND_AFTER_SEC` cannot go below the longest genuine dropout
+  without breaking the ride-through, so this is near the floor. It costs
+  little in practice: that fixture has the face vanish *in place*, which
+  real footage does not do — a real face either leaves the frame, which the
+  containment check still catches (`t_exit` reports 0 frames painted after
+  departure), or turns away, which the content gate now catches.
+* **The fourth reported symptom is NOT fixed and NOT reproduced.** A fixture
+  putting a face-coloured decoy rising out of the torso shows 0 stray pastes
+  and 1.2px mean error both before and after. Either the model of it is
+  wrong or it has a separate cause. It is listed here as unexplained rather
+  than quietly folded into the other three.
+* The harness's frame-alignment trap bit a **fifth** time while building
+  `t_reported`: `FakeEnc` reconstructs piped frames using module-level
+  `H.OW/H.OH`, not the requested resolution, and a mismatch silently returns
+  a wrong-length list of garbage (266 frames for a 150-frame clip). The
+  first round of numbers from that test was invalid. `t_reported.py` now
+  sets them explicitly, with a comment saying why.
+* All measurement here remains on synthetic media, and `FakeFace` still
+  hardcodes `det_score = 0.92` with keypoints derived *from* the box — so
+  the detector-score thresholds, `landmark_fit_error`, `_kps_registration`
+  and now `_CHROMA_TOL` are all still unexercised from the legitimate-pose
+  side by any test in this suite.
+
+### Verified
+
+Full 23-test suite, all green, diffed line by line against the v11.2.6
+baseline rather than trusting exit codes. Everything moved the right way or
+stayed put, except the deviations named above. The complete set of changes
+against baseline:
+
+| test | v11.2.6 | v11.2.7 |
+|---|---|---|
+| `t_occlusion` suppressed | 0/90 | **85/90** |
+| `t_extended_lookaway` rendered | 43 | **37** |
+| `t_confused_kps` placement | 3.4 / 19.2px | 3.3 / 17.8px |
+| `t_never_returns` after exit | 3 frames | 28 frames |
+| `t_occlusion` placement | 0.8 / 2.1px | 1.1 / 15.2px |
+| `t_modes` enhancer luma p99 / max | 0.33 / 1.19 | 0.74 / 0.95 |
+| `t_rapid_fixed` area step max | 0.3% | 0.7% |
+| `t_e2e` luma step max | 0.390 | 0.990 |
+
+Everything else is byte-identical. The `t_occlusion` and `t_e2e` movements
+are transients at the new fade boundaries; `t_never_returns` is the one
+material trade and is explained above.
