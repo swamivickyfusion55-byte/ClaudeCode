@@ -883,38 +883,31 @@ def _geom_lerp(a, b, t):
     return out
 
 
-def _hold_fade(dist, taper, hold_frac=0.5):
+def _hold_fade(dist, taper):
     """Opacity for a held face `dist` frames past its last real sighting.
 
-    Full strength for the first half of the budget, then a smooth fade to
-    zero at the end of it. The previous curve, 1 - (dist/taper)^2, began
-    dimming on the very first frame of any gap, which tied two independent
-    decisions together: HOW LONG a face may be held, and HOW FAST it dims
-    while held. Shortening the budget then necessarily steepened the dim -
-    measured, cutting the grace window from 3.0s to 1.0s left an ordinary
-    18-frame motion-blur dropout dimming to 64% and back, raising t_modes'
-    luma step p99 from 1.03 to 3.31.
+    Plain 1 - (dist/taper)^2, which is what this was before v11.2.7 tried to
+    improve on it. Two alternatives were measured and both were worse, for the
+    same reason, so the reason is recorded here rather than rediscovered:
 
-    Those are different questions and this separates them. A gap short enough
-    that the face is almost certainly still there is not a reason to dim at
-    all; the fade is for the tail, where confidence genuinely is running out.
+    alpha modulates how much of the pasted face clears the visibility
+    threshold, so the frame-to-frame AREA change tracks the per-frame SLOPE of
+    this curve, and what matters is that slope's maximum, not its shape. Total
+    travel from 1 to 0 is fixed, so any curve that stays flat somewhere has to
+    be steeper elsewhere. Holding at 1.0 for the first half and then fading
+    over the second took t_rapid_fixed's area step from 0.0%/0.3% (mean/max)
+    to 13.7%/547%; replacing that fade with a smoothstep, which concentrates
+    the change even harder in the middle, made it 41.2%/1624%.
+
+    The quadratic's maximum slope is 2/taper, at the very end where the face
+    is already nearly gone. Linear would be 1/taper but has a corner at each
+    end; a quartic is 4/taper. This is the right curve, and the way to make a
+    gap dim less is to lengthen `taper`, not to reshape it.
     """
     t = float(taper)
     if t <= 0.0:
         return 1.0
-    d = float(dist)
-    h = hold_frac * t
-    if d <= h:
-        return 1.0
-    k = min(1.0, (d - h) / max(1e-6, t - h))
-    # Smoothstep, not 1-k^2. A plain quadratic leaves a CORNER where the hold
-    # meets the fade - alpha is flat at 1.0 and then immediately starts
-    # dropping at full rate - and that corner is a visible step in its own
-    # right: on a sustained rapid oscillation it put the frame-to-frame area
-    # change at 13.7% mean and 547% max, where the old always-fading curve had
-    # been 0.0/0.3. Smoothstep has zero slope at BOTH ends, so it joins the
-    # hold without a corner and reaches zero without one either.
-    return max(0.0, 1.0 - k * k * (3.0 - 2.0 * k))
+    return max(0.0, 1.0 - (float(dist) / t) ** 2)
 
 
 def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
@@ -2863,7 +2856,13 @@ try:
     from config import REACQUIRE_GRACE_SEC as _CFG_REACQUIRE_GRACE_SEC
     REACQUIRE_GRACE_SEC = float(_CFG_REACQUIRE_GRACE_SEC)
 except Exception:
-    REACQUIRE_GRACE_SEC = 3.0
+    REACQUIRE_GRACE_SEC = 2.0
+
+try:
+    from config import BLIND_AFTER_SEC as _CFG_BLIND_AFTER_SEC
+    BLIND_AFTER_SEC = float(_CFG_BLIND_AFTER_SEC)
+except Exception:
+    BLIND_AFTER_SEC = 0.75
 
 try:
     from config import PASTE_FADE_SEC as _CFG_PASTE_FADE_SEC
@@ -4478,6 +4477,15 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # camera move) is not enough to demote, so genuine tracking gaps
             # still get the long grace window.
             _ACTIVE_REJECT_STREAK = 2
+            # How long "the detector returned nothing" may run before it stops
+            # being a gap to ride through and becomes evidence of absence.
+            # Deliberately independent of `taper`: taper is how fast a held
+            # face DIMS, this is how long it may be held at all when nothing
+            # has been seen. Tying them together forced a single number to
+            # answer both, and every value was wrong for one of them - a long
+            # one carried a ghost 411 frames past a subject's exit, a short
+            # one made every motion-blur dropout dim and pop.
+            _blind_after = max(1.0, float(out_fps) * BLIND_AFTER_SEC)
 
             def _blind_spans():
                 """Frame ranges over which nothing paintable was ever found.
@@ -4511,8 +4519,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # end-of-clip tail softening carried a ghost face
                         # 411 frames past her exit.
                         quiet.append(mg)
-                        if quiet[-1] - quiet[0] > taper:
-                            run.append(quiet[0] + int(taper))
+                        if quiet[-1] - quiet[0] > _blind_after:
+                            run.append(quiet[0] + int(_blind_after))
                         continue
                     if len(run) >= _ACTIVE_REJECT_STREAK:
                         spans.append((run[0], mg))

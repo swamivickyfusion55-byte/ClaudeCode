@@ -86,10 +86,14 @@ DET_SKIP_INTERVAL = 1
 # core_pipeline), so this window is now only ever spent on genuine "we cannot
 # see anything" gaps rather than on frames the content gate already judged.
 #
-# 1.0s is set from the longest dropout a face that is genuinely still there
-# produces: t_modes' motion-blur fixture drops the detector for 18 frames
-# (0.6s), and this rides through it with margin to spare.
-REACQUIRE_GRACE_SEC = 1.0
+# 2.0s is now only the FADE LENGTH for a gap, not the whole hold budget: a
+# run of empty detector returns longer than BLIND_AFTER_SEC below opens a
+# blind span and drops to the short cadence taper regardless of this value.
+# So this can be generous, and being generous is what keeps a brief gap from
+# dimming - at 2.0s an 18-frame motion-blur dropout sits at 91% opacity
+# instead of 64%, and the fade's per-frame slope (2/taper, which is what
+# frame-to-frame area change tracks) is halved.
+REACQUIRE_GRACE_SEC = 2.0
 
 # How long the composited face takes to fade out when a suppression path
 # fires, instead of cutting to the untouched original in a single frame.
@@ -108,6 +112,22 @@ REACQUIRE_GRACE_SEC = 1.0
 # preserves v11.2.1 SolidFace's "when the gates say yes, sit at full
 # strength" behaviour - a face appearing is never itself a flash of the
 # original, so it needs no ramp.
+# How long a run of "the detector returned nothing" may last before it stops
+# being treated as a gap to ride through and starts being treated as evidence
+# that the face is gone.
+#
+# This is the one number separating two cases that look identical from the
+# detector's side: a face hidden by motion blur for a few frames, which must
+# be ridden through or it flickers, and a subject who has turned away or left,
+# which must be dropped or their real face gets a swap pasted over it. Only
+# duration tells them apart. 0.75s clears the longest dropout in this repo's
+# fixtures (t_modes' 18 frames, 0.6s) and bounds a genuine absence well inside
+# a second.
+#
+# Set deliberately SHORTER than REACQUIRE_GRACE_SEC: that one is now the fade
+# length for gaps this one has not yet declared blind.
+BLIND_AFTER_SEC = 0.75
+
 PASTE_FADE_SEC = 0.5
 FACE_ROI_PAD = 0.22
 FACE_EMA_ALPHA = 0.40
