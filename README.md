@@ -1556,6 +1556,12 @@ prediction:
 | head turn (accel) | 4 / 8 / 16 | 20.0 / 47.1 / 45.7px | **18.3** / **46.9** / 53.4px |
 | oscillation (reversal) | 4 / 8 / 16 | 42.2 / 117.0 / 201.2px | **38.1** / 121.4 / 202.3px |
 
+`t_final`'s own long-standing cadence check confirms this independently at
+integration level: against a true 10.00 px/frame it learned **9.69** before
+and **10.07** after, at every one of its 1 / 5 / 10-frame cadences — a 4x
+reduction in the error it was already measuring, and the reason that test's
+numbers move in the diff for this commit.
+
 Clearly better on constant velocity at every cadence (10.1 → 2.9px at the
 sparse one) and at dense cadence generally; a wash or slightly worse on the
 adversarial oscillation at sparse cadence. Summed over the grid it is
@@ -1591,6 +1597,37 @@ Forcing the bracket to 20 frames gains little — turns 21.9/130.9/143.7 →
 *worse*). A median-observed-spacing floor gains nothing at all: the cadence is
 dense at startup and sparse later, so the median lands at 4. Not worth trading
 against the ghost-glide risk the budget exists to bound. Recorded, not shipped.
+
+### Verified
+
+Full suite, 23 tests, all green, diffed line by line against a clean
+pre-change baseline rather than trusting exit codes: `t_final`, `t_e2e`,
+`t_modes`, `t_exit`, `t_pair`, `t_pair2`, `t_confused_kps`,
+`t_confused_2face`, `t_hair_confusion`, `t_hair_confusion_24fps`,
+`t_reentry`, `verify_gate`, `verify_geom_cases`, `t_extended_lookaway`,
+`t_occlusion`, `t_camera_shake`, `t_camera_still_control`,
+`t_spurious_face`, `t_never_returns`, `t_rapid_fixed`, `t_flicker`,
+`t_flicker_noisy`, `t_flicker_dropouts`.
+
+Everything moved the right way or not at all. Two things moved slightly the
+wrong way and are recorded rather than hidden:
+
+* `t_modes`' profile-turn luma step p99 1.07 → 1.28 (max 1.48 → 1.76), with
+  original-face frames still 0/240.
+* `t_rapid_fixed`'s p95 617 → 676px on the 1280x720 oscillation, mean
+  essentially unchanged (282.8 → 284.1). This is the acknowledged
+  adversarial control, and the zoomed oscillation it stands in for improved
+  164.4 → 84.2px mean over the same change.
+
+`t_camera_shake` (32/150) and `t_camera_still_control` (29/150) report
+missing frames, but with byte-identical missing indices before and after —
+pre-existing, not touched by this work, and not investigated here.
+
+`t_occlusion` still reports 0/90 frames suppressed during a sustained hand
+occlusion. That remains the open product question recorded in the v11.2.5
+entry — "never show the original face" and "never paste onto an occluder"
+genuinely conflict, and that test's 90/90 expectation dates from when the
+project chose the second. Unchanged by this commit either way.
 
 ### Honest caveat
 
