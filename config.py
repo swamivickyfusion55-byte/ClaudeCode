@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.2.5 "HoldThrough+Grace" configuration (suppression fades, never cuts)."""
+"""Swamitech Phoenix v11.2.6 "TrueTrack" configuration (the veto can no longer lock a track out)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -129,8 +129,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.5"
-BUILD = "HoldThrough+Grace · suppression fades instead of cutting"
+VERSION = "v11.2.6"
+BUILD = "TrueTrack · the motion veto can no longer lock a track out"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

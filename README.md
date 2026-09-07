@@ -1412,3 +1412,201 @@ being frozen. That is a substantial, structural change and it wants
 validation against real footage, which this sandbox does not have. It is
 listed here as the identified next piece of work rather than attempted and
 half-finished at the end of a long session.
+
+## v11.2.6 — the misplaced paste was the veto locking the track out, not the motion model
+
+The previous entry closed by naming a motion model as the fix for "a face
+pasted far from the real one" and listing it as the next piece of work. That
+work was done, and **it is not what fixes this defect.** The measurement is
+below, because a prediction this project recorded and then disproved is worth
+more in the file than a quiet substitution.
+
+### What the defect actually was
+
+A new synthetic case, `t_zoomed.py`, matches the reported regime rather than
+the previous round's 720p oscillation: 960x540 at 24fps with a 340px face
+(~35% of frame width), i.e. **zoomed and cropped**, which is what the report
+described. Zooming matters here specifically: it magnifies motion in *pixel*
+space while every budget in the pipeline counts *frames*, so the zoomed regime
+is exactly where a frame-denominated budget is least valid.
+
+Per-frame branch attribution on the `turns` trajectory (fast monotonic head
+turns, the case a tracker should handle well):
+
+| branch | frames | mean err | alpha |
+|---|---|---|---|
+| BRACKET | 32 | 9.7px | 1.00 |
+| HOLD | **54** | **238.1px** | 0.82 |
+| SPAN | 64 | 103.9px | 1.00 |
+
+The real anchors were `[0,4,8,...,32, 48,64,80,96]` — and then **nothing for
+the last 54 frames of a 150-frame clip**, a third of it, held at 238px off.
+The detector was still being called in that window (16 calls, 13 anchors); its
+last three reads were all rejected. The subject is *completely stationary*
+for 43 of those frames.
+
+The cause is a self-sustaining lockout:
+
+* the motion-consistency veto sizes its budget as
+  `_face_w * 0.35 + 0.80 * _est_speed`, from the track's **own** velocity
+  estimate;
+* a fast turn makes that estimate stale, so the budget collapses to the
+  static floor exactly when the subject has moved furthest;
+* the veto rejects the detection — and a rejection **skips the update that
+  would have corrected the velocity**, so the next call is judged against the
+  same bad estimate, and so on;
+* `TrackState`'s own reacquire-and-snap recovery, which handles precisely this
+  "identity is somewhere else now" case, lives *inside* `update()` — i.e.
+  downstream of the veto. It can never run.
+
+The concession bound that was supposed to break this counts **detector calls**
+(`trk_flip_frames`, 5), not frames. At the 16-frame cadence this clip ran at,
+five calls is eighty frames — **over three seconds** of stale paste. Every
+other hold budget in the pipeline is denominated in frames; this one was not.
+
+### The fix
+
+Three changes, each measured on its own:
+
+1. **A drift term in the veto budget**, `_face_w * 0.06 * (quiet - 1)`. This is
+   the inversion the previous entry recorded and left open. The first two terms
+   are both anchored to what the track *believes*; neither says anything about
+   how much that belief is worth, and it decays with age. The term is ~0 at
+   `quiet = 1`, so a **fresh** prediction is judged exactly as strictly as
+   before — the veto keeps full strength in the case it was written for
+   (v11.1.4's hair misread, which arrives while detection is running every
+   frame) and relaxes only as the prediction goes stale. Scaling by face width
+   keeps it zoom- and resolution-independent.
+
+2. **A frame-denominated bound**, `_kps_veto_frames`, alongside the existing
+   call-denominated one. The veto may override for at most
+   `_predicted_miss_budget()` output frames whatever the cadence.
+
+3. **`quiet`, not raw elapsed.** Caught by regression, not by inspection —
+   see below.
+
+### The trap in change 1, and why the suite caught it
+
+Scoring drift off raw `_elapsed` created a feedback loop: **each veto calls
+`_tr0.predict()`, which advances `missed`, which is what `_elapsed` counts.**
+The veto inflated the very budget that decides it. Traced directly on
+`t_confused_kps`: an unchanging ~515px deviation was rejected against a 192px
+budget, then 292, then 392, and then **admitted at 691** four calls later —
+purely because drift had been fed 30 frames of elapsed time the detector never
+asked for. It had been reporting a face every 5 frames throughout. Placement
+error went **3.4px → 143.3px mean**.
+
+Detector silence and our own refusal to accept are not the same uncertainty.
+Only the first widens the gate; the second already has an explicit bound
+(change 2), and letting it widen the budget too both double-counts it and
+moves the concession from that stated bound to an unpredictable point.
+`_quiet = _elapsed - _kps_veto_frames[0]` is the elapsed time the veto did not
+itself manufacture.
+
+This is worth recording because the bug was invisible in the target test —
+`t_zoomed` improved either way — and only showed up as a 40x regression in an
+unrelated one.
+
+### The v11.1.4 hair-confusion defect, closed
+
+The previous entry documented this as reopened by v11.2.4 (14.7px / 151.8px,
+against 1.7px / 10.5px on v11.2.3) and judged it unfixable by any
+single-frame test, since a hair misread passes `_kps_reliable` and cannot be
+told from fast motion by position alone.
+
+There **is** such a test, and it was already in the data: **where the
+landmarks sit inside their own detection box.** Translating, tracking or
+zooming a real head moves box and landmarks *together*, leaving that quantity
+unchanged; a landmark regression that has locked onto hair, an ear or the
+skull moves the landmarks *within* a box still drawn on the head. So it is a
+statement about the read rather than about the motion, and — unlike every
+other signal the veto has — it stays valid **at any speed**.
+
+`_kps_registration()` computes it, compared against the same track's last
+accepted detection rather than an anatomical ideal (what counts as "centred"
+depends on pose and on the detector's box convention, neither of which this
+module should assert). It is a veto in its own right, not a condition on
+v11.2.4's IoU bypass — registration is motion-invariant, so letting the
+motion budget overrule it would just reopen the defect through the other
+branch.
+
+Closing the bypass alone changed **nothing**, and the trace says why: the
+`(not pairs) and faces` rescue below it put the identical face straight back
+at IoU 0.96. That branch judges on *overlap*, a statement about where the box
+is; no amount of box overlap makes landmarks that are off the face paintable.
+It now applies the same registration check. Position-based rejections — the
+motion budget — are still exactly what it is for.
+
+### The motion model: built, measured, kept, and *not* the fix
+
+`TrackState`'s flat EMA over measured velocity is replaced by a per-axis
+alpha-beta filter (fixed-gain Kalman; no covariance, so it costs nothing per
+frame). It predicts, then splits the residual between a position and a
+velocity correction, so an accurate prediction leaves velocity **unchanged** —
+the correct response to constant motion, and the exact opposite of the
+degenerate case the pre-existing comment at that site warns about.
+
+Driven directly (`t_motion_model.py`), away from every other gate, with 3px
+detector jitter over 12 seeds — mean error of the model's own forward
+prediction:
+
+| trajectory | cadence | flat EMA | alpha-beta |
+|---|---|---|---|
+| constant velocity | 4 / 8 / 16 | 2.3 / 3.2 / 10.1px | **2.2 / 2.2 / 2.9px** |
+| head turn (accel) | 4 / 8 / 16 | 20.0 / 47.1 / 45.7px | **18.3** / **46.9** / 53.4px |
+| oscillation (reversal) | 4 / 8 / 16 | 42.2 / 117.0 / 201.2px | **38.1** / 121.4 / 202.3px |
+
+Clearly better on constant velocity at every cadence (10.1 → 2.9px at the
+sparse one) and at dense cadence generally; a wash or slightly worse on the
+adversarial oscillation at sparse cadence. Summed over the grid it is
+break-even. It is kept because the case it wins is the common one and the
+case it loses is the acknowledged adversarial control — but **it is not the
+fix**, and the numbers say so plainly:
+
+| `t_zoomed` | v11.2.5 | + alpha-beta only | + veto fix |
+|---|---|---|---|
+| turns | 118.0 / 324.7px | 124.8 / 341.5px | **21.9 / 143.7px** |
+| sine | 164.4 / 495.4px | 164.1 / 495.4px | **84.2 / 383.5px** |
+
+The motion model on its own moved the target metric by *nothing* (and `turns`
+slightly the wrong way). The whole gain is the veto.
+
+An `ab_alpha` sweep is deliberately **not** tuned to its optimum. The grid
+prefers 0.95 monotonically, but that grid is three trajectories of this
+project's own choosing, and the noiseless version of the same sweep prefers
+`alpha → 1` trivially, which is a property of the test rather than of the
+filter. 0.85 is the standard Benedict-Bordner critically damped point and is
+where it is left.
+
+### Also measured and NOT changed
+
+`max_bracket_frames` is floored on `_cadence_taper`, derived from the **swap**
+cadence (`skip_n` / `swap_gap_base`), while the detector runs on its own
+sparser schedule. Measured on the zoomed clip: the floor was 13 frames while
+real anchors arrived 16 apart, so *every ordinary interval* was over budget
+and 96 of 150 frames rendered from the frozen "span exceeded" branch.
+
+Forcing the bracket to 20 frames gains little — turns 21.9/130.9/143.7 →
+20.4/82.7/107.8, sine 84.2/288.9/383.5 → 86.2/258.6/383.5 (mean slightly
+*worse*). A median-observed-spacing floor gains nothing at all: the cadence is
+dense at startup and sparse later, so the median lands at 4. Not worth trading
+against the ghost-glide risk the budget exists to bound. Recorded, not shipped.
+
+### Honest caveat
+
+Everything here is measured on synthetic media. `_REG_JUMP_TOL` (0.22 box
+widths) is set from one side only: the injected misread scores 0.47, and no
+legitimate pose in this sandbox can score against it, because the harness
+derives keypoints *from* the bounding box — registration is identically 0 for
+every synthetic face. So the threshold has a measured floor and an unmeasured
+ceiling. A real detector whose box and landmarks disagree by more than a fifth
+of a box width on a legitimate hard pose would be rejected by it. That is
+bounded by both veto budgets (it can never lock a track out for more than
+`_predicted_miss_budget()` frames), and the suppression it causes fades rather
+than cutting since v11.2.5, but it is not the same as having been measured.
+
+The blind spot the previous entry recorded still stands and now covers this
+too: `FakeFace` hardcodes `det_score = 0.92` and derives perfect canonical
+keypoints from the box, so the detector-score thresholds, the
+`landmark_fit_error` thresholds, **and now the registration threshold** are
+never exercised from the legitimate-pose side by any test in this suite.

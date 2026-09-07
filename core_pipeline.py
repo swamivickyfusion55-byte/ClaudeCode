@@ -1908,6 +1908,59 @@ def _predicted_miss_budget() -> int:
             return 24
 
 
+def _kps_registration(kps, bbox):
+    """Where the eye/nose triangle sits INSIDE its own detection box, in
+    units of that box's own width and height.
+
+    This is the discriminator the motion veto was missing. Everything else
+    the veto has to work with - position, displacement, velocity - moves when
+    the subject moves, so genuine fast motion and a landmark misread look
+    alike to it (recorded at the veto site, and the reason v11.2.4's IoU
+    bypass was reached for instead). Registration does not: translating,
+    tracking or zooming a real head moves the box and the landmarks TOGETHER,
+    leaving this quantity unchanged, while a detector whose landmark
+    regression has locked onto hair, an ear or the skull moves the landmarks
+    WITHIN a box that stays on the head. So a jump here is evidence about the
+    read itself rather than about the motion, and it stays valid at any
+    speed.
+
+    Deliberately relative, never absolute: it is compared against the same
+    track's last accepted detection, not against an anatomical ideal. What
+    counts as centred depends on the head pose (a hard yaw crowds the visible
+    eye and nose toward the front of a box that still contains the back of
+    the head) and on the detector's own box convention, neither of which this
+    module should be asserting. A pose change moves it gradually; a misread
+    jumps it.
+
+    Eyes and nose only, for the same reason the veto's own deviation term
+    uses them - the mouth corners move on every talking frame.
+    """
+    try:
+        k = np.asarray(kps, np.float32)
+        b = np.asarray(bbox, np.float32).reshape(4)
+        if k.shape[0] < 3:
+            return None
+        bw = max(1.0, float(b[2]) - float(b[0]))
+        bh = max(1.0, float(b[3]) - float(b[1]))
+        c = k[:3].mean(axis=0)
+        return np.asarray([
+            (float(c[0]) - 0.5 * (float(b[0]) + float(b[2]))) / bw,
+            (float(c[1]) - 0.5 * (float(b[1]) + float(b[3]))) / bh,
+        ], np.float32)
+    except Exception:
+        return None
+
+
+# How far the registration above may jump between two accepted detections of
+# the same identity before the read is treated as a landmark misread rather
+# than as motion. In box-widths, so it is resolution- and zoom-independent.
+# t_hair_confusion's injected read (landmarks translated a face-width inside
+# an unchanged box - the v11.1.4 signature) scores 0.47; a pose change between
+# two consecutive detector calls moves it a small fraction of that, since the
+# box tracks the head it is drawn around.
+_REG_JUMP_TOL = 0.22
+
+
 def _kps_reliable(f) -> bool:
     """False when the 5 landmarks do not describe a paintable face.
 
@@ -2884,6 +2937,15 @@ def _run_job_body(jid, src_paths, vp, cfg):
         _det_cache, _det_counter = [], [0]
         _no_face_streak = [0]
         _kps_veto_streak = [0]
+        # Companion to _kps_veto_streak, in OUTPUT FRAMES rather than in
+        # detector calls. The streak alone bounds how many consecutive
+        # detector calls the motion veto may override - but a detector call is
+        # not a unit of time. At an Optimized/Fast cadence of 16 frames per
+        # call, five vetoed calls is eighty frames, over three seconds at
+        # 24fps, of the paste sitting at a stale position while the subject is
+        # somewhere else entirely. Every other hold budget in this pipeline is
+        # denominated in frames for exactly this reason; this one was not.
+        _kps_veto_frames = [0.0]
         _last_gray = [None]
         _last_gray_full = [None]
         _last_motion_class = ["MEDIUM"]
@@ -3659,6 +3721,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # tuned number.
                         if _after_real_gap:
                             _kps_veto_streak[0] = 0
+                            _kps_veto_frames[0] = 0.0
                         if pairs and len(pairs) == 1 and not _after_real_gap:
                             _pf0, _psrc0 = pairs[0]
                             _tr0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
@@ -3696,7 +3759,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             if (_tr0 is not None and _tr0.established and not _no_vel_basis and
                                     _tr0.kps is not None and _new_kps is not None and
                                     _tr0.kps.shape == np.asarray(_new_kps).shape and
-                                    _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5))):
+                                    _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5)) and
+                                    _kps_veto_frames[0] < float(_predicted_miss_budget())):
                                 # Same physical head (bbox overlap) → expression,
                                 # open mouth, or a rapid yaw. Never veto that;
                                 # vetoing is what flashes the original face.
@@ -3709,7 +3773,50 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                         _same_head_now = _bbox_iou(_anc, _pf0.bbox) >= 0.28
                                 except Exception:
                                     _same_head_now = False
-                                if not _same_head_now:
+                                # v11.2.6: bbox overlap alone is not "the same
+                                # head", it is "a box in the same place". The
+                                # v11.1.4 hair-confusion signature is precisely
+                                # a box in the same place whose LANDMARKS have
+                                # moved off the face, so the overlap bypass
+                                # above waved through the exact read the veto
+                                # exists to catch - measured directly, 1.7px /
+                                # 10.5px placement error on v11.2.3 became
+                                # 14.7px / 151.8px once the bypass landed.
+                                #
+                                # Checking that the landmarks still sit in the
+                                # same place INSIDE their own box closes it
+                                # without giving back what the bypass was for.
+                                # The bypass exists because a turn, a talk or
+                                # an open mouth moves the landmarks a long way
+                                # in image space while the head stays put, and
+                                # vetoing those is what flashes the original
+                                # face; none of them move the landmarks
+                                # relative to the box that is drawn around
+                                # them, so all of them still pass here.
+                                #
+                                # It is a veto in its OWN right, not merely a
+                                # condition on the bypass: registration is
+                                # motion-invariant, so unlike the displacement
+                                # test below it stays meaningful no matter how
+                                # fast the subject is moving, and letting the
+                                # motion budget overrule it would just re-open
+                                # the same defect through the other branch.
+                                _reg_bad = False
+                                try:
+                                    _reg_new = _kps_registration(_new_kps, _pf0.bbox)
+                                    _reg_old = _kps_registration(_tr0.last_hit_kps,
+                                                                 _tr0.last_hit_bbox)
+                                    if _reg_new is not None and _reg_old is not None:
+                                        _reg_bad = float(np.linalg.norm(
+                                            _reg_new - _reg_old)) > _REG_JUMP_TOL
+                                except Exception:
+                                    _reg_bad = False
+                                if _reg_bad:
+                                    _tr0.predict(float(_det_dt[0]))
+                                    _kps_veto_streak[0] += 1
+                                    _kps_veto_frames[0] += float(_det_dt[0])
+                                    pairs = []
+                                elif not _same_head_now:
                                     _elapsed = float(_tr0.missed) + float(_det_dt[0])
                                     _expected = _tr0.kps
                                     _est_speed = 0.0
@@ -3726,11 +3833,68 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _nuse = min(3, _new_a.shape[0], _exp_a.shape[0])
                                     _dev = float(np.mean(np.linalg.norm(
                                         _new_a[:_nuse] - _exp_a[:_nuse], axis=1)))
-                                    _budget = _face_w * 0.35 + 0.80 * _est_speed
-                                    # MEASURED, and not yet fixed - the single
-                                    # biggest remaining defect, recorded here so
-                                    # the next round starts from the number
-                                    # rather than from scratch.
+                                    # v11.2.6: the third term is the fix for
+                                    # the inversion documented below. The first
+                                    # two terms are both anchored to what the
+                                    # track BELIEVES: a static tolerance, plus
+                                    # credit for motion it has already measured.
+                                    # Neither says anything about how much that
+                                    # belief is worth, and the belief decays
+                                    # with age - after `_elapsed` frames with no
+                                    # real detection the subject could be
+                                    # anywhere a head can plausibly have
+                                    # travelled in that time, whatever the last
+                                    # velocity estimate happened to say. Scaling
+                                    # that plausible travel by the face's own
+                                    # width keeps it resolution- and zoom-
+                                    # independent, which is the property the
+                                    # zoomed/cropped regime needs (the same head
+                                    # turn covers far more pixels there, and a
+                                    # pixel-denominated budget silently gets
+                                    # stricter as you zoom in). 0.06 face-widths
+                                    # per frame is roughly a head crossing its
+                                    # own width in two thirds of a second - fast
+                                    # for a real head, so it bounds the term
+                                    # rather than opening the gate.
+                                    #
+                                    # The term is ~0 at _elapsed = 1, so a FRESH
+                                    # prediction is judged exactly as strictly as
+                                    # before: the veto keeps its full strength
+                                    # in the case it was written for (v11.1.4's
+                                    # hair/skull misread, which arrives while the
+                                    # track is being detected every frame) and
+                                    # relaxes only as the prediction it is
+                                    # judging against goes stale.
+                                    # Elapsed time this veto did not itself
+                                    # create. Each veto calls _tr0.predict(),
+                                    # which advances `missed`, which is what
+                                    # `_elapsed` counts - so scoring drift off
+                                    # raw _elapsed made the veto inflate the
+                                    # very budget that decides it. Traced
+                                    # directly on t_confused_kps: an unchanging
+                                    # ~515px deviation was rejected against a
+                                    # 192px budget, then 292, then 392, then
+                                    # ADMITTED at 691 four calls later, purely
+                                    # because the drift term had been fed 30
+                                    # frames of elapsed time that the detector
+                                    # never asked for - it had been reporting a
+                                    # face every 5 frames throughout. Placement
+                                    # error went from 3.4px mean to 143.3px.
+                                    #
+                                    # Detector silence and our own refusal to
+                                    # accept are not the same uncertainty. Only
+                                    # the first is a reason to widen the gate;
+                                    # the second already has its own explicit
+                                    # bound (_kps_veto_frames), and letting it
+                                    # widen the budget too both double-counts
+                                    # it and moves the concession from that
+                                    # stated bound to an unpredictable point.
+                                    _quiet = max(0.0, _elapsed - _kps_veto_frames[0])
+                                    _drift = _face_w * 0.06 * max(0.0, _quiet - 1.0)
+                                    _budget = _face_w * 0.35 + 0.80 * _est_speed + _drift
+                                    # ORIGINAL MEASUREMENT that motivated the
+                                    # `_drift` term above, kept because it is the
+                                    # number any future change here has to beat.
                                     #
                                     # On a sustained rapid-motion clip (sine,
                                     # 40-frame period, ~55px/frame peak, harness
@@ -3761,8 +3925,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     # then skips the update that would have
                                     # corrected the velocity, so the next call is
                                     # judged against the same bad estimate.
-                                    # v11.2.3 fixed the all-zero case; the stale
-                                    # and wrong-direction cases remain.
+                                    # v11.2.3 fixed the all-zero case; v11.2.6's
+                                    # `_drift` term above fixes the stale and
+                                    # wrong-direction cases, by making the budget
+                                    # depend on the AGE of the estimate rather
+                                    # than only on its value.
                                     #
                                     # Not changed blind here: the veto exists to
                                     # catch a hair/occlusion read that is
@@ -3778,9 +3945,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     if _dev > _budget:
                                         _tr0.predict(float(_det_dt[0]))
                                         _kps_veto_streak[0] += 1
+                                        _kps_veto_frames[0] += float(_det_dt[0])
                                         pairs = []
                         if pairs:
                             _kps_veto_streak[0] = 0
+                            _kps_veto_frames[0] = 0.0
                         # If the veto emptied the pair but the detector still
                         # sees a face overlapping the last head, keep it.
                         if (not pairs) and faces and max_faces == 1:
@@ -3791,9 +3960,38 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                 if _anc_k is None:
                                     _anc_k = getattr(_tr_keep, "bbox", None)
                             if _anc_k is not None:
+                                # v11.2.6: this rescue judges on OVERLAP, which
+                                # is a statement about where the box is, and it
+                                # was undoing the landmark-quality veto above -
+                                # traced directly: the registration veto fired
+                                # on the hair-confused read and this branch put
+                                # the identical face straight back at IoU 0.96,
+                                # which is why closing the bypass alone changed
+                                # nothing. A read whose landmarks are not on the
+                                # face is not "the same head seen slightly
+                                # differently", and no amount of box overlap
+                                # makes it paintable, so a candidate has to
+                                # clear the same registration check to be
+                                # rescued. Position-based rejections - the
+                                # motion budget - are exactly what this branch
+                                # is still for.
+                                _reg_anchor = None
+                                try:
+                                    _tk = _tr_keep
+                                    if _tk is not None:
+                                        _reg_anchor = _kps_registration(
+                                            _tk.last_hit_kps, _tk.last_hit_bbox)
+                                except Exception:
+                                    _reg_anchor = None
                                 _best_keep = None
                                 _best_iou = 0.0
                                 for _fk in faces:
+                                    if _reg_anchor is not None:
+                                        _rk = _kps_registration(
+                                            getattr(_fk, "kps", None), _fk.bbox)
+                                        if _rk is not None and float(np.linalg.norm(
+                                                _rk - _reg_anchor)) > _REG_JUMP_TOL:
+                                            continue
                                     try:
                                         _iu = _bbox_iou(_fk.bbox, _anc_k)
                                     except Exception:
@@ -3804,6 +4002,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _only = smap.get(0) or next(iter(smap.values()))
                                     pairs = [(_best_keep, _only)]
                                     _kps_veto_streak[0] = 0
+                                    _kps_veto_frames[0] = 0.0
                         # The single-face path keeps its own well-tested pairing
                         # (startup identity lock, reference embeddings), but it
                         # still gets the track's temporal memory so its mask and

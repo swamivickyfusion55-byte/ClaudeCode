@@ -59,7 +59,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.2.5-hold-through-grace"
+ENGINE_VERSION = "aequus-1.2.6-truetrack-alphabeta"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -143,7 +143,44 @@ _P = {
     # still or slow-moving face.
     "kps_min_cutoff": 0.06,
     "kps_beta": 0.015,
+    # --- alpha-beta motion filter (bbox + kps velocity) --------------------
+    # Replaces the flat EMA over MEASURED velocity that this class used up to
+    # v11.2.5. That EMA had no notion of acceleration or of its own prediction
+    # being wrong: it averaged raw consecutive-detection deltas, so on a fast
+    # head turn (accelerate - travel - decelerate) the velocity it handed to
+    # predict() was always about one EMA time-constant stale, and on a
+    # direction reversal it kept pointing the old way until enough new
+    # measurements outvoted the old ones. With a sparse detector cadence
+    # "enough measurements" is a large fraction of a second, which is exactly
+    # the interval over which the carried face ends up pasted far from the
+    # real one.
+    #
+    # An alpha-beta filter (Kalman with fixed gains; no covariance to carry,
+    # so it costs nothing per frame) closes that loop: it PREDICTS where the
+    # face should be, then splits the prediction error between a position and
+    # a velocity correction. A prediction that comes back right leaves the
+    # velocity alone - which is the correct response to constant motion, and
+    # the thing the old EMA got wrong in the other direction (see the note at
+    # the update site about never feeding a residual back AS velocity).
+    #
+    # ab_beta is set from ab_alpha by the Benedict-Bordner critically-damped
+    # relation beta = a^2/(2-a) when left at 0 (the default), which is the
+    # standard choice and keeps the filter from ringing after a turn.
+    # ab_alpha 0.85 converges to a true constant velocity within two
+    # detections; the old EMA needed four to get within 10%.
+    "ab_alpha": 0.85,
+    "ab_beta": 0.0,          # 0 = derive from ab_alpha (critically damped)
 }
+
+
+def _ab_beta() -> float:
+    """Velocity gain for the alpha-beta filter, derived if not set."""
+    b = float(_P.get("ab_beta", 0.0) or 0.0)
+    if b > 0.0:
+        return b
+    a = float(_P.get("ab_alpha", 0.85) or 0.85)
+    a = min(0.999, max(0.001, a))
+    return (a * a) / (2.0 - a)
 
 
 def configure(**kw):
@@ -479,7 +516,7 @@ class TrackState:
                  "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps",
                  "fake", "fake_corr", "fake_size", "fake_frame",
                  "_frame_wh", "_paste_frozen", "_reacquired",
-                 "confirm_hits", "_confirm_ease")
+                 "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -489,6 +526,13 @@ class TrackState:
         self.lmk = None
         self.vel_bbox = np.zeros(4, np.float32)
         self.vel_kps = None
+        # Alpha-beta filter position states. Deliberately NOT the same thing
+        # as bbox/kps (display-smoothed, and advanced with confidence damping
+        # by predict()) nor as last_hit_bbox/last_hit_kps (raw measurements).
+        # The filter needs its own undamped estimate to predict from, or the
+        # residual it measures is contaminated by the display damping.
+        self.ab_bbox = None
+        self.ab_kps = None
         self.emb = None
         self.hits = 0
         self.missed = 0
@@ -705,6 +749,7 @@ class TrackState:
             # acceleration/reversal, not a better guess at which stale
             # velocity to keep, which is out of scope here.
             self.vel_bbox = np.zeros(4, np.float32)
+            self.ab_bbox = bb.copy()
             self.obs_bbox = bb.copy()
             self.last_hit_bbox = bb.copy()
             self.bbox = bb.copy()
@@ -712,6 +757,7 @@ class TrackState:
             if kps is not None:
                 kp = np.asarray(kps, np.float32).copy()
                 self.kps = kp
+                self.ab_kps = kp.copy()
                 # v11.2.3: None, not zeros. update()'s own velocity EMA
                 # ("v if self.vel_kps is None else vel_kps*0.6 + v*0.4")
                 # treats an existing vel_kps as a real prior to blend with -
@@ -765,19 +811,49 @@ class TrackState:
             self._confirm_ease = 0
             return
 
-        if self.last_hit_bbox is None:
+        # --- alpha-beta motion filter (v11.2.6) ---------------------------
+        # PRE-v11.2.6 NOTE, kept because it is the trap this code has to keep
+        # avoiding: velocity must never be measured against obs_bbox. predict()
+        # advances obs_bbox, so (bb - obs_bbox) is the prediction RESIDUAL, and
+        # feeding a residual back AS velocity means an accurate prediction
+        # halves the velocity - a few accurate predictions in a row drive it to
+        # zero, the carried face stops moving mid-gap, then jumps when the
+        # detector next reports.
+        #
+        # An alpha-beta filter uses that same residual, but as a CORRECTION
+        # added to the velocity rather than as the velocity itself:
+        #
+        #     x_pred = x + v*dt         (where the filter thought it would be)
+        #     r      = z - x_pred       (how wrong that was)
+        #     x      = x_pred + a*r     (position: believe the measurement)
+        #     v      = v + (b/dt)*r     (velocity: accelerate toward the truth)
+        #
+        # r = 0 therefore leaves v untouched, which is the correct response to
+        # motion the filter is already predicting - the exact opposite of the
+        # degenerate case above. What it buys over the old flat EMA of measured
+        # deltas is acceleration: the residual is large and signed while the
+        # subject is speeding up, slowing down or reversing, so v is corrected
+        # in the right direction on the FIRST detection after the change
+        # instead of being averaged toward it over several. That interval is
+        # what a zoomed shot magnifies (the same head turn covers far more
+        # pixels), and it is where the held face was ending up hundreds of
+        # pixels from the real one.
+        #
+        # Dividing by `elapsed` (not by 1) keeps the unit at pixels per OUTPUT
+        # frame whatever the detector cadence is, and makes the velocity gain
+        # correct for the gap actually being corrected over: the same residual
+        # accumulated across ten frames implies a tenth of the per-frame
+        # velocity error it would imply across one.
+        _ab_a = float(_P.get("ab_alpha", 0.85) or 0.85)
+        _ab_b = _ab_beta()
+        if self.last_hit_bbox is None or self.ab_bbox is None:
             self.vel_bbox = np.zeros(4, np.float32)
+            self.ab_bbox = bb.copy()
         else:
-            # Measure against the last OBSERVED box, not against obs_bbox -
-            # predict() advances obs_bbox, so (bb - obs_bbox) is the prediction
-            # RESIDUAL. Feeding a residual back as velocity means an accurate
-            # prediction halves the velocity, and a few accurate predictions in
-            # a row drive it to zero: the carried face stops moving mid-gap and
-            # then jumps when the detector next reports. Dividing by the real
-            # elapsed frames also keeps the unit at pixels per OUTPUT frame,
-            # whatever the detector cadence is.
-            inst = (bb - self.last_hit_bbox) / elapsed
-            self.vel_bbox = (self.vel_bbox * 0.5 + inst * 0.5).astype(np.float32)
+            x_pred = self.ab_bbox + self.vel_bbox * elapsed
+            r = bb - x_pred
+            self.vel_bbox = (self.vel_bbox + (_ab_b / elapsed) * r).astype(np.float32)
+            self.ab_bbox = (x_pred + _ab_a * r).astype(np.float32)
         self.obs_bbox = bb.copy()
         self.last_hit_bbox = bb.copy()
         if self.bbox is None:
@@ -802,16 +878,40 @@ class TrackState:
                 r = 2.0 * math.pi * cutoff * elapsed
                 a = r / (r + 1.0)
                 sm = self.kps * (1.0 - a) + kp * a
-                # Same reasoning as vel_bbox: measure against the last observed
-                # keypoints, never against the predicted ones.
-                if self.last_hit_kps is not None and self.last_hit_kps.shape == kp.shape:
-                    v = (kp - self.last_hit_kps) / elapsed
-                    self.vel_kps = (v if self.vel_kps is None
-                                    else self.vel_kps * 0.6 + v * 0.4)
+                # Same alpha-beta filter as vel_bbox, on its own state. Note
+                # this is a SECOND, independent filter and not a duplicate of
+                # the One Euro smoothing just above: One Euro produces the
+                # DISPLAY keypoints (self.kps, jitter-free but deliberately
+                # lagged), while this produces the MOTION MODEL (vel_kps, what
+                # predict() extrapolates with and what core_pipeline's
+                # motion-consistency veto sizes its budget from). Smoothing the
+                # motion model with the display filter would make the veto
+                # reject exactly the fast, correct detections it exists to let
+                # through.
+                if (self.last_hit_kps is not None
+                        and self.last_hit_kps.shape == kp.shape
+                        and self.ab_kps is not None
+                        and self.ab_kps.shape == kp.shape
+                        and self.vel_kps is not None
+                        and self.vel_kps.shape == kp.shape):
+                    kx_pred = self.ab_kps + self.vel_kps * elapsed
+                    kr = kp - kx_pred
+                    self.vel_kps = (self.vel_kps + (_ab_b / elapsed) * kr).astype(np.float32)
+                    self.ab_kps = (kx_pred + _ab_a * kr).astype(np.float32)
+                else:
+                    # No usable prior: seed from the raw measured delta rather
+                    # than from zero, so a subject who is already moving does
+                    # not spend a detection interval being modelled as still.
+                    if self.last_hit_kps is not None and self.last_hit_kps.shape == kp.shape:
+                        self.vel_kps = ((kp - self.last_hit_kps) / elapsed).astype(np.float32)
+                    else:
+                        self.vel_kps = np.zeros_like(kp)
+                    self.ab_kps = kp.copy()
                 self.kps = sm.astype(np.float32)
             else:
                 self.kps = kp
                 self.vel_kps = np.zeros_like(kp)
+                self.ab_kps = kp.copy()
             self.last_hit_kps = kp.copy()
 
         lmk = getattr(face, "landmark_2d_106", None)
