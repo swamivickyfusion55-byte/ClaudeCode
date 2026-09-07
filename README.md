@@ -1343,3 +1343,72 @@ sandbox cannot reproduce. The rapid-motion finding above, by contrast, is a
 direct measurement on a synthetic clip and is the most likely remaining
 cause of what is being reported; it is located precisely and left unfixed
 on purpose rather than guessed at.
+
+### The "face pasted far away" defect: four fixes attempted, all reverted
+
+User confirmed after v11.2.5 that blending improved and flicker is better,
+but that a face is still sometimes pasted well away from the real one. That
+is the 283px/681px placement error measured above. Four targeted fixes were
+tried against it. **Every one was measured and every one was reverted** -
+recorded here in full so a later round does not spend the same effort
+rediscovering them.
+
+Baseline for all four (rapid clip, resolution matched): 0/200 missing,
+0 presence transitions, placement error mean 283px / max 681px.
+
+1. **Motion-aware detector cadence** (`det_mult` 0.75/0.50 on MEDIUM/HIGH,
+   mirroring `_adaptive_swap_gap`'s tighten-only idiom, since the detector
+   cadence could previously only ever stretch). *Result: no change.* The
+   frozen-branch share stayed at 61% and error did not move, because the
+   anchors are not sparse from being scheduled too rarely - they are sparse
+   because the detections that do happen are rejected. Costs real detector
+   calls on a CPU-bound Space for nothing.
+
+2. **Drift-aware hold budget** (`_hold_drift_scale`: attenuate a held
+   position by how far the subject could have travelled since it was last
+   really seen, measured in face widths rather than frames - because every
+   hold budget in this file is purely temporal, and twelve frames of
+   staleness is a few pixels on a slow subject and most of the screen on a
+   fast one). *Result: suppressed essentially everything.* The speed estimate
+   is the problem: real anchors cluster exactly where the subject is
+   momentarily slowest (a detection is likeliest to be accepted when there is
+   least motion blur), so sampling them reads a fast subject as a slow one,
+   and widening the sample to the fastest recent segment then over-suppresses.
+
+3. **Decoupling the SPAN branch from the grace taper.** This one identified a
+   real defect introduced by v11.2.5 itself: `REACQUIRE_GRACE_SEC` raised
+   `taper` from ~12 to ~72 frames, and the "span exceeded max_bracket" branch
+   divides by that same `taper` - so a frame 18 frames from a real sighting
+   went from suppressed (`edge > taper`) to painted at `1-(18/72)^2 = 0.94`
+   opacity. That is *precisely* the mechanism by which a stale position gets
+   drawn confidently. *Result: position improved (283px -> 175px) but at the
+   cost of 63/200 missing frames and 8 presence transitions* - it converts the
+   mispositioned paste straight back into reverts and flicker, which is the
+   trade this whole engagement has been trying to get away from.
+
+4. **Fixing the veto's budget inversion** (when the velocity basis is stale,
+   zero, or wrong-direction, fall back to a plausible-travel bound that grows
+   with the elapsed gap, instead of collapsing to the static floor - since
+   "I do not know how fast this is moving" should widen the tolerance, not
+   narrow it). *Result: fewer real anchors, not more* - 7 from 29 calls
+   against 11 from 42, with a 116-frame gap. The system is coupled tightly
+   enough that accepting more detections changes the detector schedule and
+   the reacquire behaviour in ways that cancel the intended gain.
+
+**Conclusion.** Attempt 3 is the clearest statement of the trade: with real
+anchors ~36 frames apart, every frame between them is either painted from a
+stale position (wrong place) or not painted (revert/flicker). No budget,
+taper or threshold can produce a correct position from an anchor that does
+not exist. The defect is not in how the held position is *bounded* - it is
+that there is nothing to interpolate between.
+
+That makes this the same conclusion the v11.2.3 entry reached from the other
+direction, and it stands: closing this needs an actual motion model -
+`vel_bbox`/`vel_kps` are a single constant-velocity estimate smoothed by a
+fixed-weight EMA, with no representation of acceleration or direction
+reversal - i.e. a per-axis alpha-beta or Kalman filter in `TrackState`,
+replacing the flat EMA, so a held position degrades gracefully instead of
+being frozen. That is a substantial, structural change and it wants
+validation against real footage, which this sandbox does not have. It is
+listed here as the identified next piece of work rather than attempted and
+half-finished at the end of a long session.
