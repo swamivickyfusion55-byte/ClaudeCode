@@ -1152,3 +1152,194 @@ gap should be substantially smaller than the worst-case synthetic number
 above suggests - but that is reasoning from the mechanism, not a
 measurement against the user's own footage, which this sandbox cannot
 run.
+
+## v11.2.5 — flicker and reverts are one bug: suppression was instantaneous
+
+Direct user report against real footage, on the externally-produced v11.2.4
+"HoldThrough" build: the new face still reverts to the original, and a
+second clip also showed flicker. Asked explicitly for a deep fix rather
+than another threshold.
+
+### The structural root cause
+
+The pipeline already had two smooth fades — `TrackState.smooth_alpha()`'s
+opacity EMA, and `_geom_for_frame()`'s taper. Neither was ever reached by
+the decision that matters. Every one of the **seven** paths in the render
+loop that concludes "do not paint this frame" bypasses both and emits the
+pristine original immediately (`core_pipeline.py`, the Phase 2b loop):
+
+1. `not records` → put the untouched frame
+2. `_touches_frame_edge(hit_bbox)` → `continue`
+3. `_touches_frame_edge(bbox)` → `continue`
+4. `_frame_containment < 0.60` → `continue`
+5. taper alpha `<= 0.02` → `continue`
+6. `_reuse_one` returns not-ok → `continue`
+7. `not any_ok` → `out = frm`
+
+So the fade applied only to "paint, but weaker". "Do not paint" was always
+instantaneous and total: opacity went from ~1.0 to exactly 0 between two
+adjacent output frames.
+
+That single fact produces **both** reported symptoms, which are the same
+bug separated only by duration:
+
+* a gate flipping for one to three frames = a full-strength flash of the
+  real face = **flicker**;
+* the same flip sustained past `taper` = **revert to original**.
+
+It also explains the shape of this project's history. Ten rounds
+(v11.1.4 → v11.2.4) each changed *which* gate fires and *when* — thresholds,
+vetoes, bypasses, hold budgets. Not one changed the fact that firing is a
+hard cut, so each round moved the trigger and the symptom reappeared in a
+new shape.
+
+### The fix
+
+Suppression is now continuous at the output stage. Each slot carries a
+`_paint_alpha` that is slewed toward whatever this frame wants, over
+`PASTE_FADE_SEC` (0.5s, `config.py`), with `_held_rec` keeping the last
+record that actually composited so there is frozen — never extrapolated —
+geometry to fade out from.
+
+Three properties make this safe rather than another trade:
+
+* **Downward only.** Coming back up stays instant, preserving v11.2.1
+  SolidFace's "when the gates say yes, sit at full strength", and leaving
+  every existing "is the face present" measurement untouched.
+* **Departure evidence still cuts instantly.** Paths 2–4 above are positive
+  evidence the subject has *left* the frame, not that this frame's read is
+  unreliable. Fading a face out over half a second onto background someone
+  has already walked off is the v11.1.1 defect, so those keep the old
+  behaviour — `t_exit` is unchanged at 0 frames painted after departure.
+* **It is invisible except where the old code stepped.** The taper already
+  drives alpha to ~0.02 before `records` empties, so the slew starts from a
+  low value in the ordinary fade-out case and changes nothing. It only
+  produces a visible ramp where opacity was *high* the frame before — which
+  is exactly the hard step being fixed.
+
+### Two blind spots in how this project has always tested
+
+Both are the same class as the fps blind spot found in v11.1.8 — a
+condition every test shared, so no test could see past it.
+
+* **`det_score` is always 0.92.** `harness.FakeFace` hardcodes it. The
+  shipped code branches on det_score at **0.18, 0.20, 0.28 and 0.32**, and
+  on `landmark_fit_error` at 0.20 / 0.32 — and a perfect 0.92 read with a
+  canonical keypoint arrangement clears every one of them unconditionally.
+  Not one test in this project's history has ever exercised those
+  thresholds. `noisy_det.py` (scratchpad) now models a detector whose
+  confidence random-walks through that band, with landmark jitter and hard
+  misses.
+* **`t_fps_rapid.py` carries the harness resolution mismatch.** It renders
+  1280×720 but never sets `H.OW/H.OH`, so the fake encoder reconstructs the
+  byte stream at the default 960×540. The **176/200 and 141/200 figures
+  quoted in the v11.2.3 entry above came from this uncorrected test and are
+  not sound.** Re-run with the resolution matched (`t_rapid_fixed.py`), the
+  same clip shows **0/200 missing frames** — but a placement error of
+  **mean 283px, max 681px**.
+
+### The rapid-motion defect, now located and measured (NOT yet fixed)
+
+That 283px is the more likely explanation for what gets reported as
+"reverts to original" on fast movement: the face is painted on every frame,
+but far enough from the head that the real face is visible underneath it.
+
+Instrumented directly on that clip: the pipeline made **42 detector calls
+but only 11 became real anchors**, and those 11 land in tight clusters
+around the sine's turning points — `[4,8,12, 44,48, 84,88, 124,128,
+164,168]`, i.e. only where the subject is momentarily slow. Detections are
+rejected *while the subject is moving*. That leaves real anchors ~36 frames
+apart, forcing **61%** of rendered frames into `_geom_for_frame`'s frozen
+"span exceeded `max_bracket`" branch, which does not interpolate at all.
+
+The mechanism is a logic inversion in the motion-consistency veto: its
+budget is `_face_w * 0.35 + 0.80 * _est_speed`, and `_est_speed` comes from
+the track's own velocity estimate — so when that estimate is stale or points
+the wrong way (which a direction reversal produces twice per oscillation)
+the budget collapses to the static floor. **Uncertainty about velocity makes
+the veto stricter, when it should make it more permissive.** Each veto then
+skips the update that would have corrected the velocity. v11.2.3 fixed the
+all-zero case; the stale and wrong-direction cases remain.
+
+Left unfixed deliberately, with the measurement recorded at the veto site:
+the veto exists to catch a hair/occlusion read that is self-consistent but
+wrong (v11.1.4), and that case *also* passes `_kps_reliable`, so it cannot
+be told from genuine fast motion by any single-frame test. Separating them
+needs coherence across consecutive rejected reads — real motion keeps
+travelling, a hair confusion clusters at one spot — which is a real design
+change and wants validation against footage this sandbox does not have.
+
+### Two regressions found in the v11.2.4 HoldThrough build itself
+
+Both verified against the **unmodified** upload, before any change here:
+
+* **The occlusion gate is fully defeated.** A sustained hand occlusion went
+  from 90/90 frames correctly suppressed to **0/90** — the swap is painted
+  onto the occluder on every frame. HoldThrough rescues a
+  geometrically-implausible detection on bbox *overlap alone*, and covering
+  the lower face barely moves the box while collapsing its extent.
+* **The v11.1.4 hair-confusion defect is reopened.** `t_hair_confusion`
+  measures **14.7px mean / 151.8px max** placement error, against 1.7px /
+  10.5px on v11.2.3 — a 15× worse worst case. HoldThrough's `_same_head_now`
+  IoU bypass lets exactly the read the veto was built to catch straight
+  through.
+
+`_same_extent()` is added for the first of these and wired into
+`_face_swap_allowed` both as a condition on the overlap rescue and as a
+check on the accept path: a candidate must still be about the same **size**
+as the identity's last good box. Height is the discriminator, with a very
+permissive width band, because a profile turn narrows width while its height
+holds (that asymmetry is what made an over-tight fit threshold reject
+profiles in v11.2.2) whereas an occluder collapses height. Verified at unit
+level: a box cut to 30% of its height is now rejected, where before it was
+accepted — it passes `_kps_reliable` because keypoints derived from a
+collapsed box are still mutually self-consistent, which is precisely why
+self-consistency cannot substitute for visibility.
+
+`t_occlusion` still reports 0/90 afterwards, and that is *not* this gate. It
+is the held-geometry path plus the grace window deliberately holding the
+last good face through the occlusion — which is what "HoldThrough" means and
+what "never show the original face" asks for. **These two goals genuinely
+conflict** ("never show the original" vs "never paste onto an occluder") and
+which one wins is a product decision, surfaced rather than decided here.
+
+### Also tried and reverted
+
+Tightening the **detector** cadence on motion (`det_mult` 0.75 / 0.50 on
+MEDIUM / HIGH, mirroring `_adaptive_swap_gap`'s tighten-only idiom, since
+the detector cadence could previously only ever *stretch*). Measured: the
+frozen-branch share stayed at 61% and placement error did not improve,
+because the anchors are not sparse from being scheduled too rarely — they
+are sparse because the detections that do happen are rejected. Reverted
+rather than left in, since it costs real detector calls on a CPU-bound
+Space and bought nothing measurable. Noted at the site so a later round does
+not re-measure the same null result.
+
+### Verified
+
+* `t_exit` 0 frames painted after departure, `verify_gate` 0 pose
+  regressions / 0 bad-pose misses, `t_final` no failures, `verify_geom_cases`
+  unchanged — the four that most constrain this change.
+* `t_e2e` **improved**: 0/420 original-face frames, placement error mean
+  1.4px / max 6.6px.
+* `t_modes` 0/240 original-face frames on all four scenarios; `t_pair`
+  0/300 missing and 300/300 identity retention; `t_pair2`,
+  `t_confused_2face`, `t_confused_kps`, `t_reentry`,
+  `t_extended_lookaway` all in line with baseline.
+* New: `t_flicker.py` (presence transitions, longest gap, area-step
+  oscillation — the existing suite measured only binary presence and could
+  not see flicker at all), `t_flicker_dropouts.py`, `t_flicker_noisy.py`,
+  `noisy_det.py`, `t_rapid_fixed.py`, `diag_geom_branch.py`,
+  `diag_anchor_spacing.py`.
+
+### Honest caveat
+
+Unchanged from every prior round: no model weights and no access to the
+reported footage, so none of this is confirmed against the actual clips.
+What is different this time is that the primary fix does not depend on
+having guessed the trigger correctly — it changes what happens *when any
+suppression fires*, whichever one it is, so it applies to triggers this
+sandbox cannot reproduce. The rapid-motion finding above, by contrast, is a
+direct measurement on a synthetic clip and is the most likely remaining
+cause of what is being reported; it is located precisely and left unfixed
+on purpose rather than guessed at.

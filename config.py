@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.2.5 "HoldThrough+Grace" configuration (no original-face flash on motion)."""
+"""Swamitech Phoenix v11.2.5 "HoldThrough+Grace" configuration (suppression fades, never cuts)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -71,6 +71,25 @@ DET_SKIP_INTERVAL = 1
 # rescues cannot help with (those need SOME detected box to compare
 # against; a genuine multi-frame miss has none).
 REACQUIRE_GRACE_SEC = 3.0
+
+# How long the composited face takes to fade out when a suppression path
+# fires, instead of cutting to the untouched original in a single frame.
+#
+# This is the fix for the flicker/revert family at its shared root. The
+# pipeline already had two smooth fades (TrackState.smooth_alpha's EMA and
+# _geom_for_frame's taper), but EVERY path that decides "do not paint this
+# frame" bypassed both and emitted the pristine original immediately - so a
+# gate flipping for one or two frames showed as a hard flash of the real
+# face (flicker), and the same flip sustained showed as a revert. Fading
+# instead of cutting makes a brief flip cost a few percent of opacity rather
+# than a full-strength flash, while a sustained one still ends up fully
+# reverted, just smoothly.
+#
+# Only the DOWNWARD direction is slewed. Coming back up stays instant, which
+# preserves v11.2.1 SolidFace's "when the gates say yes, sit at full
+# strength" behaviour - a face appearing is never itself a flash of the
+# original, so it needs no ramp.
+PASTE_FADE_SEC = 0.5
 FACE_ROI_PAD = 0.22
 FACE_EMA_ALPHA = 0.40
 COLOR_MATCH_SCALE = 0.25
@@ -111,7 +130,7 @@ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
 VERSION = "v11.2.5"
-BUILD = "HoldThrough+Grace · genuine detector-miss gaps also held through"
+BUILD = "HoldThrough+Grace · suppression fades instead of cutting"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

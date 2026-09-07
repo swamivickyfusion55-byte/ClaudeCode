@@ -675,6 +675,43 @@ def _bbox_iou(a, b):
     return float(inter / union) if union > 0 else 0.0
 
 
+def _same_extent(cand, anchor, h_lo=0.60, h_hi=1.90, w_lo=0.35, w_hi=2.60):
+    """Is ``cand`` still about the same SIZE as ``anchor``?
+
+    Position overlap alone cannot tell "the same head, talking or motion
+    blurred" from "the same head, but most of it is now behind a hand" -
+    covering the lower face barely moves the box's position while collapsing
+    its extent. v11.2.4 HoldThrough rescued a geometrically-implausible
+    detection on overlap alone, which is why a sustained occlusion went from
+    fully suppressed to painted through on every frame: the swap was being
+    pasted onto the occluder.
+
+    Internal self-consistency cannot substitute for this. Keypoints derived
+    from a collapsed box are still mutually consistent, so landmark_fit_error
+    stays inside its (twice-loosened, 0.15 -> 0.20 -> 0.32) budget and
+    _kps_reliable accepts the read - verified directly: a box cut to 30% of
+    its height still returns True.
+
+    HEIGHT is the discriminator, deliberately, and width is left very
+    permissive. A profile turn narrows the box's width while its height holds
+    (that asymmetry is what made an over-tight fit threshold reject profiles
+    in v11.2.2), whereas occluding the lower face collapses height. Both
+    bounds are ratios against the identity's own last good box rather than
+    tuned pixel sizes, so they travel across resolutions and face sizes.
+    """
+    try:
+        if cand is None or anchor is None:
+            return False
+        cw = max(1.0, float(cand[2]) - float(cand[0]))
+        ch = max(1.0, float(cand[3]) - float(cand[1]))
+        aw = max(1.0, float(anchor[2]) - float(anchor[0]))
+        ah = max(1.0, float(anchor[3]) - float(anchor[1]))
+        rw, rh = cw / aw, ch / ah
+        return (h_lo <= rh <= h_hi) and (w_lo <= rw <= w_hi)
+    except Exception:
+        return False
+
+
 def _box_center_dist_norm(b1, b2):
     """Normalized distance between two bounding box centers."""
     if b1 is None or b2 is None: return 999.0
@@ -2057,17 +2094,44 @@ def _face_swap_allowed(f) -> bool:
         if not _kps_reliable(f):
             # Expression / motion-blur landmarks: still paint if this is the
             # same head we were already swapping. Reject only a new, bad box.
+            #
+            # Overlap alone is NOT enough to make that call. Covering the
+            # lower face with a hand leaves the box in almost the same place
+            # while collapsing its extent, so an overlap-only rescue paints
+            # the swap straight onto the occluder - measured on this repo's
+            # own t_occlusion fixture, a sustained occlusion went from 90/90
+            # frames correctly suppressed to 0/90. Requiring the candidate to
+            # still be about the same SIZE as the identity's last good box
+            # separates the two: a talking or blurred face keeps its extent,
+            # a mostly-covered one does not.
             try:
                 anchor = None
                 if tr is not None:
                     anchor = getattr(tr, "last_hit_bbox", None)
                     if anchor is None:
                         anchor = getattr(tr, "obs_bbox", None)
-                if anchor is not None and _bbox_iou(f.bbox, anchor) >= 0.22:
+                if (anchor is not None and _bbox_iou(f.bbox, anchor) >= 0.22
+                        and _same_extent(f.bbox, anchor)):
                     return True
             except Exception:
                 pass
             return False
+        # The read is self-consistent, but self-consistency is not visibility:
+        # keypoints derived from a box collapsed by an occluder are perfectly
+        # consistent with each other and still describe a face that is mostly
+        # not there. If this identity has a healthy anchor and the box has
+        # suddenly lost most of its height against it, hold the last good
+        # geometry instead of painting onto whatever is covering the face.
+        try:
+            _anchor_ok = None
+            if tr is not None:
+                _anchor_ok = getattr(tr, "last_hit_bbox", None)
+                if _anchor_ok is None:
+                    _anchor_ok = getattr(tr, "obs_bbox", None)
+            if _anchor_ok is not None and not _same_extent(f.bbox, _anchor_ok):
+                return False
+        except Exception:
+            pass
         return True
 
     # Predicted (v11.1.9 ReentrySafe): hold briefly through a head turn, but
@@ -2600,6 +2664,12 @@ try:
 except Exception:
     REACQUIRE_GRACE_SEC = 3.0
 
+try:
+    from config import PASTE_FADE_SEC as _CFG_PASTE_FADE_SEC
+    PASTE_FADE_SEC = float(_CFG_PASTE_FADE_SEC)
+except Exception:
+    PASTE_FADE_SEC = 0.5
+
 def _skip_n(quality): return SKIP_N.get(quality, 5)
 
 def _adaptive_swap_gap(base_gap, motion_class, quality):
@@ -2836,6 +2906,13 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # the next chunk instead of being emitted unswapped.
         _geom_hist = {j: [] for j in smap.keys()}      # slot -> [(g, record)]
         _aligned_hist = {j: [] for j in smap.keys()}   # slot -> [(g, fake, corr)]
+        # Output-stage opacity per slot, and the last record that actually
+        # composited for it. These persist for the whole job (not per chunk)
+        # so a suppression that starts just before a chunk boundary keeps
+        # fading across it instead of snapping at the cut. See
+        # PASTE_FADE_SEC in config.py for why the fade exists at all.
+        _paint_alpha = {j: 0.0 for j in smap.keys()}   # slot -> slewed opacity
+        _held_rec = {j: None for j in smap.keys()}     # slot -> last composited record
         _pending_tail = []                             # [(g, frame)] not yet emittable
         _det_dt = [1.0]                                # frames since the last detection
         _last_det_frame = [-1]
@@ -3298,6 +3375,19 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 force_initial = (g < initial_force_until)
                 # Schedule detection in KEY-FRAME space (not output-frame index).
                 # Static scenes may hold longer; motion keeps det_mult=1.
+                #
+                # Tightening this on MEDIUM/HIGH motion (0.75/0.50, mirroring
+                # _adaptive_swap_gap) was tried and measured: it did NOT help.
+                # On a rapid-motion clip the share of frames falling into
+                # _geom_for_frame's frozen "span exceeded max_bracket" branch
+                # stayed at 61% and placement error did not improve, because
+                # the anchors are not sparse from being scheduled too rarely -
+                # they are sparse because the detections that DO happen are
+                # being rejected downstream while the subject is moving (see
+                # the veto note in _pairs_for_frame). Reverted rather than left
+                # in: it costs real detector calls on a CPU-bound Space and
+                # bought nothing measurable. Noted here so a later round does
+                # not re-attempt it and re-measure the same null result.
                 det_mult = {"STATIC": 2, "LOW": 1, "MEDIUM": 1, "HIGH": 1}.get(mclass, 1)
                 # Scheduled in OUTPUT-FRAME space. It used to compare `key_ord`,
                 # which is an index within the current chunk and restarts at 0
@@ -3637,6 +3727,54 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _dev = float(np.mean(np.linalg.norm(
                                         _new_a[:_nuse] - _exp_a[:_nuse], axis=1)))
                                     _budget = _face_w * 0.35 + 0.80 * _est_speed
+                                    # MEASURED, and not yet fixed - the single
+                                    # biggest remaining defect, recorded here so
+                                    # the next round starts from the number
+                                    # rather than from scratch.
+                                    #
+                                    # On a sustained rapid-motion clip (sine,
+                                    # 40-frame period, ~55px/frame peak, harness
+                                    # resolution mismatch corrected) the pipeline
+                                    # made 42 detector calls but only 11 of them
+                                    # ever became REAL anchors, and those 11 land
+                                    # in tight clusters around the sine's turning
+                                    # points: [4,8,12, 44,48, 84,88, 124,128,
+                                    # 164,168]. Detections are accepted only
+                                    # where the subject is momentarily slow and
+                                    # rejected while it is actually moving, which
+                                    # leaves real anchors ~36 frames apart, forces
+                                    # 61% of rendered frames into _geom_for_frame's
+                                    # frozen "span exceeded max_bracket" branch,
+                                    # and lands the paste a mean 283px (max 681px)
+                                    # from the head - present on every frame, but
+                                    # far enough off it that the real face shows.
+                                    #
+                                    # The mechanism is a logic inversion here:
+                                    # `_est_speed` comes from the track's own
+                                    # velocity estimate, so when that estimate is
+                                    # stale or points the wrong way (which is
+                                    # exactly what a direction reversal produces,
+                                    # twice per oscillation) the budget collapses
+                                    # to the static floor - i.e. UNCERTAINTY ABOUT
+                                    # VELOCITY MAKES THIS VETO STRICTER, when it
+                                    # should make it more permissive. Each veto
+                                    # then skips the update that would have
+                                    # corrected the velocity, so the next call is
+                                    # judged against the same bad estimate.
+                                    # v11.2.3 fixed the all-zero case; the stale
+                                    # and wrong-direction cases remain.
+                                    #
+                                    # Not changed blind here: the veto exists to
+                                    # catch a hair/occlusion read that is
+                                    # self-consistent but wrong (v11.1.4), and
+                                    # that case also passes _kps_reliable, so it
+                                    # cannot be told from genuine fast motion by
+                                    # any single-frame test. Distinguishing them
+                                    # needs coherence across consecutive rejected
+                                    # reads (real motion keeps travelling; a hair
+                                    # confusion clusters at one spot), which is a
+                                    # real design change and wants validation
+                                    # against footage this sandbox does not have.
                                     if _dev > _budget:
                                         _tr0.predict(float(_det_dt[0]))
                                         _kps_veto_streak[0] += 1
@@ -4156,9 +4294,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 frm = cframes[k]
 
                 records = _records_at(g)
-                if not records:
+                _active_fade = any(a > 0.02 for a in _paint_alpha.values())
+                if not records and not _active_fade:
                     # Genuinely nothing tracked here (before the first face
-                    # appears, or long after the last one left).
+                    # appears, or long after the last one left), and nothing
+                    # still fading out either.
                     writer_ok = _safe_result_put(frm)
                     if writer_ok: stats["frames_out"] += 1
                     continue
@@ -4168,52 +4308,83 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 # Painter's order: furthest (smallest) first, nearest last, so
                 # the nearer person wins the contested pixels where two faces
                 # touch.
-                order = sorted(records.keys(),
-                               key=lambda sl: float((records[sl]["bbox"][2] - records[sl]["bbox"][0]) *
-                                                    (records[sl]["bbox"][3] - records[sl]["bbox"][1])))
+                # ------------------------------------------------------------
+                # Decide what each slot WANTS to paint this frame, then slew
+                # the opacity toward it. Every "do not paint" decision below
+                # used to cut straight to the untouched original in a single
+                # frame - that hard step is what a brief gate flip showed as a
+                # flash of the real face, and a sustained one as a revert.
+                # Suppression is continuous here instead: a one-frame flip now
+                # costs a few percent of opacity, while a sustained one still
+                # reaches zero, just smoothly. See PASTE_FADE_SEC in config.py.
+                #
+                # `hard` marks the paths that are positive evidence the subject
+                # has LEFT the frame rather than merely evidence that this
+                # frame's read is unreliable. Those keep the original instant
+                # behaviour: fading a face out over half a second onto the
+                # background someone has already walked off is the v11.1.1
+                # defect, not a smoothing improvement.
+                # ------------------------------------------------------------
+                _want = {}
+                for slot in set(records.keys()) | {s for s, a in _paint_alpha.items() if a > 0.02}:
+                    _r = records.get(slot)
+                    if _r is None:
+                        _want[slot] = (None, 0.0, False)
+                        continue
+                    if not _r.get("det"):
+                        if (_touches_frame_edge(_r.get("hit_bbox"), frm.shape)
+                                or _touches_frame_edge(_r["bbox"], frm.shape)):
+                            _want[slot] = (None, 0.0, True)
+                            continue
+                        _keep = _frame_containment(_r["bbox"], frm.shape)
+                        if _keep < 0.60:
+                            _want[slot] = (None, 0.0, True)
+                            continue
+                        if _keep < 0.85:
+                            _r = dict(_r)
+                            _r["alpha"] *= (_keep - 0.60) / 0.25
+                    _want[slot] = (_r, float(_r.get("alpha", 1.0) or 0.0), False)
+
+                _fade_step = 1.0 / max(1.0, float(out_fps) * max(0.05, PASTE_FADE_SEC))
+                _paint = {}
+                for slot, (_r, _target, _hard) in _want.items():
+                    _prev = float(_paint_alpha.get(slot, 0.0) or 0.0)
+                    if _hard:
+                        _a = 0.0
+                    elif _target >= _prev:
+                        # Upward is instant, per v11.2.1 SolidFace: a face
+                        # appearing is never itself a flash of the original.
+                        _a = _target
+                    else:
+                        _a = max(_target, _prev - _fade_step)
+                    _paint_alpha[slot] = _a
+                    if _a <= 0.02:
+                        _held_rec[slot] = None
+                        continue
+                    # During a fade the current record may be gone entirely
+                    # (taper expired). Fall back to the last record that
+                    # actually composited, frozen - never extrapolated, so a
+                    # fading face cannot drift away from where it really was.
+                    _use = _r if _r is not None else _held_rec.get(slot)
+                    if _use is None:
+                        continue
+                    _use = dict(_use)
+                    _use["alpha"] = _a
+                    if _r is None:
+                        _use["det"] = False
+                    _paint[slot] = _use
+
+                order = sorted(_paint.keys(),
+                               key=lambda sl: float((_paint[sl]["bbox"][2] - _paint[sl]["bbox"][0]) *
+                                                    (_paint[sl]["bbox"][3] - _paint[sl]["bbox"][1])))
                 any_ok = False
                 for slot in order:
-                    rec = records[slot]
-                    # A face the detector can still SEE is swapped wherever it
-                    # is, including half out of shot - the detector vouches for
-                    # it. A face that is only being HELD or predicted is a
-                    # different matter: once someone walks out of frame the
-                    # detector stops reporting them, the tracker keeps
-                    # extrapolating, and the paste ends up pinned against the
-                    # frame edge on top of whatever is there. Require a held
-                    # face to still be substantially inside the frame, and ramp
-                    # its opacity down rather than letting it pop.
-                    if not rec.get("det"):
-                        # This face is being HELD, not seen. Two very different
-                        # situations produce that, and they need opposite
-                        # treatment:
-                        #
-                        #   occluded mid-frame (a hand, a turn) -> hold, which
-                        #       is exactly what stops the original face
-                        #       flashing back;
-                        #   walked out of shot -> stop, because the detector
-                        #       will never report them again and the tracker
-                        #       will happily extrapolate a face onto whatever
-                        #       is left behind.
-                        #
-                        # The last REAL detection tells them apart: if it was
-                        # already in contact with a frame border, the subject
-                        # was on their way out. The smoothed bbox cannot be
-                        # used for this - it lags the subject and then stalls
-                        # short of the edge, which is precisely how a face ends
-                        # up painted mid-frame over an empty background.
-                        if _touches_frame_edge(rec.get("hit_bbox"), frm.shape):
-                            continue
-                        if _touches_frame_edge(rec["bbox"], frm.shape):
-                            continue
-                        keep = _frame_containment(rec["bbox"], frm.shape)
-                        if keep < 0.60:
-                            continue
-                        if keep < 0.85:
-                            rec = dict(rec)
-                            rec["alpha"] *= (keep - 0.60) / 0.25
-                            if rec["alpha"] <= 0.02:
-                                continue
+                    # Whether this face is SEEN or merely held, and whether a
+                    # held one is still substantially inside the frame, was
+                    # already decided when `_want` was built above - along with
+                    # the containment opacity ramp. All that survives here is
+                    # the compositing itself.
+                    rec = _paint[slot]
                     rivals = _rival_landmarks(records, slot)
                     cached = _nearest_aligned(slot, g)
                     if cached is not None:
@@ -4232,9 +4403,19 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     else:
                         trial, ok = None, False
                     if not ok or trial is None:
+                        # A compositing failure is evidence about THIS frame,
+                        # not about whether the subject is still there, so it
+                        # decays like any other soft suppression rather than
+                        # holding the opacity where it was and re-trying at
+                        # full strength next frame.
+                        _paint_alpha[slot] = max(0.0, float(_paint_alpha.get(slot, 0.0)) - _fade_step)
                         continue
                     out = trial
                     any_ok = True
+                    # Remember the geometry that actually composited, so if this
+                    # slot is suppressed later there is something frozen to fade
+                    # out from.
+                    _held_rec[slot] = rec
 
                 if not any_ok:
                     stats["swap_skips"] += 1
