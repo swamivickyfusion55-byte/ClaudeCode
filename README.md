@@ -1836,3 +1836,133 @@ against baseline:
 Everything else is byte-identical. The `t_occlusion` and `t_e2e` movements
 are transients at the new fade boundaries; `t_never_returns` is the one
 material trade and is explained above.
+
+## v11.2.8 — the last hard cut, and the gap nobody was watching
+
+Two defects remained after v11.2.7: the original face showing momentarily
+when the swapped face reappears, and a flicker where only part of the face
+is visible. Both are fixed. Both were reproduced by a new fixture first, and
+in both cases the **first hypothesis was wrong and the fixture said so**
+before anything was changed.
+
+### The edge flicker was not occlusion
+
+"Only a part of the face is visible" was assumed to mean occluded, so a
+fixture was built for a face straddling `_same_extent`'s size threshold — the
+obvious candidate, since that is a single line at 60% of the identity's last
+good height and a face parked on it should oscillate.
+
+It measured **0 presence transitions**. Not it.
+
+The other reading is the right one: the face partly **outside the frame**.
+That path in the render loop was **the last hard cut left in the pipeline**.
+v11.2.5 made every other suppression path fade instead of cutting and
+deliberately left these two checks alone as "departure" — but a face partly
+outside the picture is not departing, and both tests were single thresholds,
+so a face parked near one flipped across it every frame:
+
+| `t_edge` (new) | before | after |
+|---|---|---|
+| presence transitions | 3 | **0** |
+| dropped frames | 6/180 | **0/180** |
+
+Fixed with hysteresis — 0.55 to suppress, 0.70 to resume — and by turning the
+containment cut into a fade. That cut was redundant anyway: the containment
+ramp above it already reaches zero at the cut point, so cutting there changed
+no target value and only skipped the slew. A genuine departure, meaning the
+box is touching the frame edge **and** mostly gone, still cuts hard.
+
+### The return flash was hidden by a coincidence in its own test
+
+v11.2.7 reported "frames until the swap returns: 0" and that was published as
+fixed. It was an artifact. `t_reported`'s subject happened to turn back on
+the same frame as a scheduled detector call.
+
+`t_return.py` sweeps the return frame instead, so most offsets land *between*
+calls, which is the ordinary case:
+
+| face returns at | v11.2.7 | v11.2.8 |
+|---|---|---|
+| 104–110 | 0 frames | 0 frames |
+| **111–115** | **11, 10, 9, 8, 7 frames** | **0, 0, 0, 0, 0** |
+
+Exactly one detector interval of the real face — because while an identity is
+suppressed, **nothing is watching for its return.** The content gate stops
+the paste, correctly, and then the pipeline goes back to looking for faces on
+its ordinary sparse schedule, so the subject can be back for a third of a
+second before anything notices.
+
+`RECOVER_DET_SCALE` (0.34) tightens the detector cadence while nothing is
+being painted. This is close to free, and the reason is worth stating: while
+suppressed the swap NETWORK is not running, and that is the expensive half —
+the entire reason detection is scheduled sparsely in the first place. The
+skipped swaps pay for the extra looks. Note it tightens the cadence rather
+than loosening it, the opposite of the motion-adaptive experiment recorded in
+the v11.2.6 entry: that one spent calls hoping to place a face better and
+bought nothing, this one spends them to stop showing the wrong face at all.
+
+### One more of the same shape, caught by the suite
+
+The edge fix above shipped a regression of its own, and the full suite caught
+it: `t_exit`, a subject walking fully out of frame, went from **0 painted
+frames after her exit to 31.**
+
+Replacing the bare edge-touch cut with a containment test was right about a
+face half out of shot and wrong about a subject who has already gone: her
+held box keeps sitting ~83% inside the picture, coasting on the tracker's
+prediction, so containment never fires. The bare cut had been carrying that
+case.
+
+The discriminator is not where the held box sits but whether the detector has
+**recently confirmed** the identity. A box at the frame edge with no recent
+confirmation is a departure; one with recent confirmation is a real face half
+out of shot, and cutting that on every predicted frame between detections is
+exactly the reported flicker.
+
+  `t_exit` frames painted after exit: 31 → **0**, with `t_edge` still at 0
+  transitions.
+
+### The pattern across v11.2.6 to v11.2.8
+
+Six defects in three versions, and five of them are the same shape: **a check
+reading state that does not mean what the check assumes.**
+
+* The motion veto skipped the update that would have corrected the estimate
+  it was judging against (v11.2.6).
+* The drift term was fed elapsed time the veto itself manufactured
+  (v11.2.6).
+* The extent check ran after the bind had already written the collapsed box
+  in as its own reference (v11.2.7).
+* The hold budget was read as current state at render time, after detection
+  for the whole chunk had finished (v11.2.7).
+* Containment was read from a held box that had coasted on prediction while
+  the subject was already gone (v11.2.8).
+
+When adding a gate here, the question to ask is not only "does this reject
+the right frames" but "what does rejecting change, and does that change feed
+back into the next decision".
+
+### Verified
+
+Full 23-test suite green, plus all three symptom fixtures, diffed line by
+line against v11.2.7. Nothing regressed. The only movements are noise or
+improvements:
+
+| | v11.2.7 | v11.2.8 |
+|---|---|---|
+| `t_confused_kps` placement | 3.3 / 17.8px | 2.8 / 17.1px |
+| `t_modes` dropout luma p99 | 1.06 | 1.05 |
+| `t_flicker_dropouts` area max | 1.6% | 0.5% |
+| `t_reentry` mean / max err | 0.9 / 1.7px | 1.0 / 1.9px |
+| `t_exit` after departure | 0 | 0 |
+
+`RECOVER_DET_SCALE` costs a handful of extra detector calls on the noisy
+fixtures (37→38, 44→46, 41→42), which is the expected price and a small
+one.
+
+### Still not reproduced
+
+The small face emerging from behind the body and travelling toward the hair,
+reported alongside the v11.2.7 symptoms, remains unreproduced and unexplained.
+Nothing in this version touches it. A fixture with a face-coloured decoy
+rising out of the torso shows 0 stray pastes before and after.
