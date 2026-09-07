@@ -3062,6 +3062,21 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # ordering faded frames out five frames before anything was wrong with
         # them. Recording the verdict against the frame it was made at, and
         # looking it up per frame, is what makes the budget mean what it says.
+        # True  = something paintable was found.
+        # False = the detector returned a candidate and the content gate
+        #         rejected it, i.e. POSITIVE evidence the face is not there.
+        # None  = the detector returned nothing at all, i.e. NO evidence
+        #         either way.
+        #
+        # The last two must not be conflated, and doing so is what broke the
+        # ride-through: a motion-blur dropout and a subject who has turned
+        # away both return nothing, and the only thing separating them is how
+        # long it lasts - which is exactly what the grace window already
+        # measures. Treating an empty return as proof of absence demoted the
+        # hold budget on every brief blur, and t_modes' 18-frame dropout went
+        # from riding through cleanly to a 91% frame-to-frame area step.
+        # A rejected candidate is different: there the pixels were looked at
+        # and did not match the face, so there is no reason to keep holding.
         _vis_marks = []
         _kps_veto_streak = [0]
         # Companion to _kps_veto_streak, in OUTPUT FRAMES rather than in
@@ -3687,14 +3702,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
                     if not faces:
                         _no_face_streak[0] += 1
-                        # An empty detector return is the older, simpler way
-                        # for visibility to be lost, and it has to be recorded
-                        # exactly as the content gate's rejections are. Marking
-                        # only the gate's rejections and not these silently
-                        # restored the full three-second grace window for every
-                        # genuine detector miss - measured, a 120-frame
-                        # turn-away went from 43 rendered frames to 106.
-                        _vis_marks.append((g, False))
+                        # None, not False: nothing was looked at, so nothing
+                        # was disproved. The grace window bounds this case.
+                        _vis_marks.append((g, None))
                         # v11: a detector miss is not a reason to show the real
                         # face again. Carry the tracked geometry for a bounded
                         # number of frames so the swap rides through the gap.
@@ -4451,13 +4461,16 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 the end.
                 """
                 spans, run = [], []
-                for i, (mg, ok) in enumerate(_vis_marks):
-                    if ok:
-                        if len(run) >= _ACTIVE_REJECT_STREAK:
-                            spans.append((run[0], mg))
-                        run = []
-                    else:
+                for mg, ok in _vis_marks:
+                    if ok is False:
                         run.append(mg)
+                        continue
+                    if ok is True and len(run) >= _ACTIVE_REJECT_STREAK:
+                        spans.append((run[0], mg))
+                    if ok is True:
+                        run = []
+                    # ok is None: no evidence, so it neither opens nor closes
+                    # a span - the grace window is what bounds that case.
                 if len(run) >= _ACTIVE_REJECT_STREAK:
                     spans.append((run[0], float("inf")))
                 return spans

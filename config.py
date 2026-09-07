@@ -70,7 +70,26 @@ DET_SKIP_INTERVAL = 1
 # during ordinary, brief tracking gaps that HoldThrough's bbox-overlap
 # rescues cannot help with (those need SOME detected box to compare
 # against; a genuine multi-frame miss has none).
-REACQUIRE_GRACE_SEC = 3.0
+# v11.2.7: 3.0 -> 1.0. Three seconds was set in v11.2.5 to stop needless
+# reverts, on the reasoning that a revert is the worse artifact. That was
+# measured against reverts and never against the opposite failure, and the
+# opposite failure is what got reported: at 3.0s a subject who turns away
+# keeps a held face painted over the back of their head for practically the
+# whole turn - measured on t_extended_lookaway, 106 of a 120-frame turn-away
+# were still being painted.
+#
+# Two things make the shorter window safe now in a way it was not in v11.2.5.
+# Suppression FADES rather than cuts (PASTE_FADE_SEC below), so reaching the
+# end of the window costs a soft fade, not the hard flash of the real face
+# that the long window was reacting to. And an empty detector return is no
+# longer conflated with positive evidence of absence (see _vis_marks in
+# core_pipeline), so this window is now only ever spent on genuine "we cannot
+# see anything" gaps rather than on frames the content gate already judged.
+#
+# 1.0s is set from the longest dropout a face that is genuinely still there
+# produces: t_modes' motion-blur fixture drops the detector for 18 frames
+# (0.6s), and this rides through it with margin to spare.
+REACQUIRE_GRACE_SEC = 1.0
 
 # How long the composited face takes to fade out when a suppression path
 # fires, instead of cutting to the untouched original in a single frame.
