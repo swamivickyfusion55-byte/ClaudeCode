@@ -906,8 +906,15 @@ def _hold_fade(dist, taper, hold_frac=0.5):
     h = hold_frac * t
     if d <= h:
         return 1.0
-    k = (d - h) / max(1e-6, t - h)
-    return max(0.0, 1.0 - k * k)
+    k = min(1.0, (d - h) / max(1e-6, t - h))
+    # Smoothstep, not 1-k^2. A plain quadratic leaves a CORNER where the hold
+    # meets the fade - alpha is flat at 1.0 and then immediately starts
+    # dropping at full rate - and that corner is a visible step in its own
+    # right: on a sustained rapid oscillation it put the frame-to-frame area
+    # change at 13.7% mean and 547% max, where the old always-fading curve had
+    # been 0.0/0.3. Smoothstep has zero slope at BOTH ends, so it joins the
+    # hold without a corner and reaches zero without one either.
+    return max(0.0, 1.0 - k * k * (3.0 - 2.0 * k))
 
 
 def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
@@ -4487,17 +4494,29 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 frames at the start of it were just as blind as the ones at
                 the end.
                 """
-                spans, run = [], []
+                spans, run, quiet = [], [], []
                 for mg, ok in _vis_marks:
                     if ok is False:
                         run.append(mg)
+                        quiet = []
                         continue
-                    if ok is True and len(run) >= _ACTIVE_REJECT_STREAK:
+                    if ok is None:
+                        # No evidence either way. Held through on the grace
+                        # window - but a run of these that OUTLASTS that
+                        # window is evidence: a face the detector has not
+                        # seen for longer than any plausible dropout is a
+                        # face that is gone. Without this, a subject who
+                        # leaves and never returns produced only None marks,
+                        # no span ever formed, and _geom_for_frame's
+                        # end-of-clip tail softening carried a ghost face
+                        # 411 frames past her exit.
+                        quiet.append(mg)
+                        if quiet[-1] - quiet[0] > taper:
+                            run.append(quiet[0] + int(taper))
+                        continue
+                    if len(run) >= _ACTIVE_REJECT_STREAK:
                         spans.append((run[0], mg))
-                    if ok is True:
-                        run = []
-                    # ok is None: no evidence, so it neither opens nor closes
-                    # a span - the grace window is what bounds that case.
+                    run, quiet = [], []
                 if len(run) >= _ACTIVE_REJECT_STREAK:
                     spans.append((run[0], float("inf")))
                 return spans
