@@ -883,6 +883,33 @@ def _geom_lerp(a, b, t):
     return out
 
 
+def _hold_fade(dist, taper, hold_frac=0.5):
+    """Opacity for a held face `dist` frames past its last real sighting.
+
+    Full strength for the first half of the budget, then a smooth fade to
+    zero at the end of it. The previous curve, 1 - (dist/taper)^2, began
+    dimming on the very first frame of any gap, which tied two independent
+    decisions together: HOW LONG a face may be held, and HOW FAST it dims
+    while held. Shortening the budget then necessarily steepened the dim -
+    measured, cutting the grace window from 3.0s to 1.0s left an ordinary
+    18-frame motion-blur dropout dimming to 64% and back, raising t_modes'
+    luma step p99 from 1.03 to 3.31.
+
+    Those are different questions and this separates them. A gap short enough
+    that the face is almost certainly still there is not a reason to dim at
+    all; the fade is for the tail, where confidence genuinely is running out.
+    """
+    t = float(taper)
+    if t <= 0.0:
+        return 1.0
+    d = float(dist)
+    h = hold_frac * t
+    if d <= h:
+        return 1.0
+    k = (d - h) / max(1e-6, t - h)
+    return max(0.0, 1.0 - k * k)
+
+
 def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
     """Geometry for output frame ``g`` from a slot's key-frame timeline.
 
@@ -1001,7 +1028,7 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
             rec = dict(side[1])
             rec["det"] = False
             if taper > 0:
-                rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (edge / float(taper)) ** 2))
+                rec["alpha"] = float(rec["alpha"] * _hold_fade(edge, taper))
             return rec if rec["alpha"] > 0.02 else None
         t = 0.0 if span <= 0 else (g - obs_lo[0]) / span
         return _geom_lerp(obs_lo[1], obs_hi[1], t)
@@ -1027,7 +1054,7 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
         side = lo if lo is not None else obs_lo
         rec = dict(side[1])
         rec["det"] = False
-        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (real_dist / float(eff_taper)) ** 2))
+        rec["alpha"] = float(rec["alpha"] * _hold_fade(real_dist, eff_taper))
         return rec if rec["alpha"] > 0.02 else None
 
     # No real detection anywhere in this timeline yet - never established, or
@@ -1047,7 +1074,7 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
     rec = dict(side[1])
     if dist > 0:
         rec["det"] = False
-        rec["alpha"] = float(rec["alpha"] * max(0.0, 1.0 - (dist / float(taper)) ** 2))
+        rec["alpha"] = float(rec["alpha"] * _hold_fade(dist, taper))
     return rec if rec["alpha"] > 0.02 else None
 
 
