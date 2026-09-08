@@ -3098,6 +3098,19 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         _det_cache, _det_counter = [], [0]
         _no_face_streak = [0]
+        # "A detector call with nothing at all is pending acknowledgement."
+        # Separate from _no_face_streak because the two answer different
+        # questions and sharing one counter broke the motion veto: the streak
+        # must stay raised for as long as nothing paintable is being found
+        # (it drives the hold budget), whereas "did a real gap just end"
+        # is true for exactly ONE call - the first one after the silence.
+        # Sharing it meant _after_real_gap stayed true indefinitely while the
+        # veto kept rejecting, and its reset of the veto's own counters fired
+        # every call, so the drift term was recomputed from zero each time
+        # and the budget grew without bound. Measured on t_idlock: a decoy
+        # 320px away was correctly vetoed on the first call (dev 321 vs
+        # budget 321) and waved through on the next (dev 321 vs budget 466).
+        _gap_pending = [False]
         # (output_frame, was_anything_paintable_found) for every detector call,
         # in order. The hold budget has to be a statement about the frame being
         # rendered, and neither _no_face_streak nor a single "lost at" marker
@@ -3758,6 +3771,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # None, not False: nothing was looked at, so nothing
                         # was disproved. The grace window bounds this case.
                         _vis_marks.append((g, None))
+                        _gap_pending[0] = True
                         # v11: a detector miss is not a reason to show the real
                         # face again. Carry the tracked geometry for a bounded
                         # number of frames so the swap rides through the gap.
@@ -3776,7 +3790,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         det_done = min(lim, max(0, g + 1))
                         _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
                         continue
-                    _after_real_gap = _no_face_streak[0] > 0
+                    _after_real_gap = _gap_pending[0]
+                    _gap_pending[0] = False
                     # v11.2.7: the reset moved to AFTER the gates, keyed on a
                     # candidate actually surviving them. Resetting here - on
                     # the mere fact that the detector returned a box - is what
@@ -3929,7 +3944,27 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         if _after_real_gap:
                             _kps_veto_streak[0] = 0
                             _kps_veto_frames[0] = 0.0
-                        if pairs and len(pairs) == 1 and not _after_real_gap:
+                        # v11.2.9: the veto no longer skips itself after a
+                        # gap. The blanket skip reasoned that "a detection
+                        # right after a real absence carries no information
+                        # about where the subject is" - true of a LONG
+                        # absence, and false of a short one, because a head
+                        # cannot cross the room in ten frames. It was also
+                        # made redundant by the `_drift` term below, which
+                        # already widens the budget in proportion to how long
+                        # nothing has been seen: that is the same idea, but
+                        # proportionate instead of all-or-nothing.
+                        #
+                        # Measured directly (t_idlock): while a subject was
+                        # turned away, a face-coloured decoy 320px from her
+                        # last known position was accepted on the very first
+                        # detector call after the gap - because this skip
+                        # meant nothing ever checked the distance - and held
+                        # the binding for 85 frames, after which the paste
+                        # glided 319px back onto her as she returned. That is
+                        # the reported "face pasted at an incorrect place and
+                        # then moving towards and fixing on the subject".
+                        if pairs and len(pairs) == 1:
                             _pf0, _psrc0 = pairs[0]
                             _tr0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
                             _new_kps = getattr(_pf0, "kps", None)

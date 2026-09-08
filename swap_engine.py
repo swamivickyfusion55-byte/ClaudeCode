@@ -173,6 +173,14 @@ _P = {
 }
 
 
+# How fast the landmark-size EMA follows a real change in apparent face size.
+# Per DETECTION, not per frame, so the time constant does not move with the
+# detector cadence. 0.20 is about a five-detection response - fast enough to
+# follow a subject walking toward the camera, slow enough that a detector box
+# wobbling frame to frame does not reach the paste.
+_KPS_SCALE_EMA = 0.20
+
+
 def _ab_beta() -> float:
     """Velocity gain for the alpha-beta filter, derived if not set."""
     b = float(_P.get("ab_beta", 0.0) or 0.0)
@@ -517,7 +525,7 @@ class TrackState:
                  "fake", "fake_corr", "fake_size", "fake_frame",
                  "_frame_wh", "_paste_frozen", "_reacquired",
                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
-                 "skin_ref", "skin_hits")
+                 "skin_ref", "skin_hits", "kps_scale")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -544,6 +552,10 @@ class TrackState:
         # the centre by construction. A reference carried across time can.
         self.skin_ref = None
         self.skin_hits = 0
+        # Slowly-smoothed SIZE of this identity's landmark constellation.
+        # Position and size do not deserve the same filter, and sharing one is
+        # what makes a pasted face pulse. See the note at the rescale site.
+        self.kps_scale = None
         self.emb = None
         self.hits = 0
         self.missed = 0
@@ -787,6 +799,7 @@ class TrackState:
                 # added. None restores the same fresh-start treatment a
                 # genuine first-time establishment already gets.
                 self.vel_kps = None
+                self.kps_scale = None
                 self.last_hit_kps = kp.copy()
             lmk = getattr(face, "landmark_2d_106", None)
             if lmk is not None:
@@ -918,6 +931,33 @@ class TrackState:
                     else:
                         self.vel_kps = np.zeros_like(kp)
                     self.ab_kps = kp.copy()
+                # --- v11.2.9: damp SIZE separately from position ----------
+                # One Euro deliberately relaxes its smoothing as speed rises,
+                # to avoid lagging a fast-moving face. That is right for
+                # WHERE the landmarks are and wrong for HOW BIG they are: a
+                # head's apparent size does not change because it moved
+                # sideways, so scale gets speed-relaxed for no reason and the
+                # detector's own box error passes straight into the size of
+                # the pasted face. Measured with a jittering detector box
+                # (t_jitter): the paste stays present throughout - no flicker
+                # in the presence sense - but its area swings up to 31% frame
+                # to frame, which is the reported "little flicker on
+                # movement".
+                #
+                # The constellation is rescaled about its own centroid toward
+                # a slow EMA of its size. Position and rotation are untouched,
+                # so nothing here adds lag to a moving face; only the breathing
+                # is removed. The EMA runs per DETECTION rather than per frame,
+                # so its time constant does not change with cadence.
+                _c = sm.mean(axis=0)
+                _sc = float(np.mean(np.linalg.norm(sm - _c, axis=1)))
+                if _sc > 1e-3:
+                    if self.kps_scale is None:
+                        self.kps_scale = _sc
+                    else:
+                        self.kps_scale = float(self.kps_scale * (1.0 - _KPS_SCALE_EMA)
+                                               + _sc * _KPS_SCALE_EMA)
+                    sm = _c + (sm - _c) * (self.kps_scale / _sc)
                 self.kps = sm.astype(np.float32)
             else:
                 self.kps = kp
