@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.2.8 "SteadyEdge" configuration (edges hysteretic, returns watched)."""
+"""Swamitech Phoenix v11.2.7 "EyesOpen" configuration (the pipeline now looks at the pixels)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -128,20 +128,6 @@ REACQUIRE_GRACE_SEC = 2.0
 # length for gaps this one has not yet declared blind.
 BLIND_AFTER_SEC = 0.75
 
-# Detector cadence multiplier applied while nothing is being painted.
-#
-# The gap between a face reappearing and the swap resuming is one detector
-# interval, because nothing else is watching for the return - which is the
-# reported "the original face is shown momentarily when the face reappears".
-# At the default Optimized cadence that is 7-11 frames of the real face.
-#
-# Tightening the cadence to a third of normal costs almost nothing, because
-# it only applies while the identity is suppressed - and while it is
-# suppressed the swap NETWORK is not running, which is the expensive half and
-# the whole reason detection is scheduled sparsely. The skipped swaps pay for
-# the extra looks.
-RECOVER_DET_SCALE = 0.34
-
 PASTE_FADE_SEC = 0.5
 FACE_ROI_PAD = 0.22
 FACE_EMA_ALPHA = 0.40
@@ -182,8 +168,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.8"
-BUILD = "SteadyEdge · the last hard cut, and nothing left unwatched"
+VERSION = "v11.2.7"
+BUILD = "EyesOpen · a face is only pasted where a face can be seen"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass
