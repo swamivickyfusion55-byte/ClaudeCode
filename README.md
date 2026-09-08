@@ -1966,3 +1966,115 @@ The small face emerging from behind the body and travelling toward the hair,
 reported alongside the v11.2.7 symptoms, remains unreproduced and unexplained.
 Nothing in this version touches it. A fixture with a face-coloured decoy
 rising out of the torso shows 0 stray pastes before and after.
+
+## v11.2.9 — v11.2.8 reverted; the flicker v11.2.7 actually had
+
+v11.2.8 was reported to have introduced inconsistent face continuity and a
+face pasted in the wrong place that then glided onto the subject, with
+**v11.2.7 named as the cleanest build so far**. It is reverted wholesale:
+`core_pipeline.py`, `config.py` and `swap_engine.py` restored to 797459e byte
+for byte, and the work redone on that base.
+
+`RECOVER_DET_SCALE` is **not** reinstated. It tripled detector calls while an
+identity was suppressed; `_ACTIVE_REJECT_STREAK` is 2, so three times as many
+calls means three times as many chances to accumulate two rejections and open
+a suppression span. That is the mechanism behind both reported symptoms — the
+intermittent reverts directly, and the wrong-place-then-glide through the
+extra anchors those spans leave for the geometry to interpolate across.
+
+### What v11.2.7 actually had wrong
+
+`t_jitter.py` is new and models what this harness never has: the detector's
+**box deforming** under motion, rather than only failing to return one.
+`FakeFace` hardcodes `det_score` 0.92 and derives perfect keypoints from a
+perfect box, so the detector had never been wrong *about the box*. Two
+separate defects fall out, and they are the two the report describes.
+
+**A — a face sweeping past a frame edge reverted.** 51 of 240 frames showed
+the original, in gaps up to 30 frames. The edge test was firing on a **stale**
+`hit_bbox`: a face that had swept near an edge and come back was still being
+judged on where it was thirty frames earlier, while containment read a
+perfect 1.00 throughout.
+
+v11.2.8's attempt at this asked the tracker for `missed` — the sixth instance
+in this file of a check reading state that does not mean what it assumes,
+since detection for a chunk completes before any of it renders and `missed`
+therefore holds its end-of-chunk value. `_geom_for_frame` now publishes two
+per-record facts instead: `hold_dist` (frames since this identity was last
+really seen) and `one_sided` (whether any later real sighting exists at all).
+Both are facts by render time rather than inferences.
+
+`one_sided` is what separates a departure from a graze, and nothing else
+does: someone who has walked out of shot has no later sighting, someone whose
+sweep merely grazed an edge is seen again a few frames later. Staleness alone
+cannot tell them apart, because both look identical until the return arrives.
+
+**B — the pasted face pulsed in size.** With a jittering box the paste never
+disappeared — no flicker in the presence sense — but its area swung up to 31%
+frame to frame. One Euro deliberately relaxes its smoothing as speed rises,
+which is right for *where* the landmarks are and wrong for *how big* they
+are: a head's apparent size does not change because it moved sideways, so
+scale was being speed-relaxed for no reason and the detector's own box error
+passed straight into the size of the paste. Size now damps on its own slow
+EMA, per detection so the time constant does not move with cadence, applied
+about the constellation's own centroid. Position and rotation are untouched,
+so nothing here adds lag to a moving face.
+
+### Measured
+
+| | v11.2.7 | v11.2.9 |
+|---|---|---|
+| edge sweep: missing / transitions | 51/240 · 4 | **0/240 · 0** |
+| `t_edge` transitions / missing | 3 · 6 | **0 · 0** |
+| `t_jitter` size step p95 (calm/mod/hard) | 3.6 / 4.4 / 5.9% | **1.2 / 2.0 / 2.6%** |
+| `t_flicker_noisy` area step (3 presets) | 2.7 / 14.6 / 8.0% max | **1.5 / 3.7 / 3.1%** |
+| `t_flicker_dropouts` area step max | 1.6% | **0.4%** |
+| `t_occlusion` suppressed | 85/90 | 85/90 |
+| `t_exit` painted after departure | 0 | **5** |
+
+Full 23-test suite green. The `t_exit` cost is real and stated: a departure
+keeps its face about five frames longer. The alternative was measured —
+dropping the staleness requirement restores `t_exit` to 0 but costs 3
+transitions on a face parked at an edge, because one-sidedness is judged
+against the timeline built so far and a chunk boundary hides the next
+sighting. Flicker is the more visible defect, so the trade is taken that way.
+
+### The identity lock: diagnosed, two holes closed, one left open
+
+`t_idlock.py` is new and reproduces the reported "pasted at an incorrect
+place and then moving towards and fixing on the subject" **on the v11.2.7
+base**: while the subject is turned away, a face-coloured decoy 320px from
+her last known position captures the binding for 70-85 frames, after which
+the paste glides 319px back onto her as she returns.
+
+Two genuine holes were found and closed:
+
+* The motion veto **skipped itself outright after any gap**, reasoning that a
+  detection right after an absence says nothing about where the subject is.
+  True of a long absence, false of a short one — a head cannot cross the room
+  in ten frames — and made redundant by the `_drift` term, which already
+  widens the budget in proportion to the silence.
+* `_no_face_streak` was doing double duty. It must stay raised while nothing
+  paintable is found, because it drives the hold budget; but "did a gap just
+  end" is true for exactly one call. Sharing it left `_after_real_gap` true
+  indefinitely, and its reset of the veto's counters then fired every call,
+  so the drift term was recomputed from zero and the budget grew without
+  bound. Traced: the decoy was correctly vetoed on the first call (deviation
+  321 against a budget of 321) and waved through on the next (321 against
+  466). `_gap_pending` separates the two uses.
+
+**`t_idlock` still does not pass, and is shipped failing.** A decoy that
+persists captures the binding anyway after about 70 frames, because the
+motion veto is a *bounded* override by design — it concedes once
+`trk_flip_frames` or the miss budget is spent, which is what stops it locking
+a track out permanently (the v11.2.6 defect). What should reject a persistent
+impostor is the face **embedding**, and `_pairs_for_frame` currently accepts
+any candidate scoring above **0.10** on `sim * 0.60 + spatial * 0.40`.
+
+Raising that floor is very likely the real fix, and it is deliberately NOT
+done here, because this harness gives every synthetic face an identical
+embedding — the decoy and the subject are indistinguishable to any
+identity-based rule — so the change cannot be measured at all in this
+sandbox, only reasoned about. Shipping an unmeasurable change to the
+identity path is exactly what produced v11.2.8. It is recorded as
+diagnosed-and-open with the specific number to change.
