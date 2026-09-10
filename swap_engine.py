@@ -525,7 +525,7 @@ class TrackState:
                  "fake", "fake_corr", "fake_size", "fake_frame",
                  "_frame_wh", "_paste_frozen", "_reacquired",
                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
-                 "skin_ref", "skin_hits", "kps_scale")
+                 "skin_ref", "skin_hits", "kps_scale", "skin_miss")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -552,6 +552,10 @@ class TrackState:
         # the centre by construction. A reference carried across time can.
         self.skin_ref = None
         self.skin_hits = 0
+        # Consecutive content-gate rejections. The gate learns its reference
+        # ONLY from accepted frames, so without this the reference freezes the
+        # moment it starts rejecting and can never recover. See _content_visible.
+        self.skin_miss = 0
         # Slowly-smoothed SIZE of this identity's landmark constellation.
         # Position and size do not deserve the same filter; sharing one is
         # what makes a pasted face pulse. See the rescale site below.

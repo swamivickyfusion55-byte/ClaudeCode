@@ -2038,6 +2038,26 @@ def _face_chroma(frame_bgr, kps, bbox):
 # so 30 sits with margin on both sides rather than between two numbers that
 # nearly touch.
 _CHROMA_TOL = 30.0
+# Consecutive rejections tolerated before the gate starts widening, and how
+# fast it widens per rejection after that.
+#
+# Without this the gate is a one-way door. It learns its reference only from
+# frames it ACCEPTED, so once it starts rejecting, the reference freezes while
+# the face keeps moving away from it - and nothing can ever be accepted again.
+# Measured: a step change in lighting at the half-way point (a scene cut, the
+# subject stepping into shadow, auto-exposure re-adjusting) stopped the swap
+# at frame 121 of 240 and it never came back, with the reference frozen and
+# the distance pinned at 79 against a tolerance of 30.
+#
+# Patience is set above the longest run of rejections a genuine misread
+# produces in these fixtures: the hair-confusion window is 60 frames, about 6
+# detector calls at the Optimized cadence, so 8 leaves margin before any
+# widening starts. Beyond that the tolerance grows until the gate can see the
+# face again, because a mismatch that outlasts every plausible misread is a
+# lighting change, not an impostor.
+_CHROMA_PATIENCE = 8
+_CHROMA_RELAX = 1.0
+_CHROMA_TOL_MAX = 6.0
 # Frames of agreeing evidence before the reference is trusted enough to
 # suppress anything. Until then the gate passes everything and only learns.
 _CHROMA_WARMUP = 3
@@ -2074,8 +2094,15 @@ def _content_visible(frame_bgr, f, tr):
         ref = getattr(tr, "skin_ref", None)
         if ref is None or int(getattr(tr, "skin_hits", 0) or 0) < _CHROMA_WARMUP:
             return True, 0.0
-        return (float(np.linalg.norm(cur - np.asarray(ref, np.float32)))
-                <= _CHROMA_TOL), float(np.linalg.norm(cur - np.asarray(ref, np.float32)))
+        _d = float(np.linalg.norm(cur - np.asarray(ref, np.float32)))
+        # Widen once the gate has been rejecting for longer than any genuine
+        # misread lasts. Uncertainty about our own reference has to relax this
+        # gate, not tighten it - the same lesson as the motion veto's drift
+        # term, arrived at the same way.
+        _m = int(getattr(tr, "skin_miss", 0) or 0)
+        _tol = _CHROMA_TOL * min(_CHROMA_TOL_MAX,
+                                 1.0 + _CHROMA_RELAX * max(0, _m - _CHROMA_PATIENCE))
+        return (_d <= _tol), _d
     except Exception:
         return True, 0.0
 
@@ -4223,6 +4250,32 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                     _ext_ok = _same_extent(_cf.bbox, _anc_e)
                                 _vis, _dd = _content_visible(frm, _cf, _ctr)
                                 _vis = bool(_vis and _ext_ok)
+                                # The miss counter only advances while the
+                                # EXTENT still looks right. An occluder
+                                # collapses the box as well as changing its
+                                # colour, and that case must never be widened
+                                # into acceptance - only a full-size box whose
+                                # colour has moved gets the benefit of the
+                                # doubt, which is what a lighting change looks
+                                # like and what an occlusion does not.
+                                #
+                                # The counter clears only when the distance is
+                                # back inside the BASE tolerance. A frame that
+                                # passed only because the gate had already
+                                # widened HOLDS the counter where it is: the
+                                # widening has to outlast the reference's climb
+                                # across to the new lighting, or the tolerance
+                                # snaps back to 30 on the first acceptance, the
+                                # very next frame is rejected again, and the
+                                # gate oscillates - one lighting change turning
+                                # into a run of visible on/off transitions
+                                # instead of a single one.
+                                if _ctr is not None:
+                                    if _vis and _dd <= _CHROMA_TOL:
+                                        _ctr.skin_miss = 0
+                                    elif not _vis and _ext_ok:
+                                        _ctr.skin_miss = int(
+                                            getattr(_ctr, "skin_miss", 0) or 0) + 1
                                 if _vis:
                                     _kept.append((_cf, _csrc))
                             # "The detector returned a box" and "something
