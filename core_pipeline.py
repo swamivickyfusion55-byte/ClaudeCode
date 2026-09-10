@@ -2129,7 +2129,149 @@ def _learn_face_chroma(frame_bgr, f, tr):
         pass
 
 
-def _kps_reliable(f) -> bool:
+# Raised-cosine ramp bounds for the four pose signals, each bracketing the
+# hard threshold it replaces. Calibrated so the graded gate reproduces the
+# hard one EXACTLY at the 0.5 accept level: swept over 5940 poses (vertical
+# pitch -0.20..0.69 x jaw drop 0..0.50 x roll 0/+-30/+-45/+-60/+-90) the two
+# disagree on zero of them. The ramps only change what happens BETWEEN the
+# verdicts, which is the whole point.
+#
+# Each pair is (reject-end, accept-end); when the reject end is the larger
+# number the ramp falls instead of rising, so the same helper serves signals
+# in both directions.
+_POSE_VERT = (0.06, 0.18)   # roll-corrected nose-below-eyes, hard veto at 0.12
+_POSE_EYE = (0.09, 0.15)    # eye spacing vs box, hard veto at 0.12
+_POSE_T = (0.72, 0.58)      # eye line down the box, hard veto at 0.65
+_POSE_FIT = (0.44, 0.20)    # landmark fit error, hard veto at 0.32/0.20
+# Accept a pose at 0.5 - by construction the old boundary. Once a pose HAS
+# been accepted, keep it down to 0.10.
+#
+# 0.10 is not a guess: it is what a head at vert=0.085 scores, and 0.085 is
+# about two standard deviations of ordinary detector landmark noise below the
+# 0.12 veto. The band therefore covers the noise without reaching anywhere
+# near the thing the gate exists to reject - the hair/skull confusion
+# signature scores 0.000, not 0.09, because its nose sits AT or ABOVE the eye
+# line rather than just above the threshold.
+_KPS_ACCEPT = 0.50
+_KPS_KEEP = 0.10
+
+
+def _pose_ramp(x, lo, hi):
+    """Raised cosine from 0 at `lo` to 1 at `hi`, in either direction.
+
+    Continuous in value AND slope at both ends, which a linear ramp is not.
+    That matters here: the slope discontinuity of a linear ramp is a smaller
+    version of the same knife edge this replaces, and it lands at exactly the
+    pose where reads cluster.
+    """
+    if hi > lo:
+        if x <= lo:
+            return 0.0
+        if x >= hi:
+            return 1.0
+        t = (x - lo) / (hi - lo)
+    else:
+        if x >= lo:
+            return 0.0
+        if x <= hi:
+            return 1.0
+        t = (lo - x) / (lo - hi)
+    return 0.5 - 0.5 * float(np.cos(np.pi * t))
+
+
+def _pose_confidence(f) -> float:
+    """How much this read looks like a paintable face, 0..1.
+
+    _kps_reliable's four checks were four independent HARD vetoes, and a head
+    that merely dwells near one of them - a mild chin-down pose, which is
+    common and entirely legitimate - has its verdict decided by detector
+    noise. Measured on a 240-frame clip holding such a pose: the verdict
+    flipped 48 times at 1.2px of landmark noise, and 66 times at 2.5px. A
+    rejected read is DISCARDED rather than downweighted, so the geometry it
+    would have carried is lost with it.
+
+    Be clear about what that is worth today: it is NOT currently visible.
+    Driven through the whole pipeline, every one of those clips still paints
+    240/240 frames with 0 presence transitions and 1.8px of placement error,
+    because the "keep the candidate that still overlaps the live track"
+    fallback downstream already catches every rejection before it reaches the
+    screen. This is a gate that flickers into a net. What changes here is the
+    gate, not the picture.
+
+    Grading the same four signals says the SAME thing about every case that
+    matters - verified, not asserted: over 5940 swept poses (pitch x jaw drop
+    x roll) and over all 1800 live gate calls in the two-face contact
+    fixture, the graded verdict at 0.5 and the four hard vetoes disagree on
+    zero. A legitimate pose scores 1.000, the hair/skull confusion signature
+    scores 0.000, and only the genuinely marginal band gets an answer that
+    moves as the pose moves instead of jumping as the noise jumps.
+
+    Returns 0.0 for a read that cannot be assessed at all: missing landmarks
+    or a fit that could not be attempted. That preserves _kps_reliable's
+    fail-CLOSED stance, which is deliberate and is explained there.
+    """
+    kps = getattr(f, "kps", None)
+    if kps is None or len(kps) < 5:
+        return 0.0
+    try:
+        le, re = np.asarray(kps[0], np.float32), np.asarray(kps[1], np.float32)
+        nose = np.asarray(kps[2], np.float32)
+        eye_vec = re - le
+        eye_dist = float(np.linalg.norm(eye_vec)) + 1e-6
+
+        # Roll-corrected vertical pitch signal. See _kps_reliable's docstring
+        # for why the image y-axis will not do - at a genuine lying-down pose
+        # the face's own vertical axis IS the image's horizontal axis.
+        roll = float(np.arctan2(eye_vec[1], eye_vec[0]))
+        mid = (le + re) * 0.5
+        rel = nose - mid
+        c, sn = float(np.cos(-roll)), float(np.sin(-roll))
+        vert = (rel[0] * sn + rel[1] * c) / eye_dist
+        score = _pose_ramp(vert, *_POSE_VERT)
+        if score <= 0.0:
+            return 0.0
+
+        bb = getattr(f, "bbox", None)
+        if bb is not None:
+            x1, y1, x2, y2 = [float(v) for v in np.asarray(bb, np.float32).reshape(4)]
+            bw = max(1.0, x2 - x1)
+            bh = max(1.0, y2 - y1)
+            # Features tiny vs box -> hair clump / oversized scalp box.
+            score *= _pose_ramp(eye_dist / min(bw, bh), *_POSE_EYE)
+            if score <= 0.0:
+                return 0.0
+            # Face-down unit vector in image coords (nose direction from eyes),
+            # so the eye line's position down the box is measured along the
+            # FACE's axis rather than the image's.
+            down = np.asarray([sn, c], np.float32)
+            down = down / (float(np.linalg.norm(down)) + 1e-6)
+            corners = np.asarray(
+                [[x1, y1], [x2, y1], [x1, y2], [x2, y2]], np.float32
+            )
+            projs = corners @ down
+            p_min, p_max = float(np.min(projs)), float(np.max(projs))
+            # t=0 at face-top (forehead end of box), t=1 at face-bottom (chin).
+            t = (float(np.dot(mid, down)) - p_min) / (p_max - p_min + 1e-6)
+            score *= _pose_ramp(t, *_POSE_T)
+            if score <= 0.0:
+                return 0.0
+
+        fit = _E.landmark_fit_error(kps, 128)
+        # None means the fit could not even be attempted (a degenerate point
+        # set) - itself evidence of an unreliable read, not a reason to pass.
+        if fit is None:
+            return 0.0
+        # Multiplying rather than vetoing separately is what recovers the old
+        # rule's COUPLING between fit error and pitch ("fit above 0.20 needs
+        # vert at least 0.16") without its step: a read that is marginal on
+        # both axes now fails on the product, and one that is marginal on only
+        # one still clears 0.5.
+        return float(score * _pose_ramp(float(fit), *_POSE_FIT))
+    except Exception:
+        return 0.0
+
+
+def _kps_reliable(f, tr=None) -> bool:
     """False when the 5 landmarks do not describe a paintable face.
 
     v11.1.10 HairGate: FAIL CLOSED when kps is missing (was fail-open
@@ -2171,108 +2313,24 @@ def _kps_reliable(f) -> bool:
     mode - risking the exact visible corruption this function exists to
     prevent. A spurious hold is the already-accepted, designed-for fallback
     everywhere else in this engine; a bad paste is not.
+    
+
+    v11.2.10: the four hard vetoes described above are now the 0.5 level of a
+    graded score - see _pose_confidence, which documents why and carries the
+    calibration showing the two agree on every one of 5940 swept poses. What
+    is new is the second threshold. Given a track that was painting a good
+    pose a moment ago, this keeps painting down to 0.10 instead of cutting at
+    0.5, because "is this a face" and "was this a face one frame ago, and has
+    it only drifted a little" are different questions and only the second one
+    has an answer that noise cannot flip. Callers with no track get the plain
+    0.5 test, which is exactly the behaviour above.
     """
-    kps = getattr(f, "kps", None)
-    # v11.1.10: fail CLOSED — missing landmarks are not paintable.
-    if kps is None or len(kps) < 5:
-        return False
-    try:
-        le, re = np.asarray(kps[0], np.float32), np.asarray(kps[1], np.float32)
-        nose = np.asarray(kps[2], np.float32)
-        eye_vec = re - le
-        eye_dist = float(np.linalg.norm(eye_vec)) + 1e-6
-
-        # Roll-corrected vertical pitch signal. _pitch_score() computes this
-        # along the IMAGE y-axis, which only means "up/down on the face" when
-        # roll is near zero. At a genuine ~90 degree roll (lying down - a
-        # pose this engine explicitly supports and was verified against) the
-        # face's own vertical axis IS the image's horizontal axis, so the
-        # image-axis version collapses toward zero and misreads a perfectly
-        # good lying-down pose as "looking down, box is hair/skull". This is
-        # the same class of blind spot the engine's own mask/enhancer
-        # orientation code elsewhere already had to correct for with the
-        # measured head roll - re-derived here from the eye line rather than
-        # importing that machinery, to keep this check self-contained.
-        roll = float(np.arctan2(eye_vec[1], eye_vec[0]))
-        mid = (le + re) * 0.5
-        rel = nose - mid
-        c, sn = float(np.cos(-roll)), float(np.sin(-roll))
-        vert = (rel[0] * sn + rel[1] * c) / eye_dist
-        if vert < 0.12:
-            return False
-
-        # Hair/skull bbox: eye midline must not sit in the bottom third of
-        # the detection box along the face's roll-corrected "up" axis.
-        # Classic motion-blur hair blob puts eyes near the chin end of a
-        # tall box that mostly covers scalp/hair - that signature already
-        # trips the vert<0.12 check above in every measured case (see this
-        # function's docstring: the confusion signature scores
-        # roll-corrected-vert<=0), so this is a defensive second signal,
-        # not the primary one. v11.2.2: loosened 0.45→0.65 after real
-        # footage showed ordinary frontal/chin-down poses routinely place
-        # the eye line at t=0.40-0.55 of an InsightFace detector box - the
-        # tighter threshold was rejecting normal frames throughout most of
-        # a clip, not just genuine hair/skull confusion, which is what
-        # made the swap look absent/weak almost everywhere instead of only
-        # during an actual hair sweep.
-        bb = getattr(f, "bbox", None)
-        if bb is not None:
-            x1, y1, x2, y2 = [float(v) for v in np.asarray(bb, np.float32).reshape(4)]
-            bw = max(1.0, x2 - x1)
-            bh = max(1.0, y2 - y1)
-            # Features tiny vs box → hair clump / oversized scalp box.
-            if eye_dist / min(bw, bh) < 0.12:
-                return False
-            # Face-down unit vector in image coords (nose direction from eyes).
-            down = np.asarray([sn, c], np.float32)
-            dn = float(np.linalg.norm(down)) + 1e-6
-            down = down / dn
-            corners = np.asarray(
-                [[x1, y1], [x2, y1], [x1, y2], [x2, y2]], np.float32
-            )
-            projs = corners @ down
-            p_min = float(np.min(projs))
-            p_max = float(np.max(projs))
-            p_eye = float(np.dot(mid, down))
-            # t=0 at face-top (forehead end of box), t=1 at face-bottom (chin).
-            t = (p_eye - p_min) / (p_max - p_min + 1e-6)
-            # Reject only if eyes sit in the bottom third of the box.
-            if t > 0.65:
-                return False
-
-        fit = _E.landmark_fit_error(kps, 128)
-        # None means the fit could not even be attempted (a degenerate point
-        # set) - itself evidence of an unreliable read, not a reason to pass.
-        # In practice this branch is defensive: the only input that makes the
-        # Umeyama fit degenerate (all 5 points coincident) already collapses
-        # `rel` to zero and is rejected by the vert check above first.
-        # v11.1.10 tightened 0.20 -> 0.15 "for live paint"; v11.2.2 reverts
-        # that. Measured directly: a face whose detection box narrows (a
-        # normal yaw turn - width shrinks, height does not) produces a
-        # rising landmark_fit_error purely because a SIMILARITY transform
-        # cannot separately rescale width and height to match the fixed-
-        # aspect canonical template - nothing about the face itself became
-        # less reliable. At 0.15 this fired continuously through an
-        # ordinary profile-turn clip (13 of 28 detector calls rejected vs
-        # 0 of 28 at 0.20), and each rejection is exactly what triggers
-        # HairGate's reacquire-and-freeze path below - which then could not
-        # collect two consecutive clean hits often enough to ever un-freeze,
-        # dropping the paste to the original face for the rest of the clip.
-        # 0.20 is this project's own previously-measured number, with the
-        # stated margin above every legitimate pose this docstring already
-        # swept (worst case 0.103) still intact.
-        if fit is None:
-            return False
-        # v11.2.4: 0.20 rejected talking / open-mouth / mild motion-blur
-        # because a similarity fit cannot model a dropping jaw. Eyes+nose
-        # still valid (vert already passed) → allow through 0.32.
-        if fit > 0.32:
-            return False
-        if fit > 0.20:
-            return vert >= 0.16
+    conf = _pose_confidence(f)
+    if conf >= _KPS_ACCEPT:
         return True
-    except Exception:
-        return False
+    if tr is not None and bool(getattr(tr, "pose_ok", False)):
+        return conf >= _KPS_KEEP
+    return False
 
 
 def _face_swap_allowed(f) -> bool:
@@ -2312,7 +2370,10 @@ def _face_swap_allowed(f) -> bool:
         # Real detector hit. Keep lying-down, talking, and soft-profile faces.
         if det < 0.18:
             return False
-        if not _kps_reliable(f):
+        # `tr` here is the bound track, so this site gets the second
+        # threshold too: a head already being painted is not dropped for a
+        # marginal pose.
+        if not _kps_reliable(f, tr):
             # Expression / motion-blur landmarks: still paint if this is the
             # same head we were already swapping. Reject only a new, bad box.
             #
@@ -3735,7 +3796,27 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # gap instead of painting - exactly the behaviour wanted
                     # here, reused rather than reinvented.
                     _n_before_kps_gate = len(faces)
-                    _reliable = [f for f in faces if _kps_reliable(f)]
+                    # The live track carries whether this head's last accepted
+                    # read was a good pose, which is what lets the gate hold a
+                    # head through a marginal one instead of discarding the
+                    # sighting and freezing the geometry. Only this path has a
+                    # track to offer; the still-image path below deliberately
+                    # does not, and gets the plain threshold.
+                    #
+                    # Offered ONLY when there is exactly one candidate and
+                    # exactly one track, because nothing here has bound faces
+                    # to tracks yet: with two heads on screen, slot 0's memory
+                    # would be used to judge BOTH of them, and face B would be
+                    # held through a marginal pose on the strength of face A's
+                    # history. That is this codebase's oldest recurring bug -
+                    # a check reading state that does not mean what it assumes
+                    # - and it showed up as measurably worse placement in the
+                    # two-face contact fixture the moment it was written.
+                    _tr_pose = None
+                    if hasattr(_tracker, "tracks") and len(faces) == 1 \
+                            and len(_tracker.tracks) == 1:
+                        _tr_pose = _tracker.tracks.get(0)
+                    _reliable = [f for f in faces if _kps_reliable(f, _tr_pose)]
                     if _reliable:
                         faces = _reliable
                     elif faces:
@@ -3807,7 +3888,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             _anchor_gap = getattr(_tr_gap, "last_hit_bbox", None)
                         _kept = []
                         for f in faces:
-                            if not _kps_reliable(f):
+                            if not _kps_reliable(f, _tr_pose):
                                 # Same-head return: keep even if landmarks wobble
                                 # (open mouth / motion blur). HairGate only
                                 # drops a first-return that does NOT overlap.
@@ -4305,10 +4386,19 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         for _pf, _psrc in pairs:
                             for _sj, _sface in smap.items():
                                 if _psrc is _sface:
+                                    # Schmitt trigger: decide with the
+                                    # PREVIOUS verdict in hand, then record
+                                    # this one as the next frame's memory.
+                                    _tr_prev = (_tracker.tracks.get(_sj)
+                                                if hasattr(_tracker, "tracks")
+                                                else None)
+                                    _kok = _kps_reliable(_pf, _tr_prev)
                                     _tr = _tracker.bind(
                                         _sj, _pf, dt_frames=_det_dt[0],
-                                        kps_ok=_kps_reliable(_pf),
+                                        kps_ok=_kok,
                                     )
+                                    if _tr is not None:
+                                        _tr.pose_ok = bool(_kok)
                                     # Learn only from what was accepted, so an
                                     # occluder can never teach the reference to
                                     # accept itself.

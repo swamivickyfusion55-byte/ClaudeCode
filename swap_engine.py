@@ -525,7 +525,8 @@ class TrackState:
                  "fake", "fake_corr", "fake_size", "fake_frame",
                  "_frame_wh", "_paste_frozen", "_reacquired",
                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
-                 "skin_ref", "skin_hits", "kps_scale", "skin_miss")
+                 "skin_ref", "skin_hits", "kps_scale", "skin_miss",
+                 "pose_ok")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -556,6 +557,10 @@ class TrackState:
         # ONLY from accepted frames, so without this the reference freezes the
         # moment it starts rejecting and can never recover. See _content_visible.
         self.skin_miss = 0
+        # Did this identity's LAST accepted read describe a good pose? The
+        # pose gate keeps painting through a marginal pose only for a head it
+        # was already painting - see _kps_reliable's second threshold.
+        self.pose_ok = False
         # Slowly-smoothed SIZE of this identity's landmark constellation.
         # Position and size do not deserve the same filter; sharing one is
         # what makes a pasted face pulse. See the rescale site below.
