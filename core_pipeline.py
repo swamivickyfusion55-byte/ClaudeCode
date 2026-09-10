@@ -1027,19 +1027,11 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
                 return None
             rec = dict(side[1])
             rec["det"] = False
-            rec["hold_dist"] = float(edge)
-            rec["one_sided"] = False
             if taper > 0:
                 rec["alpha"] = float(rec["alpha"] * _hold_fade(edge, taper))
             return rec if rec["alpha"] > 0.02 else None
         t = 0.0 if span <= 0 else (g - obs_lo[0]) / span
-        _br = _geom_lerp(obs_lo[1], obs_hi[1], t)
-        if _br is not None:
-            # Bracketed by two real sightings, so the geometry is anchored at
-            # both ends: never stale, whatever the span.
-            _br["hold_dist"] = 0.0
-            _br["one_sided"] = False
-        return _br
+        return _geom_lerp(obs_lo[1], obs_hi[1], t)
 
     if obs_lo is not None:
         # obs_hi is None: this identity has not been seen for REAL since
@@ -1062,12 +1054,6 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
         side = lo if lo is not None else obs_lo
         rec = dict(side[1])
         rec["det"] = False
-        # No LATER real sighting exists anywhere in what has been
-        # detected: this identity is not coming back. Detection for a
-        # chunk completes before any of it renders, so this is known
-        # per frame rather than guessed from tracker state.
-        rec["one_sided"] = True
-        rec["hold_dist"] = float(real_dist)
         rec["alpha"] = float(rec["alpha"] * _hold_fade(real_dist, eff_taper))
         return rec if rec["alpha"] > 0.02 else None
 
@@ -1088,7 +1074,6 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None):
     rec = dict(side[1])
     if dist > 0:
         rec["det"] = False
-        rec["hold_dist"] = float(dist)
         rec["alpha"] = float(rec["alpha"] * _hold_fade(dist, taper))
     return rec if rec["alpha"] > 0.02 else None
 
@@ -3098,19 +3083,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         _det_cache, _det_counter = [], [0]
         _no_face_streak = [0]
-        # "A detector call with nothing at all is pending acknowledgement."
-        # Separate from _no_face_streak because the two answer different
-        # questions and sharing one counter broke the motion veto: the streak
-        # must stay raised for as long as nothing paintable is being found
-        # (it drives the hold budget), whereas "did a real gap just end"
-        # is true for exactly ONE call - the first one after the silence.
-        # Sharing it meant _after_real_gap stayed true indefinitely while the
-        # veto kept rejecting, and its reset of the veto's own counters fired
-        # every call, so the drift term was recomputed from zero each time
-        # and the budget grew without bound. Measured on t_idlock: a decoy
-        # 320px away was correctly vetoed on the first call (dev 321 vs
-        # budget 321) and waved through on the next (dev 321 vs budget 466).
-        _gap_pending = [False]
         # (output_frame, was_anything_paintable_found) for every detector call,
         # in order. The hold budget has to be a statement about the frame being
         # rendered, and neither _no_face_streak nor a single "lost at" marker
@@ -3178,11 +3150,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # PASTE_FADE_SEC in config.py for why the fade exists at all.
         _paint_alpha = {j: 0.0 for j in smap.keys()}   # slot -> slewed opacity
         _held_rec = {j: None for j in smap.keys()}     # slot -> last composited record
-        # slot -> currently considered on-screen enough to paint. Carries the
-        # hysteresis for the frame-edge / containment tests: without a memory
-        # of the previous verdict there is only one threshold, and a face
-        # parked near it flips across it every frame.
-        _edge_on = {j: True for j in smap.keys()}
         _pending_tail = []                             # [(g, frame)] not yet emittable
         _det_dt = [1.0]                                # frames since the last detection
         _last_det_frame = [-1]
@@ -3771,7 +3738,6 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # None, not False: nothing was looked at, so nothing
                         # was disproved. The grace window bounds this case.
                         _vis_marks.append((g, None))
-                        _gap_pending[0] = True
                         # v11: a detector miss is not a reason to show the real
                         # face again. Carry the tracked geometry for a bounded
                         # number of frames so the swap rides through the gap.
@@ -3790,8 +3756,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         det_done = min(lim, max(0, g + 1))
                         _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
                         continue
-                    _after_real_gap = _gap_pending[0]
-                    _gap_pending[0] = False
+                    _after_real_gap = _no_face_streak[0] > 0
                     # v11.2.7: the reset moved to AFTER the gates, keyed on a
                     # candidate actually surviving them. Resetting here - on
                     # the mere fact that the detector returned a box - is what
@@ -3944,27 +3909,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         if _after_real_gap:
                             _kps_veto_streak[0] = 0
                             _kps_veto_frames[0] = 0.0
-                        # v11.2.9: the veto no longer skips itself after a
-                        # gap. The blanket skip reasoned that "a detection
-                        # right after a real absence carries no information
-                        # about where the subject is" - true of a LONG
-                        # absence, and false of a short one, because a head
-                        # cannot cross the room in ten frames. It was also
-                        # made redundant by the `_drift` term below, which
-                        # already widens the budget in proportion to how long
-                        # nothing has been seen: that is the same idea, but
-                        # proportionate instead of all-or-nothing.
-                        #
-                        # Measured directly (t_idlock): while a subject was
-                        # turned away, a face-coloured decoy 320px from her
-                        # last known position was accepted on the very first
-                        # detector call after the gap - because this skip
-                        # meant nothing ever checked the distance - and held
-                        # the binding for 85 frames, after which the paste
-                        # glided 319px back onto her as she returned. That is
-                        # the reported "face pasted at an incorrect place and
-                        # then moving towards and fixing on the subject".
-                        if pairs and len(pairs) == 1:
+                        if pairs and len(pairs) == 1 and not _after_real_gap:
                             _pf0, _psrc0 = pairs[0]
                             _tr0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
                             _new_kps = getattr(_pf0, "kps", None)
@@ -4891,120 +4836,17 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         _want[slot] = (None, 0.0, False)
                         continue
                     if not _r.get("det"):
-                        # v11.2.8: this was the last HARD cut left in the
-                        # pipeline. v11.2.5 made every other suppression path
-                        # fade instead of cutting, and deliberately left these
-                        # two alone as "departure" - but a face that is partly
-                        # outside the picture is not departing, it is partly
-                        # outside the picture, and both tests here were single
-                        # thresholds, so a face parked near one flipped across
-                        # it. Measured on t_edge: a face hovering with 45-80%
-                        # of itself on screen produced 3 presence transitions
-                        # and 6 dropped frames - visible flicker, from the
-                        # gates alone, with nothing wrong with the tracking.
-                        #
-                        # Both get hysteresis, and the containment cut becomes
-                        # a fade. The containment ramp already reaches zero at
-                        # the cut point, so cutting there was redundant with
-                        # the ramp AND skipped the slew; letting it fade costs
-                        # nothing and removes the step. A true departure still
-                        # cuts hard, but only once the face is BOTH touching
-                        # the edge and mostly gone, which is what departing
-                        # actually looks like.
+                        if (_touches_frame_edge(_r.get("hit_bbox"), frm.shape)
+                                or _touches_frame_edge(_r["bbox"], frm.shape)):
+                            _want[slot] = (None, 0.0, True)
+                            continue
                         _keep = _frame_containment(_r["bbox"], frm.shape)
-                        _was_on = bool(_edge_on.get(slot, True))
-                        # Asymmetric: keep painting until clearly gone, resume
-                        # only once clearly back. A single threshold is what
-                        # let a face parked near it flip across it every frame.
-                        _lo = 0.55 if _was_on else 0.70
-                        # How many frames since this identity was last really
-                        # SEEN, for THIS frame. v11.2.8 asked the tracker
-                        # instead - `tr.missed` - and that is the sixth
-                        # instance in this file of a check reading state that
-                        # does not mean what it assumes: detection for a whole
-                        # chunk completes before any of that chunk is
-                        # rendered, so `missed` holds its end-of-chunk value at
-                        # render time. Traced directly: a face that had moved
-                        # fully back into shot (containment 1.00) was hard-cut
-                        # for 21 consecutive frames because `missed` read 30
-                        # and a STALE hit_bbox still sat on the frame edge.
-                        # 51 of 240 frames reverted to the original face.
-                        _stale = float(_r.get("hold_dist", 0.0) or 0.0)
-                        _fresh = _stale <= max(2.0, float(_cadence_taper))
-                        # The last real sighting only says something about
-                        # where the subject is going while it is still recent.
-                        # The CURRENT geometry always does.
-                        _edge_now = _touches_frame_edge(_r["bbox"], frm.shape)
-                        _edge_seen = _touches_frame_edge(_r.get("hit_bbox"), frm.shape)
-                        _one_sided = bool(_r.get("one_sided", False))
-                        if (_edge_now or _edge_seen) and _one_sided and not _fresh:
-                            # The last thing anyone actually SAW was this
-                            # identity at a frame edge, and nothing has been
-                            # seen since. That is what walking out of shot
-                            # looks like, and it is the case v11.2.7's
-                            # unconditional edge cut existed for.
-                            #
-                            # Containment cannot substitute for it: a
-                            # departing subject's geometry FREEZES at her last
-                            # real sighting rather than coasting off-screen,
-                            # so her box sits ~83% inside the picture forever
-                            # (measured on t_exit) and no containment
-                            # threshold ever fires.
-                            #
-                            # Requiring staleness is what v11.2.7 was missing
-                            # in the other direction: it cut on the edge test
-                            # alone, so a face that had swept near an edge and
-                            # come back was still being judged on a stale
-                            # sighting from when it was there - 51 of 240
-                            # frames reverted to the original during an
-                            # ordinary sweep.
-                            #
-                            # `one_sided` is what finally separates the two,
-                            # and it is a fact rather than an inference: a
-                            # record is one-sided when NO later real sighting
-                            # of this identity exists anywhere in what has
-                            # been detected. Someone who has walked out of
-                            # shot has none; someone whose sweep merely
-                            # grazed an edge is seen again a few frames
-                            # later, so hers is bracketed. Staleness alone
-                            # cannot tell them apart, because both look
-                            # identical until the return arrives - and by
-                            # render time the return has either arrived or
-                            # it has not.
-                            #
-                            # Staleness is still required on top of it, and
-                            # measured both ways: `one_sided` alone cuts a
-                            # genuine departure instantly (t_exit 0) but costs
-                            # 3 transitions on a face parked at an edge,
-                            # because one-sidedness is judged against the
-                            # timeline built SO FAR - and at a chunk boundary
-                            # the next chunk's sightings are not in it yet, so
-                            # a face that will plainly be seen again briefly
-                            # looks abandoned. Requiring staleness as well
-                            # spans that boundary. The cost is the honest one:
-                            # a departure keeps its face about five frames
-                            # longer than v11.2.7 did, which is a sixth of a
-                            # second and far cheaper than flicker.
-                            _edge_on[slot] = False
+                        if _keep < 0.60:
                             _want[slot] = (None, 0.0, True)
                             continue
-                        if (_edge_now or _edge_seen) and _keep < _lo:
-                            # At an edge AND mostly out of shot.
-                            _edge_on[slot] = False
-                            _want[slot] = (None, 0.0, True)
-                            continue
-                        if _keep < _lo:
-                            # Mostly out of shot but not at an edge - fade
-                            # rather than cut. The ramp below already reaches
-                            # zero here, so cutting changed no target value
-                            # and only skipped the slew.
-                            _edge_on[slot] = False
-                            _want[slot] = (None, 0.0, False)
-                            continue
-                        _edge_on[slot] = True
                         if _keep < 0.85:
                             _r = dict(_r)
-                            _r["alpha"] *= min(1.0, (_keep - _lo) / max(1e-6, 0.85 - _lo))
+                            _r["alpha"] *= (_keep - 0.60) / 0.25
                     _want[slot] = (_r, float(_r.get("alpha", 1.0) or 0.0), False)
 
                 _fade_step = 1.0 / max(1.0, float(out_fps) * max(0.05, PASTE_FADE_SEC))

@@ -1,4 +1,4 @@
-"""Swamitech Phoenix v11.2.9 "SteadySize" configuration (v11.2.7 base, anti-flicker tightened)."""
+"""Swamitech Phoenix v11.2.7 "EyesOpen" configuration (the pipeline now looks at the pixels)."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -168,8 +168,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.9"
-BUILD = "SteadySize · size damps on its own clock, edges judged on fresh evidence"
+VERSION = "v11.2.7"
+BUILD = "EyesOpen · a face is only pasted where a face can be seen"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass
