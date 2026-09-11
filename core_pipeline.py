@@ -645,6 +645,96 @@ def _make_det_frame(frm, max_w=DET_MAX_W):
     det = cv2.resize(frm, (nw, nh), interpolation=cv2.INTER_AREA)
     return det, w / float(nw), h / float(nh)
 
+def _autodetect_rotation(vp, W, H, max_samples=4, max_probe_frames=300):
+    """Ask the face detector which orientation is upright, not the container.
+
+    Container rotation metadata is a CLAIM. When the decoder cannot read it
+    (see the call site), the only way left to find out whether a video is
+    sideways is to ask the thing that actually has to see the face: run the
+    detector on a few real frames at all four rotations and see which one it
+    prefers. A face detector finding a face is ground truth; a metadata flag
+    reading 0 is not evidence of anything, since "no flag" and "flag this
+    build cannot read" look identical from here.
+
+    Deliberately conservative: returns 0 (do nothing) unless one rotation
+    strictly beats an untouched frame, so a genuinely upright video - the
+    common case - is untouched and pays only the cost of the probe itself.
+    That cost is bounded: a handful of sample frames x 4 rotations, once,
+    and only when the metadata path already found nothing to act on.
+    """
+    cap = cv2.VideoCapture(vp)
+    if not cap.isOpened():
+        return 0
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        span = min(max(1, total), max_probe_frames) if total > 0 else max_probe_frames
+        idxs = sorted(set(
+            int(round(i * (span - 1) / max(1, max_samples - 1)))
+            for i in range(max_samples)
+        ))
+        samples = []
+        for i in idxs:
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            except Exception:
+                pass
+            ok, f = cap.read()
+            if ok and f is not None:
+                samples.append(f)
+        if not samples:
+            ok, f = cap.read()
+            if ok and f is not None:
+                samples.append(f)
+        if not samples:
+            return 0
+
+        codes = {0: None, 90: cv2.ROTATE_90_CLOCKWISE,
+                 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+        best_rot, best_hits, best_score, upright_hits = 0, -1, -1.0, 0
+        for rot, code in codes.items():
+            hits, score_sum = 0, 0.0
+            for f in samples:
+                rf = f if code is None else cv2.rotate(f, code)
+                try:
+                    det, sx, sy = _make_det_frame(rf, min(rf.shape[1], DET_MAX_W))
+                    found = _fa.get(det) or []
+                except Exception:
+                    found = []
+                if found:
+                    hits += 1
+                    score_sum += max(float(getattr(fc, "det_score", 0.0) or 0.0)
+                                     for fc in found)
+            if rot == 0:
+                upright_hits = hits
+            # Prefer more frames with a face, then higher confidence.
+            if hits > best_hits or (hits == best_hits and score_sum > best_score):
+                best_rot, best_hits, best_score = rot, hits, score_sum
+
+        # A false positive here is expensive: it rotates an already-working
+        # video and makes it WORSE, not better. So the bar is not "did some
+        # rotation do a little better" - it is "does the winner look like the
+        # face was actually found, and does upright look like it genuinely
+        # was not". Require a clear majority of samples agreeing on the
+        # winner, and upright to have all but struck out - not merely lost
+        # by one. Ties, "everything found nothing" (subject not on screen
+        # yet, or the detector cannot see this face at any angle), and any
+        # marginal case all resolve to "do nothing" rather than guess.
+        _n = max(1, len(samples))
+        if (best_rot != 0
+                and best_hits >= max(2, int(round(0.75 * _n)))
+                and upright_hits <= max(0, int(0.25 * _n))):
+            logging.info("rotation autoprobe: %d/%d sampled frames found a "
+                         "face at 0deg vs %d/%d at %ddeg - the container's "
+                         "rotation flag was unreadable, correcting every "
+                         "frame by %ddeg before detection",
+                         upright_hits, len(samples), best_hits, len(samples),
+                         best_rot, best_rot)
+            return best_rot
+        return 0
+    finally:
+        cap.release()
+
+
 def _scale_faces(faces, sx, sy):
     if sx == 1.0 and sy == 1.0:
         return faces
@@ -3496,14 +3586,46 @@ def _run_job_body(jid, src_paths, vp, cfg):
             except Exception:
                 cap.release()
                 cap = cv2.VideoCapture(vp)
+        elif _rot_meta == 0:
+            # The metadata path above only works when the decoder both
+            # EXPOSES CAP_PROP_ORIENTATION_META and reports it correctly.
+            # Plenty of OpenCV/ffmpeg builds do neither - the property comes
+            # back 0 whether the video is upright or genuinely rotated, so a
+            # rotated video with an unreadable flag sails through the check
+            # above with _rot_apply left at 0, and every frame still reaches
+            # the detector on its side. That is indistinguishable, from
+            # inside this function, from a video that really has no rotation
+            # flag - which is exactly why the fix above was not enough on
+            # its own, and is stated as such rather than left to be found
+            # the same way it was found the first time (a user's log).
+            #
+            # This does not read metadata at all. It asks the detector
+            # directly: sample a few real frames, try each of the 4
+            # rotations, and see which orientation the face detector - the
+            # thing that actually has to work - agrees is upright. That
+            # is ground truth; a container flag is only ever a claim about
+            # ground truth.
+            #
+            # Bounded and cheap: a handful of frames x 4 rotations, ONCE,
+            # only when the metadata path found nothing to act on. On a
+            # genuinely upright video this typically confirms 0 deg and
+            # changes nothing; on a rotated video whose flag this build
+            # cannot read, this is the only thing that catches it.
+            try:
+                _rot_apply = _autodetect_rotation(vp, W, H)
+            except Exception as _e:
+                logging.debug("rotation autoprobe skipped: %s", _e)
+                _rot_apply = 0
         if _rot_apply in (90, 270):
             W, H = H, W
         if _rot_apply:
-            logging.info("video carries a %d° rotation flag that the decoder did "
-                         "not apply - rotating every frame before detection "
-                         "(source %dx%d -> upright %dx%d)",
-                         _rot_apply, H if _rot_apply in (90, 270) else W,
-                         W if _rot_apply in (90, 270) else H, W, H)
+            logging.info("rotating every frame %d° before detection (source "
+                         "%dx%d -> upright %dx%d) - %s",
+                         _rot_apply,
+                         H if _rot_apply in (90, 270) else W,
+                         W if _rot_apply in (90, 270) else H, W, H,
+                         "from the container's rotation flag" if _rot_meta == _rot_apply
+                         else "from the detector autoprobe, container flag was unreadable")
         _ROT_CODE = {90: cv2.ROTATE_90_CLOCKWISE,
                      180: cv2.ROTATE_180,
                      270: cv2.ROTATE_90_COUNTERCLOCKWISE}.get(_rot_apply)
