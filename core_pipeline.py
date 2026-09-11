@@ -1240,6 +1240,13 @@ def _load(prefer_gpu=None):
             except Exception:
                 pass
             fa.prepare(ctx_id=ctx, det_size=det_size, det_thresh=DET_THRESH)
+            # Worth stating in the log: this is the resolution the detector
+            # ACTUALLY sees, and it is the lever that decides whether a small
+            # or distant face is findable at all. PHOENIX_DET_SIZE overrides it.
+            logging.info("detector input %dx%d · det_thresh=%.2f%s",
+                         det_size[0], det_size[1], float(DET_THRESH),
+                         " (PHOENIX_DET_SIZE override)"
+                         if os.environ.get("PHOENIX_DET_SIZE", "").strip() else "")
         except TypeError:
             fa.prepare(ctx_id=ctx, det_size=DET_SIZE)
             try:
@@ -3233,6 +3240,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
         stats = {
             "detector_calls": 0, "tracker_hits": 0, "gfpgan_calls": 0,
             "swap_calls": 0, "swap_ok": 0, "swap_skips": 0, "det_empty": 0,
+            "frames_painted": 0,
             "swap_error": None, "swap_error_logged": False,
             "frames_in": 0, "frames_out": 0,
             "det_times": [], "swap_times": [],
@@ -3896,6 +3904,13 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         ) and _hi_probe_enabled
                     if needs_hi or (not faces and _no_face_streak[0] > 0):
                         try:
+                            # NOTE (v11.2.12): raising this ceiling toward the
+                            # native width was tried and reverted. RetinaFace
+                            # resizes whatever it is handed down to det_size
+                            # (640x640) internally, so a wider probe frame does
+                            # not give it more face to work with - it only costs
+                            # a larger resize. The lever for a face that is too
+                            # small to detect is DET_SIZE, not this width.
                             hi_w = min(frm.shape[1], 1280 if multi_face_safe else 1024)
                             det2, sx2, sy2 = _make_det_frame(frm, hi_w)
                             raw2 = _fa.get(det2) or []
@@ -5225,6 +5240,15 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     out = frm
                 elif k not in swap_keys:
                     stats["frames_filled"] += 1
+                # The number that actually answers "did it work": how many
+                # OUTPUT frames carry a swapped face. Everything else in this
+                # stats block counts work ATTEMPTED - detector probes, swap
+                # calls, reuses - and a job can rack up hundreds of those while
+                # painting almost nothing, which is exactly the case that kept
+                # being reported as "the original face only" and kept being
+                # invisible in the log.
+                if any_ok:
+                    stats["frames_painted"] += 1
 
                 writer_ok = _safe_result_put(out)
                 if writer_ok: stats["frames_out"] += 1
@@ -5347,8 +5371,12 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # "local variable 'res' referenced before assignment".
         res = final
         logging.info(
-            "Done in %.1fs — frames=%d; detector_calls=%d; swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d",
-            time.time() - t0, stats["frames_out"], stats["detector_calls"], stats["swap_calls"],
+            "Done in %.1fs — frames=%d; FACE PAINTED ON %d/%d FRAMES (%.0f%%); "
+            "detector_calls=%d (empty=%d); swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d",
+            time.time() - t0, stats["frames_out"],
+            stats["frames_painted"], stats["frames_out"],
+            100.0 * stats["frames_painted"] / max(1, stats["frames_out"]),
+            stats["detector_calls"], stats["det_empty"], stats["swap_calls"],
             (sum(stats["det_times"]) / len(stats["det_times"])) if stats["det_times"] else 0.0,
             (sum(stats["swap_times"]) / len(stats["swap_times"])) if stats["swap_times"] else 0.0,
             stats["encode_seconds"], stats["frames_filled"], stats["kps_rejected"],
@@ -5390,8 +5418,30 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # model stayed invisible. The output video in that case is the input
         # video, so say so instead of handing back a success message and a
         # swaps= count that only ever counted attempts.
+        # Coverage, not attempts, decides whether this job did its job. A run
+        # that painted 87 of 451 frames is not a success with a caveat - it is
+        # four fifths of a video showing the original face, which is what was
+        # reported and what no counter here could previously express.
+        _painted = int(stats.get("frames_painted", 0))
+        _outn = max(1, int(stats.get("frames_out", 0)))
+        _cover = 100.0 * _painted / _outn
         _swapped_none = (int(stats.get("swap_ok", 0)) == 0
                          and int(stats.get("detector_calls", 0)) > 0)
+        # Low coverage is NOT by itself a fault. A subject who walks out of
+        # frame, or stands behind someone for half the clip, SHOULD leave most
+        # frames unpainted - that is the engine working. Warning on coverage
+        # alone fired on exactly those cases in the regression suite, and in one
+        # of them announced "the detector found nothing" over a clip where the
+        # detector found a face in every single probe. A message that can say
+        # something false is worse than no message.
+        #
+        # The unambiguous signal is the detector going blind: it was asked, and
+        # it came back empty, on the overwhelming majority of probes. Nothing a
+        # subject can legitimately do produces that - if they leave, detection
+        # stops being attempted at that cadence.
+        _dc0 = int(stats.get("detector_calls", 0))
+        _de0 = int(stats.get("det_empty", 0))
+        _blind = (not _swapped_none) and _dc0 >= 10 and _de0 >= 0.70 * _dc0
         if _swapped_none:
             # Name the cause instead of just the symptom. The two produce very
             # different numbers and need very different fixes: a detector that
@@ -5413,6 +5463,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         f"swap was scheduled.")
             _warn = (f"⚠ NO FACES WERE SWAPPED — the output is your original "
                      f"video. {_why}")
+        elif _blind:
+            logging.error("job %s: the detector found nothing in %d of %d probes; "
+                          "face painted on %d/%d frames (%.0f%%)",
+                          jid, _de0, _dc0, _painted, _outn, _cover)
+        if _swapped_none:
             logging.error("job %s: %s | detector_calls=%d empty=%d "
                           "kps_rejected=%d swap_attempts=%d",
                           jid, _warn, _dc, _de,
@@ -5423,8 +5478,16 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 jobs[jid].update(
                     status='done', result_path=res, server_result_path=res, progress=100, done_at=time.time(), expires_at=expires_at, eta_seconds=None,
                     message=(_warn if _swapped_none else
-                             f"Done — {produced} frames · swaps={stats['swap_ok']}/{stats['swap_calls']} · detects={stats['detector_calls']} · {ow}×{oh} · {quality} · "
-                             f"{f'{m}m {s}s' if m else f'{s}s'} · CPU V4{enc_note}{save_note}")
+                             (f"⚠ The face detector came back empty on {_de0} of {_dc0} "
+                              f"probes, so the face was painted on only {_painted}/{_outn} "
+                              f"frames ({_cover:.0f}%) and the rest show the original. The "
+                              f"detector is not seeing the face in this clip — usual causes "
+                              f"are a portrait video reaching it rotated, a face too small or "
+                              f"far from camera, heavy motion blur, or very low light."
+                              f"{save_note}"
+                              if _blind else
+                              f"Done — {produced} frames · face on {_painted}/{_outn} ({_cover:.0f}%) · swaps={stats['swap_ok']}/{stats['swap_calls']} · detects={stats['detector_calls']} · {ow}×{oh} · {quality} · "
+                              f"{f'{m}m {s}s' if m else f'{s}s'} · CPU V4{enc_note}{save_note}"))
                 )
         _persist_job(jid, force=True)
         _touch_session_expiry()

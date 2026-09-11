@@ -51,6 +51,14 @@ except Exception:
     VERSION_FULL = "v11.2.3 (SolidFace)"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# VERSION_FULL was imported and then never shown anywhere - not in the UI, not
+# in the log. That is why a Space running a mixture of files from three builds
+# looked exactly like one running a matched set, and why every log pasted for
+# diagnosis had to be read without knowing which code produced it. Say it once,
+# first, on every start.
+logging.info("=" * 60)
+logging.info("Swamitech Phoenix %s", VERSION_FULL)
+logging.info("=" * 60)
 
 
 
