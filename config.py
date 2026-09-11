@@ -168,8 +168,8 @@ SERVER_OUTPUT_TTL_SEC = 10800  # exactly 3 hours after successful completion
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.10"
-BUILD = "OpenEyes · the gate can widen, and it grades instead of vetoing"
+VERSION = "v11.2.11"
+BUILD = "SaysWhatHappened · a job that swaps nothing no longer reports success"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

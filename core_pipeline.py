@@ -1262,20 +1262,61 @@ def _load(prefer_gpu=None):
             target = "cpu"
             _fa = _mk_fa(prov, -1)
 
+    # THE weights are not a pinned dependency. Everything else this build runs
+    # on is frozen in requirements.txt; inswapper_128.onnx is fetched from
+    # community mirrors at RUNTIME, and those get removed, gated or
+    # rate-limited without notice. That makes this the one part of the stack
+    # that can change underneath byte-identical code - which is the exact
+    # shape of "the same version worked last week and returns the original
+    # face today". Treat it accordingly: cache it somewhere that survives, and
+    # never let a failure here pass quietly.
     _fp32 = [
         ("deepinsight/inswapper", "inswapper_128.onnx"),
         ("ezioruan/inswapper_128.onnx", "inswapper_128.onnx"),
         ("Devia/inswapper_128", "inswapper_128.onnx"),
+        ("hexgrad/inswapper", "inswapper_128.onnx"),
+        ("netrunner-exe/Insight-Swap-models", "inswapper_128.onnx"),
     ]
-    mp_ = None
-    for repo, fn in _fp32:
+    # /tmp is wiped on every Space restart, so the old cache_dir re-downloaded
+    # the weights on every cold start and re-rolled the dice against whichever
+    # mirrors still exist that morning. /data persists. One successful download
+    # then survives the mirrors themselves disappearing.
+    _cache_dir = "/tmp/models"
+    for _cand in (os.environ.get("PHOENIX_MODEL_CACHE", "").strip(),
+                  "/data/models"):
+        if not _cand:
+            continue
         try:
-            mp_ = hf_hub_download(repo, fn, cache_dir="/tmp/models")
-            break
+            os.makedirs(_cand, exist_ok=True)
+            if os.access(_cand, os.W_OK):
+                _cache_dir = _cand
+                break
         except Exception:
             pass
+    mp_ = None
+    _dl_errors = []
+    for repo, fn in _fp32:
+        try:
+            mp_ = hf_hub_download(repo, fn, cache_dir=_cache_dir)
+            break
+        except Exception as _e:
+            _dl_errors.append(f"{repo}: {type(_e).__name__}: {_e}")
     if mp_ is None:
-        raise RuntimeError("Could not download inswapper_128.onnx")
+        raise RuntimeError(
+            "Could not download inswapper_128.onnx from any mirror - the face "
+            "swapper cannot run. Tried:\n  " + "\n  ".join(_dl_errors))
+    # A truncated download is worse than a failed one: it leaves a file that
+    # get_model() may accept and then produce nothing from. The real weights
+    # are ~529 MB; anything under 100 MB is not them.
+    try:
+        _sz = os.path.getsize(mp_)
+        if _sz < 100 * 1024 * 1024:
+            raise RuntimeError(
+                f"inswapper_128.onnx at {mp_} is only {_sz/1048576:.1f} MB - "
+                "the download is truncated or the mirror served an error page. "
+                "Delete that cache directory and restart to re-fetch it.")
+    except OSError:
+        pass
 
     try:
         _sw = insightface.model_zoo.get_model(mp_, providers=prov)
@@ -1291,6 +1332,18 @@ def _load(prefer_gpu=None):
         target = "cpu"
         _fa = _mk_fa(prov, -1)
         _sw = insightface.model_zoo.get_model(mp_, providers=prov)
+
+    # insightface.model_zoo.get_model() returns None for a file it cannot
+    # route, rather than raising. Without this check that None was carried all
+    # the way to the compositor, which quietly became None too, and every
+    # frame then fell through the swap loop untouched - a whole video of the
+    # original face, reported as "Done". Never again: no swapper, no job.
+    if _sw is None:
+        raise RuntimeError(
+            f"insightface could not load the swapper from {mp_} - get_model() "
+            "returned None. The file is present but is not a usable "
+            "inswapper_128.onnx (wrong file, corrupt download, or an "
+            "insightface version that no longer recognises it).")
 
     if _ort_patched and _ort_mod is not None:
         try:
@@ -1347,6 +1400,16 @@ class ModelRegistry:
                 return self.face_analysis, self.swapper
             # Load via existing _load path under registry lock
             _load(prefer_gpu=(target == "gpu"))
+            # Caching a None swapper here is how a single bad load became a
+            # permanent one: the cache test above only asks whether the fields
+            # are set, so a null swapper stored once was handed out for the
+            # life of the container without ever retrying the download.
+            if _fa is None or _sw is None:
+                self.face_analysis = self.swapper = self.device = None
+                raise RuntimeError(
+                    "Face models did not load (analysis=%s, swapper=%s)"
+                    % ("ok" if _fa is not None else "MISSING",
+                       "ok" if _sw is not None else "MISSING"))
             self.face_analysis, self.swapper = _fa, _sw
             self.device = _loaded_device[0] or target
             return self.face_analysis, self.swapper
@@ -1789,11 +1852,17 @@ def _reuse_one(work, orig, rec, quality, *, rivals=None, cached=None):
 
 def _swap_one_legacy(work, orig, face, src_face, quality, alpha=1.0):
     """Image-space fallback for inswapper builds without an exposed affine."""
+    if _sw is None:
+        raise RuntimeError("the swapper model is not loaded")
     try:
         raw = _sw.get(work, face, src_face, paste_back=True)
-    except Exception:
+    except Exception as e:
+        # Returning the untouched frame on a bare except is what let a broken
+        # model look like a working one for a whole video.
+        logging.error("legacy swap failed: %s", e)
         return work
     if raw is None:
+        logging.error("legacy swap returned nothing for this face")
         return work
 
     res = raw
@@ -3163,7 +3232,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
         stats = {
             "detector_calls": 0, "tracker_hits": 0, "gfpgan_calls": 0,
-            "swap_calls": 0, "swap_skips": 0, "frames_in": 0, "frames_out": 0,
+            "swap_calls": 0, "swap_ok": 0, "swap_skips": 0, "det_empty": 0,
+            "swap_error": None, "swap_error_logged": False,
+            "frames_in": 0, "frames_out": 0,
             "det_times": [], "swap_times": [],
             "frames_filled": 0, "kps_rejected": 0,
             "encode_seconds": 0.0, "processing_seconds": 0.0,
@@ -3371,6 +3442,69 @@ def _run_job_body(jid, src_paths, vp, cfg):
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
         total_src_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
         W, H = int(cap.get(3)), int(cap.get(4))
+
+        # Display rotation. A phone shot in portrait is almost always STORED
+        # landscape with a 90/270 rotation flag in the container; players and
+        # ffmpeg honour that flag, and OpenCV - depending on build and backend
+        # - may not. When it does not, every frame reaches the detector on its
+        # side, and RetinaFace has very little rotation tolerance: it finds
+        # essentially nothing, the hi-res rescue probe then runs on every frame
+        # too (which is why a failing job also runs ~10x slower than a working
+        # one), no identity is ever confirmed, and the job finishes having
+        # swapped nothing. The user gets their original video back, upright,
+        # because the ROTATION was never the broken part - the detection was.
+        #
+        # This is the one failure mode that depends on WHICH video is uploaded
+        # rather than on the code, so the same build genuinely can work on one
+        # clip and do nothing on the next.
+        _rot_meta = 0
+        try:
+            _rot_meta = int(cap.get(cv2.CAP_PROP_ORIENTATION_META) or 0) % 360
+        except Exception:
+            _rot_meta = 0
+        # Escape hatch for containers whose OpenCV build cannot read the flag
+        # at all (it returns 0 and there is nothing to compare against).
+        try:
+            _rot_env = os.environ.get("PHOENIX_FORCE_ROTATION", "").strip()
+            if _rot_env:
+                _rot_meta = int(_rot_env) % 360
+        except Exception:
+            pass
+        # Only rotate if OpenCV did NOT already do it. For a 90/270 flag the
+        # upright frame is taller than it is wide relative to the reported
+        # dimensions, so comparing the first decoded frame against W/H says
+        # which of the two happened - no guessing, and no double rotation on
+        # builds that handle it for us.
+        _rot_apply = 0
+        if _rot_meta in (90, 180, 270):
+            _ok0, _frm0 = cap.read()
+            if _ok0 and _frm0 is not None:
+                _dh, _dw = _frm0.shape[:2]
+                _already = (_rot_meta in (90, 270) and _dw == H and _dh == W)
+                if not _already:
+                    _rot_apply = _rot_meta
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            except Exception:
+                cap.release()
+                cap = cv2.VideoCapture(vp)
+        if _rot_apply in (90, 270):
+            W, H = H, W
+        if _rot_apply:
+            logging.info("video carries a %d° rotation flag that the decoder did "
+                         "not apply - rotating every frame before detection "
+                         "(source %dx%d -> upright %dx%d)",
+                         _rot_apply, H if _rot_apply in (90, 270) else W,
+                         W if _rot_apply in (90, 270) else H, W, H)
+        _ROT_CODE = {90: cv2.ROTATE_90_CLOCKWISE,
+                     180: cv2.ROTATE_180,
+                     270: cv2.ROTATE_90_COUNTERCLOCKWISE}.get(_rot_apply)
+
+        def _upright(_f):
+            """Apply the container's rotation flag when the decoder did not."""
+            if _ROT_CODE is None or _f is None:
+                return _f
+            return cv2.rotate(_f, _ROT_CODE)
         ow, oh = _fit_box(RES.get(cfg['resolution'], (1280, 720)), W, H)
         # Requested FPS should match output when possible (audit NSDOS-006)
         requested_fps = float(fps) if fps else float(src_fps)
@@ -3562,6 +3696,10 @@ def _run_job_body(jid, src_paths, vp, cfg):
 
                     ok, frm = cap.read()
                     if not ok or frm is None: break
+                    # Upright BEFORE anything measures or detects on it, so
+                    # every downstream size, box and landmark is in the same
+                    # frame of reference as the output.
+                    frm = _upright(frm)
                     if frm.shape[1] == ow and frm.shape[0] == oh:
                         resized = frm
                     else:
@@ -3842,6 +3980,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     last_det_g[0] = g
 
                     if not faces:
+                        stats["det_empty"] = stats.get("det_empty", 0) + 1
                         _no_face_streak[0] += 1
                         # None, not False: nothing was looked at, so nothing
                         # was disproved. The grace window bounds this case.
@@ -4810,15 +4949,32 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # rival-hull cut, where the geometry to do it properly is
                     # actually available.
                     try:
-                        fake, M = comp._raw_swap(frm, face, src) if comp is not None else (None, None)
+                        if comp is None:
+                            raise RuntimeError(
+                                "no compositor: the swapper model is not loaded")
+                        fake, M = comp._raw_swap(frm, face, src)
                     except Exception as e:
-                        logging.debug("swap failed on slot %s: %s", slot, e)
+                        # debug level hid this completely at the default INFO
+                        # setting, so a job that swapped NOTHING looked exactly
+                        # like a job that worked. Say it once, loudly, then go
+                        # back to debug so a genuine per-frame miss does not
+                        # flood the log.
+                        if not stats.get("swap_error_logged"):
+                            stats["swap_error_logged"] = True
+                            stats["swap_error"] = f"{type(e).__name__}: {e}"
+                            logging.error("SWAP FAILED on slot %s: %s", slot, e)
+                        else:
+                            logging.debug("swap failed on slot %s: %s", slot, e)
                         fake, M = None, None
                     stats["swap_calls"] += 1
                     if fake is None or M is None:
                         if M is None:
                             _legacy_mode[0] = True
                         continue
+                    # swap_calls counts ATTEMPTS, so it reads the same whether
+                    # every swap worked or every one failed. This counts the
+                    # ones that actually produced a face.
+                    stats["swap_ok"] += 1
                     # Degenerate output (a solid or near-solid patch) is a
                     # property of the CROP, so test it once here rather than
                     # re-testing the composited frame every time the crop is
@@ -5229,12 +5385,46 @@ def _run_job_body(jid, src_paths, vp, cfg):
             if extra: save_note += extra
         except Exception as e:
             logging.warning("optional auto-save: %s", e)
+        # A job that detected faces and swapped NONE of them has not finished,
+        # it has failed - and reporting "Done" for it is how a broken swapper
+        # model stayed invisible. The output video in that case is the input
+        # video, so say so instead of handing back a success message and a
+        # swaps= count that only ever counted attempts.
+        _swapped_none = (int(stats.get("swap_ok", 0)) == 0
+                         and int(stats.get("detector_calls", 0)) > 0)
+        if _swapped_none:
+            # Name the cause instead of just the symptom. The two produce very
+            # different numbers and need very different fixes: a detector that
+            # never found the face at all, versus a swapper that was handed
+            # faces and produced nothing from them.
+            _dc = int(stats.get("detector_calls", 0))
+            _de = int(stats.get("det_empty", 0))
+            if stats.get("swap_error"):
+                _why = stats["swap_error"]
+            elif _dc and _de >= int(_dc * 0.8):
+                _why = (f"the face detector found nothing in {_de} of {_dc} "
+                        f"probes, so there was never a face to swap. The most "
+                        f"common cause is a video whose frames reach the "
+                        f"detector rotated (a portrait phone clip), followed by "
+                        f"a face too small or too far from camera.")
+            else:
+                _why = (f"faces were detected ({_dc - _de} of {_dc} probes) but "
+                        f"none was ever confirmed as the locked identity, so no "
+                        f"swap was scheduled.")
+            _warn = (f"⚠ NO FACES WERE SWAPPED — the output is your original "
+                     f"video. {_why}")
+            logging.error("job %s: %s | detector_calls=%d empty=%d "
+                          "kps_rejected=%d swap_attempts=%d",
+                          jid, _warn, _dc, _de,
+                          int(stats.get("kps_rejected", 0)),
+                          int(stats.get("swap_calls", 0)))
         with _lock:
             if jid in jobs:
                 jobs[jid].update(
                     status='done', result_path=res, server_result_path=res, progress=100, done_at=time.time(), expires_at=expires_at, eta_seconds=None,
-                    message=f"Done — {produced} frames · swaps={stats['swap_calls']} · detects={stats['detector_calls']} · {ow}×{oh} · {quality} · "
-                            f"{f'{m}m {s}s' if m else f'{s}s'} · CPU V4{enc_note}{save_note}"
+                    message=(_warn if _swapped_none else
+                             f"Done — {produced} frames · swaps={stats['swap_ok']}/{stats['swap_calls']} · detects={stats['detector_calls']} · {ow}×{oh} · {quality} · "
+                             f"{f'{m}m {s}s' if m else f'{s}s'} · CPU V4{enc_note}{save_note}")
                 )
         _persist_job(jid, force=True)
         _touch_session_expiry()
