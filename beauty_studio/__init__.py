@@ -9,7 +9,7 @@ pipeline, not only through the UI.
 """
 from .settings import DEFAULT_PRESET, PRESETS, Settings  # noqa: F401
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = ["Settings", "PRESETS", "DEFAULT_PRESET", "render_video",
            "process_image", "FrameProcessor", "__version__"]
 

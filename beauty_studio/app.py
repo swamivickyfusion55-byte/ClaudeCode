@@ -38,7 +38,7 @@ from .settings import DEFAULT_PRESET, PRESETS, Settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.2.0 (Aurora)"
+VERSION = "v1.3.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -78,7 +78,10 @@ GROUPS: list[tuple[str, list[tuple[str, str, bool, str]]]] = [
     ("Body shape", [
         ("body_slim", "Slim silhouette", False, "Narrows the whole visible body"),
         ("waist_shape", "Waist", False, "Pinches at the waist line"),
-        ("curve_shape", "Curves (hourglass)", False, "In at the waist, out at bust and hips"),
+        ("curve_shape", "Curvy (hourglass)", False,
+         "One control for the whole shape: in at the waist, out at bust and hips"),
+        ("bust_shape", "Bust", False, "Fills out the chest line on its own"),
+        ("hip_shape", "Hips", False, "Widens the hips and upper thighs on its own"),
         ("posture", "Posture", True, "Lifts (right) or drops (left) the shoulders"),
     ]),
     ("Hair", [

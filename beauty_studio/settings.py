@@ -32,6 +32,11 @@ CAPS = {
     "body_slim": 0.75,
     "waist_shape": 0.85,
     "curve_shape": 0.80,
+    # Widening is capped lower than narrowing on purpose: an outward push
+    # reads as a distortion several percent sooner than an inward one, because
+    # it has to invent silhouette where the background used to be.
+    "bust_shape": 0.70,
+    "hip_shape": 0.75,
     "hair_detail": 0.80,
     "hair_shine": 0.65,
     "hair_volume": 0.50,
@@ -80,7 +85,9 @@ class Settings:
     # ---- body shape ------------------------------------------------------
     body_slim: float = 0.20         # whole-silhouette narrowing
     waist_shape: float = 0.25       # waist pinch
-    curve_shape: float = 0.20       # hourglass: waist in, hips/bust out
+    curve_shape: float = 0.20       # hourglass: waist in, hips/bust out, together
+    bust_shape: float = 0.0         # bust/chest width on its own
+    hip_shape: float = 0.0          # hip/thigh width on its own
     posture: float = 0.0            # shoulder lift/straighten, subtle
 
     # ---- hair ------------------------------------------------------------
@@ -138,7 +145,8 @@ class Settings:
 
     def touches_body(self) -> bool:
         return any(getattr(self, k) != 0 for k in
-                   ("body_slim", "waist_shape", "curve_shape", "posture"))
+                   ("body_slim", "waist_shape", "curve_shape", "bust_shape",
+                    "hip_shape", "posture"))
 
     def touches_hair(self) -> bool:
         return any(getattr(self, k) > 0 for k in
@@ -190,6 +198,27 @@ PRESETS: dict[str, Settings] = {
         hair_detail=0.55, hair_shine=0.50, hair_volume=0.35, hair_frizz=0.55,
         hair_richness=0.45, naturalness=0.85),
 
+    # The hourglass, asked for by name: waist in, bust and hips out, with a
+    # light grade and retouch so it does not look like a shape edit sitting on
+    # ungraded footage.
+    "Curvy": Settings(
+        hdr_strength=0.50, clarity=0.35, vibrance=0.35, contrast=0.22, bloom=0.16,
+        sharpen=0.28, skin_smooth=0.45, texture=0.65, skin_even=0.45, blemish=0.55,
+        glow=0.28, eye_brighten=0.40, teeth_whiten=0.30, lip_enhance=0.28,
+        under_eye=0.40, face_slim=0.22, chin_shape=0.15, nose_slim=0.05,
+        eye_enlarge=0.05, body_slim=0.20, waist_shape=0.60, curve_shape=0.45,
+        bust_shape=0.45, hip_shape=0.55, hair_detail=0.45, hair_shine=0.35,
+        hair_volume=0.25, hair_frizz=0.45, hair_richness=0.35, naturalness=0.95),
+
+    "Curvy (strong)": Settings(
+        hdr_strength=0.55, clarity=0.38, vibrance=0.42, contrast=0.24, bloom=0.22,
+        sharpen=0.30, skin_smooth=0.55, texture=0.60, skin_even=0.55, blemish=0.65,
+        glow=0.35, eye_brighten=0.48, teeth_whiten=0.35, lip_enhance=0.35,
+        under_eye=0.48, face_slim=0.30, chin_shape=0.20, nose_slim=0.10,
+        eye_enlarge=0.10, body_slim=0.30, waist_shape=0.90, curve_shape=0.70,
+        bust_shape=0.70, hip_shape=0.80, hair_detail=0.50, hair_shine=0.42,
+        hair_volume=0.30, hair_frizz=0.50, hair_richness=0.40, naturalness=1.0),
+
     # Shape work only - for when the grade is already done elsewhere.
     "Shape Only": Settings(
         hdr_strength=0.0, clarity=0.0, vibrance=0.0, contrast=0.0, bloom=0.0,
@@ -197,6 +226,7 @@ PRESETS: dict[str, Settings] = {
         glow=0.0, eye_brighten=0.0, teeth_whiten=0.0, lip_enhance=0.0,
         under_eye=0.0, face_slim=0.30, chin_shape=0.20, nose_slim=0.12,
         eye_enlarge=0.10, body_slim=0.25, waist_shape=0.30, curve_shape=0.25,
+        bust_shape=0.20, hip_shape=0.25,
         hair_detail=0.0, hair_shine=0.0, hair_volume=0.0, hair_frizz=0.0,
         hair_richness=0.0, naturalness=1.0),
 
@@ -222,6 +252,7 @@ PERSON_AMOUNTS = (
     "skin_smooth", "skin_even", "blemish", "glow", "eye_brighten",
     "teeth_whiten", "lip_enhance", "under_eye", "face_slim", "chin_shape",
     "nose_slim", "eye_enlarge", "body_slim", "waist_shape", "curve_shape",
+    "bust_shape", "hip_shape",
     "hair_detail", "hair_shine", "hair_volume", "hair_frizz", "hair_richness",
 )
 

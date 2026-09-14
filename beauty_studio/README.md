@@ -59,13 +59,20 @@ the silhouette from the segmentation mask - not the pose skeleton, which says
 nothing about how wide a coat is - with the waist, bust and hip bands located
 from the pose.
 
-How much it actually moves, measured at the waist on a standing subject:
+Bust, waist and hips are separate bands, positioned from the shoulder line and
+the torso length rather than read straight off the pose - a subject framed from
+the chest up still gets a waist in a sensible place instead of one extrapolated
+below the bottom of the picture. **Curvy (hourglass)** moves all three at once;
+**Bust** and **Hips** move one without the other.
 
-| | waist narrowing |
-| --- | --- |
-| Natural | ~8% |
-| Glam | ~14% |
-| every body slider at 100 | ~22% |
+Measured on a standing subject:
+
+| | bust | waist | hips |
+| --- | --- | --- | --- |
+| Natural | – | −10% | – |
+| Glam | – | −14% | – |
+| Curvy | +8% | −18% | +10% |
+| Curvy (strong) | +13% | −23% | +13% |
 
 Two ceilings keep that honest: the per-row total is capped at 30% of the body's
 own half-width, so three sliders pushed up together cannot compound into a
@@ -92,6 +99,8 @@ found one ramps up over a few, so effects never pop on and off between frames.
 | **Professional Portrait** | Interviews, corporate, talking heads. Clean skin, almost no shape work. |
 | **HDR Cinematic** | Strong tone mapping and local contrast, warm, filmic. |
 | **Glam** | Everything up, still inside the caps. |
+| **Curvy** | The hourglass by name: waist in, bust and hips out, lightly graded. |
+| **Curvy (strong)** | The same shape, pushed. |
 | **Shape Only** | Reshaping with no grade or retouch. |
 | **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
 

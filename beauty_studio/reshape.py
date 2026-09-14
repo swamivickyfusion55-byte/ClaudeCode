@@ -301,6 +301,45 @@ class BodyProfiler:
                 self._valid.update(v).copy())
 
 
+def _torso_length(body: Body, frame_h: int) -> float:
+    """
+    Shoulders-to-hips distance, sanity-checked against shoulder width.
+
+    The pose model reports hip landmarks even when the hips are outside the
+    frame, by extrapolation, and it is confident about them. On a
+    head-and-shoulders shot that extrapolation can be wildly long or short,
+    and since every band position is a fraction of this number, a bad torso
+    length puts the waist somewhere that is not the waist. Human proportions
+    are reliable enough to catch that: the torso runs roughly 1.2 to 2.2
+    shoulder widths.
+    """
+    torso = abs(body.hip_y - body.shoulder_y)
+    plausible_lo = body.shoulder_w * 1.1
+    plausible_hi = body.shoulder_w * 2.4
+    if not (plausible_lo <= torso <= plausible_hi):
+        torso = body.shoulder_w * 1.6
+    return max(torso, frame_h * 0.06)
+
+
+def _torso_bands(body: Body, torso: float, frame_h: int) -> tuple[float, float, float]:
+    """Row positions for the bust, waist and hip bands.
+
+    Derived from the shoulder line rather than read straight off the pose, so
+    that a subject framed from the chest up still gets a waist in a sensible
+    place instead of one extrapolated below the bottom of the picture.
+    """
+    shoulder = body.shoulder_y
+    bust_y = shoulder + torso * 0.30
+    waist_y = shoulder + torso * 0.64
+    hip_y = shoulder + torso * 1.0
+    # If the pose's own hip estimate is on screen and agrees, prefer it.
+    if 0 <= body.hip_y < frame_h and abs(body.hip_y - hip_y) < torso * 0.35:
+        hip_y = body.hip_y
+        waist_y = shoulder + (hip_y - shoulder) * 0.64
+        bust_y = shoulder + (hip_y - shoulder) * 0.30
+    return waist_y, bust_y, hip_y
+
+
 def _band(rows: np.ndarray, centre: float, sigma: float) -> np.ndarray:
     if sigma <= 1:
         return np.zeros_like(rows)
@@ -336,18 +375,29 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
         amount += s.body_slim * 0.16
 
     if body is not None:
-        torso = max(abs(body.hip_y - body.shoulder_y), h * 0.08)
+        torso = _torso_length(body, h)
+        waist_y, bust_y, hip_y = _torso_bands(body, torso, h)
+        # Band widths are a fifth to a quarter of the torso, not a third.
+        # Wider than this and the bands overlap so heavily that the waist
+        # pinch bleeds into the bust band and cancels it - which is exactly
+        # what made a "curvy" setting narrow the chest instead of filling it.
         if s.waist_shape > 0:
-            amount += _band(rows, body.waist_y, torso * 0.34) * (s.waist_shape * 0.24)
+            amount += _band(rows, waist_y, torso * 0.21) * (s.waist_shape * 0.26)
         if s.curve_shape > 0:
-            # Hourglass: in at the waist, out at the bust and hips. The
-            # outward bands are deliberately weaker than the inward one -
-            # widening reads as a distortion far sooner than narrowing does.
-            bust_y = body.shoulder_y + torso * 0.38
-            amount += _band(rows, body.waist_y, torso * 0.30) * (s.curve_shape * 0.18)
-            amount -= _band(rows, bust_y, torso * 0.26) * (s.curve_shape * 0.09)
-            amount -= _band(rows, body.hip_y, torso * 0.34) * (s.curve_shape * 0.11)
-    elif s.waist_shape > 0 or s.curve_shape > 0:
+            # Hourglass in one control: in at the waist, out at the bust and
+            # hips together. The outward halves are weaker than the inward one
+            # - widening reads as a distortion sooner, because it has to
+            # invent silhouette where background used to be.
+            amount += _band(rows, waist_y, torso * 0.20) * (s.curve_shape * 0.20)
+            amount -= _band(rows, bust_y, torso * 0.20) * (s.curve_shape * 0.11)
+            amount -= _band(rows, hip_y, torso * 0.26) * (s.curve_shape * 0.13)
+        # The same two halves as separate controls, for shaping one without
+        # the other - a fuller bust with the hips left alone, or the reverse.
+        if s.bust_shape > 0:
+            amount -= _band(rows, bust_y, torso * 0.21) * (s.bust_shape * 0.17)
+        if s.hip_shape > 0:
+            amount -= _band(rows, hip_y, torso * 0.27) * (s.hip_shape * 0.19)
+    elif s.waist_shape > 0 or s.curve_shape > 0 or s.bust_shape > 0 or s.hip_shape > 0:
         # No pose: put the waist at the narrowest row in the middle of the
         # visible silhouette rather than guessing from a fixed proportion.
         idx = np.where(valid > 0.5)[0]
@@ -360,13 +410,16 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
                 span = float(rows[hi] - rows[lo])
                 amount += _band(rows, waist_row, max(span * 0.18, h * 0.05)) * \
                     (max(s.waist_shape, s.curve_shape) * 0.18)
+                # No pose means no reliable bust or hip line; widening blind
+                # would land the fullness in the wrong place, so those two
+                # controls sit this frame out rather than guess.
 
     # Ceiling on the SUM. Each slider alone is capped in settings.py, but three
     # of them pushed up together would otherwise compound into a caricature -
     # and the frame-relative clamp in WarpField is too coarse to catch it,
     # because a small subject can be wildly distorted while moving far fewer
     # pixels than a frame-relative limit allows.
-    np.clip(amount, -0.18, 0.30, out=amount)
+    np.clip(amount, -0.22, 0.30, out=amount)
 
     field.add_row_squeeze(centre, half, amount, valid)
 
