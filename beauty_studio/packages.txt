@@ -1,2 +1,8 @@
+# ffmpeg carries the original audio into the render and re-encodes to H.264.
 ffmpeg
 libgl1
+# libEGL/libGLES are needed by mediapipe 1.x's native library; without them
+# `import mediapipe.tasks` fails with "libEGL.so.1: cannot open shared object
+# file" and the app silently drops to grade-only. Harmless on 0.10.x.
+libegl1
+libgles2

@@ -81,10 +81,21 @@ def main(argv=None) -> int:
     ap.add_argument("--list-presets", action="store_true")
     ap.add_argument("--selftest", action="store_true",
                     help="render a synthetic clip to check the install end to end")
+    ap.add_argument("--doctor", action="store_true",
+                    help="print what this install can and cannot do, and why")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     print(capability_report())
+
+    if args.doctor:
+        from .mp_backend import diagnostics
+        from .pipeline import FFMPEG, FFPROBE
+        print(diagnostics())
+        print(f"ffmpeg        {FFMPEG or 'MISSING - the output will have no audio'}")
+        print(f"ffprobe       {FFPROBE or 'MISSING - audio streams cannot be detected'}")
+        print(f"opencv        {cv2.__version__}")
+        return 0
 
     if args.list_presets:
         for name, preset in PRESETS.items():

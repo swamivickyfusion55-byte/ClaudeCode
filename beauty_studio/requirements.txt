@@ -1,4 +1,4 @@
-# Swamitech Beauty Studio · HF Spaces · Python 3.10 · CPU-only pack
+# Swamitech Beauty Studio · HF Spaces · Python 3.10+ · CPU-only pack
 #
 # Pinned as a matched set. The three web pins below are not cosmetic: with
 # newer versions of any of them, gradio 4.44.1 fails while rendering its own
@@ -21,6 +21,17 @@ numpy>=1.24.0,<2.0
 opencv-python-headless>=4.8.0,<4.12
 Pillow>=10.0.0,<11
 
-# Face mesh (478 landmarks incl. iris), pose and selfie segmentation. Model
-# files ship inside the wheel - nothing is downloaded at runtime.
-mediapipe>=0.10.14,<0.11
+# Face mesh (478 landmarks incl. iris), pose and person segmentation.
+#
+# BOTH MediaPipe generations work - the app detects which one is installed:
+#   0.10.x  the legacy `solutions` API. Models ship inside the wheel, so there
+#           is no download and no network needed at runtime.
+#   1.x     the `tasks` API. MediaPipe 1.0 REMOVED `solutions`, which is why
+#           an unpinned install used to fail with "module 'mediapipe' has no
+#           attribute 'solutions'". Its models are fetched once (~10 MB) from
+#           Google's model CDN and cached, and its native library needs
+#           libEGL - see packages.txt.
+#
+# Pin to `mediapipe>=0.10.14,<0.11` instead if the Space has no outbound
+# network, or if you would rather it never download anything at runtime.
+mediapipe>=0.10.14

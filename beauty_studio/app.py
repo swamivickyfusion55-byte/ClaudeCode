@@ -30,6 +30,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(_here))
     __package__ = os.path.basename(_here)
 
+from .mp_backend import mediapipe_ready, mediapipe_status
 from .pipeline import (Cancelled, FrameProcessor, capability_report, grab_frame,
                        probe, process_image, render_video)
 from .settings import DEFAULT_PRESET, PRESETS, Settings
@@ -37,7 +38,7 @@ from .settings import DEFAULT_PRESET, PRESETS, Settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.0.0 (Aurora)"
+VERSION = "v1.1.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -175,9 +176,16 @@ def on_preview(path, position, *args):
     fp = FrameProcessor(s, static=True)
     try:
         out = fp.process(frame)
-        found = "face found" if fp.frames_with_face else "no face found in this frame"
     finally:
         fp.close()
+    if fp.frames_with_face:
+        found = "face found"
+    elif not mediapipe_ready():
+        # Distinguish "your footage" from "your install" - they need different
+        # fixes, and the preview is where a user first notices either.
+        found = f"face features unavailable — {mediapipe_status()}"
+    else:
+        found = "no face found in this frame"
     return (cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
             cv2.cvtColor(out, cv2.COLOR_BGR2RGB),
             f"Preview at {float(position):.0f}% · {found}")

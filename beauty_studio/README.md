@@ -107,6 +107,58 @@ python -m beauty_studio.cli clip.mp4 -o out.mp4 \
 the UI. `--list-presets` prints what each preset does; `--selftest` renders a
 synthetic clip and reports tracking and stability.
 
+## MediaPipe: both generations work
+
+Everything except the HDR grade needs MediaPipe to find the face and body, and
+there are now two incompatible MediaPipe APIs:
+
+| Installed | API used | Models | Needs |
+| --- | --- | --- | --- |
+| 0.10.x | legacy `solutions` | inside the wheel | nothing extra |
+| 1.x | `tasks` | downloaded once (~10 MB) and cached | outbound network on first run, and `libEGL` |
+
+The app detects which one is present and uses it; the header line and
+`--doctor` say which is active. **MediaPipe 1.0 removed `solutions`**, so an
+app written against the old API (including this one before v1.1.0) fails on a
+Space that installed `mediapipe` unpinned with:
+
+```
+AttributeError: module 'mediapipe' has no attribute 'solutions'
+```
+
+If that is what you are seeing, either update to this version, or pin
+`mediapipe>=0.10.14,<0.11` and rebuild.
+
+Model downloads land in `$BEAUTY_STUDIO_MODELS`, else `$HF_HOME/beauty_studio`,
+else `~/.cache/beauty_studio/models`, else the system temp directory - the
+first one that is writable. Set `BEAUTY_STUDIO_MODELS` to bake them into an
+image and skip the runtime download.
+
+When none of this works - no MediaPipe, no network for the models, no libEGL -
+the app does not fail. It grades the video, says why the rest is off in the
+header and in the render report, and renders.
+
+## When something is off: `--doctor`
+
+```
+$ python -m beauty_studio.cli --doctor
+python        3.10.14 (x86_64)
+mediapipe     1.0.1
+backend       tasks
+status        MediaPipe 1.0.1 (tasks API)
+face features ON
+model cache   /home/user/.cache/beauty_studio/models
+  face        cached  face_landmarker.task
+  pose        will download  pose_landmarker_lite.task
+  segment     cached  selfie_segmenter.tflite
+ffmpeg        /usr/bin/ffmpeg
+ffprobe       /usr/bin/ffprobe
+opencv        4.10.0
+```
+
+That block answers, in one place, every "why is it only grading?" and "why is
+there no audio?" question this app can raise.
+
 ## Deploying to Hugging Face Spaces
 
 Copy the **folder** into the Space and point the Space at it - the modules
@@ -132,9 +184,19 @@ app_file: beauty_studio/app.py
 The header at the top of this file is the same thing for a Space whose root
 *is* this folder.
 
-`packages.txt` installs **ffmpeg**, which is what carries the original audio
-into the output and re-encodes to browser-safe H.264. Without it the render
-still completes, silent, and the UI says so.
+`packages.txt` installs **ffmpeg**, which carries the original audio into the
+output and re-encodes to browser-safe H.264 (OpenCV writes video only, and
+many OpenCV builds have no H.264 encoder at all). It also installs
+**libegl1/libgles2**, which MediaPipe 1.x's native library needs. Without
+ffmpeg the render still completes, silent, and the UI says so.
+
+**On a Docker Space** `packages.txt` is ignored - your Dockerfile owns the
+system packages, so install them there:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg libgl1 libegl1 libgles2 && rm -rf /var/lib/apt/lists/*
+```
 
 ## Performance
 

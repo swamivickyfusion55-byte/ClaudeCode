@@ -10,8 +10,11 @@ matched to their previous selves by centroid so the smoothing does not swap two
 people's geometry, and the segmentation mask is averaged at low resolution
 where the noise actually lives.
 
-If MediaPipe is not installed the module still imports; the trackers report
-themselves unavailable and the pipeline falls back to grade-only.
+Which MediaPipe API is doing the detecting is decided in `mp_backend` - the
+0.10.x `solutions` API and the 1.x `tasks` API are both supported, and neither
+this file nor anything above it needs to know which answered. If neither is
+usable the module still imports; the trackers report themselves unavailable
+and the pipeline falls back to grade-only.
 """
 from __future__ import annotations
 
@@ -23,16 +26,9 @@ import numpy as np
 import cv2
 
 from .imaging import EMA, feather, poly_mask
+from .mp_backend import FaceBackend, PoseBackend, SegmentBackend
 
 log = logging.getLogger(__name__)
-
-try:
-    import mediapipe as mp
-    MEDIAPIPE_OK = True
-except Exception as e:  # pragma: no cover - environment dependent
-    mp = None
-    MEDIAPIPE_OK = False
-    log.warning("mediapipe unavailable (%s) - face/body features disabled", e)
 
 
 # ------------------------------------------------------------ landmark groups
@@ -190,46 +186,25 @@ class FaceTracker:
 
     def __init__(self, max_faces: int = 3, static: bool = False,
                  stabilise: bool = True, alpha: float = 0.45):
-        self.ok = MEDIAPIPE_OK
         self.max_faces = int(max(1, max_faces))
         self.stabilise = bool(stabilise) and not static
         self.alpha = float(alpha)
-        self._mesh = None
         self._static = static
         self._slots: list[dict] = []
-        if self.ok:
-            self._mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=static,
-                max_num_faces=self.max_faces,
-                refine_landmarks=True,
-                min_detection_confidence=0.4,
-                min_tracking_confidence=0.4,
-            )
+        self._backend = FaceBackend(self.max_faces, static=static)
+        self.ok = self._backend.ok
 
     def close(self):
-        if self._mesh is not None:
-            try:
-                self._mesh.close()
-            except Exception:
-                pass
-            self._mesh = None
+        self._backend.close()
 
     def __call__(self, bgr: np.ndarray) -> list[Face]:
-        if not self.ok or self._mesh is None:
+        if not self.ok:
             return []
         h, w = bgr.shape[:2]
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False
-        try:
-            res = self._mesh.process(rgb)
-        except Exception as e:
-            log.warning("face mesh failed: %s", e)
-            return []
-
-        raw = []
-        if res.multi_face_landmarks:
-            for lm in res.multi_face_landmarks:
-                raw.append(np.array([[p.x * w, p.y * h] for p in lm.landmark], np.float32))
+        # Backends answer in normalised coordinates; pixels are this layer's
+        # business, and so is every measurement derived from them.
+        raw = [pts * np.float32([w, h]) for pts in self._backend.detect(rgb)]
 
         if self._static or not self.stabilise:
             return [self._make_face(pts, 1.0) for pts in raw]
@@ -315,40 +290,22 @@ class PoseTracker:
     HOLD_FRAMES = 8
 
     def __init__(self, static: bool = False, stabilise: bool = True, alpha: float = 0.35):
-        self.ok = MEDIAPIPE_OK
-        self._pose = None
         self._sm = EMA(alpha, reset_distance=40.0) if (stabilise and not static) else None
         self._last: Body | None = None
         self._miss = 0
-        if self.ok:
-            self._pose = mp.solutions.pose.Pose(
-                static_image_mode=static,
-                model_complexity=1,
-                smooth_landmarks=not static,
-                min_detection_confidence=0.4,
-                min_tracking_confidence=0.4,
-            )
+        self._backend = PoseBackend(static=static)
+        self.ok = self._backend.ok
 
     def close(self):
-        if self._pose is not None:
-            try:
-                self._pose.close()
-            except Exception:
-                pass
-            self._pose = None
+        self._backend.close()
 
     def __call__(self, bgr: np.ndarray) -> Body | None:
-        if not self.ok or self._pose is None:
+        if not self.ok:
             return None
         h, w = bgr.shape[:2]
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False
-        try:
-            res = self._pose.process(rgb)
-        except Exception as e:
-            log.warning("pose failed: %s", e)
-            return None
-        if not res.pose_landmarks:
+        res = self._backend.detect(rgb)
+        if res is None:
             # Same reasoning as the face tracker: a body warp that vanishes
             # for one frame and comes back is a visible jolt, so a lost pose
             # is held briefly before the reshape lets go of it.
@@ -361,9 +318,8 @@ class PoseTracker:
             return None
         self._miss = 0
 
-        lm = res.pose_landmarks.landmark
-        pts = np.array([[p.x * w, p.y * h] for p in lm], np.float32)
-        vis = np.array([p.visibility for p in lm], np.float32)
+        pts_norm, vis = res
+        pts = pts_norm * np.float32([w, h])
         if self._sm is not None:
             pts = self._sm.update(pts).copy()
 
@@ -390,34 +346,26 @@ class PersonSegmenter:
     smoothing there costs a fraction of what smoothing a 1080p mask would.
     """
 
-    def __init__(self, stabilise: bool = True, alpha: float = 0.4, work_width: int = 256):
-        self.ok = MEDIAPIPE_OK
-        self._seg = None
+    def __init__(self, stabilise: bool = True, alpha: float = 0.4, work_width: int = 256,
+                 static: bool = False):
         self.work_width = int(work_width)
         self._sm = EMA(alpha, reset_distance=0.22) if stabilise else None
-        if self.ok:
-            self._seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        self._backend = SegmentBackend(static=static)
+        self.ok = self._backend.ok
 
     def close(self):
-        if self._seg is not None:
-            try:
-                self._seg.close()
-            except Exception:
-                pass
-            self._seg = None
+        self._backend.close()
 
     def __call__(self, bgr: np.ndarray) -> np.ndarray | None:
-        if not self.ok or self._seg is None:
+        if not self.ok:
             return None
         h, w = bgr.shape[:2]
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False
-        try:
-            res = self._seg.process(rgb)
-        except Exception as e:
-            log.warning("segmentation failed: %s", e)
+        m = self._backend.detect(rgb)
+        if m is None:
             return None
-        m = np.asarray(res.segmentation_mask, np.float32)
+        if m.shape[:2] != (h, w):
+            m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
         small = cv2.resize(m, (self.work_width,
                                max(2, int(round(self.work_width * h / max(w, 1))))),
                            interpolation=cv2.INTER_AREA)
@@ -438,11 +386,11 @@ class Trackers:
         need_seg = settings.touches_body() or settings.touches_hair()
         self.face = FaceTracker(max_faces, static=static, stabilise=stabilise) if need_face else None
         self.pose = PoseTracker(static=static, stabilise=stabilise) if need_body else None
-        self.seg = PersonSegmenter(stabilise=stabilise) if need_seg else None
+        self.seg = PersonSegmenter(stabilise=stabilise, static=static) if need_seg else None
 
     @property
     def available(self) -> bool:
-        return MEDIAPIPE_OK
+        return any(t is not None and t.ok for t in (self.face, self.pose, self.seg))
 
     def close(self):
         for t in (self.face, self.pose, self.seg):

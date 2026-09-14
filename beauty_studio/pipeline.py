@@ -33,7 +33,11 @@ import cv2
 from .grade import Grader
 from .hair import enhance_hair
 from .imaging import even, to_float, to_u8
-from .landmarks import MEDIAPIPE_OK, Trackers
+from .landmarks import Trackers
+# A function, not a flag copied at import time: a backend can disable itself
+# later (a model download that fails on the first frame), and a captured bool
+# would go on reporting the answer from before that happened.
+from .mp_backend import mediapipe_ready, mediapipe_status
 from .reshape import BodyProfiler, WarpField, add_body_reshape, add_face_reshape
 from .retouch import Retoucher
 from .settings import Settings, scale_person_amounts
@@ -284,9 +288,21 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         fp.close()
 
     elapsed = time.time() - t0
+    # "Face tracked on 0% of frames" is a symptom, not an explanation. When the
+    # settings asked for face work and none happened, say why here rather than
+    # leaving the user to guess whether it was their footage or their install.
+    notes_pre: list[str] = []
+    if fp.frames_with_face == 0 and (s.touches_face() or s.touches_hair()):
+        if not mediapipe_ready():
+            notes_pre.append(f"Face and body features were unavailable: {mediapipe_status()}. "
+                             "Only the HDR grade was applied.")
+        else:
+            notes_pre.append("No face was found in this clip, so only the grade "
+                             "and any body shaping were applied.")
     final = out_path or os.path.join(tmp_dir, "beauty_studio_output.mp4")
     audio_src = src if info.has_audio else None
     encoded, notes = _finish(silent, final, audio_src, s, info.fps, start, end)
+    notes = notes_pre + notes
 
     return {
         "path": encoded,
@@ -394,7 +410,6 @@ def _hdr10_args() -> tuple[bool, list[str]]:
 def capability_report() -> str:
     """One line the UI shows on start, so a missing dependency is visible
     before a ten-minute render rather than after it."""
-    bits = [f"OpenCV {cv2.__version__}"]
-    bits.append("MediaPipe ready" if MEDIAPIPE_OK else "MediaPipe MISSING (grade only)")
+    bits = [f"OpenCV {cv2.__version__}", mediapipe_status()]
     bits.append("ffmpeg ready" if FFMPEG else "ffmpeg MISSING (no audio in output)")
     return " · ".join(bits)
