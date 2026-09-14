@@ -140,6 +140,13 @@ class WarpField:
         self.dirty = True
 
     # ----------------------------------------------------------------- apply
+    def max_shift(self) -> float:
+        """Largest displacement in pixels - what the render report shows so a
+        user can tell "the effect is subtle" from "the effect did not run"."""
+        if not self.dirty:
+            return 0.0
+        return float(max(np.abs(self.dx).max(), np.abs(self.dy).max()))
+
     def clamp(self, max_fraction: float = 0.06):
         """Hard ceiling on displacement, as a fraction of the long edge.
 
@@ -192,7 +199,12 @@ def add_face_reshape(field: WarpField, f: Face, s) -> None:
         # chin (moving the chin sideways is what makes a slimmed face look
         # like it melted) and least at the ear.
         weights = [0.25, 0.55, 0.85, 1.0, 0.95, 0.70, 0.45]
-        amount = s.face_slim * fw * 0.055
+        # 0.065 rather than the 0.055 this shipped with, and well short of
+        # the 0.085 tried first: these local translations overlap along the
+        # jaw and their displacements add, so the face narrows faster than any
+        # single point's move suggests. Past this the jaw starts to read as
+        # pinched at the strong presets.
+        amount = s.face_slim * fw * 0.065
         for side in (JAW_LEFT, JAW_RIGHT):
             pts = side[2:9]
             for idx, wgt in zip(pts, weights):
@@ -204,11 +216,11 @@ def add_face_reshape(field: WarpField, f: Face, s) -> None:
         chin = f.p(CHIN)
         # Up along the face axis (shorter) plus a slight narrowing of the two
         # points either side of it (tapered rather than blunt).
-        field.add_local_translation(chin, chin + f.axis * (fh * 0.035 * s.chin_shape),
+        field.add_local_translation(chin, chin + f.axis * (fh * 0.045 * s.chin_shape),
                                     radius=fw * 0.32)
         for idx in (JAW_LEFT[1], JAW_RIGHT[1]):
             p = f.p(idx)
-            d = _perp_inward(f, p) * (fw * 0.030 * s.chin_shape)
+            d = _perp_inward(f, p) * (fw * 0.040 * s.chin_shape)
             field.add_local_translation(p, p + d, radius=fw * 0.28)
 
     if s.nose_slim > 0:
@@ -314,22 +326,27 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
 
     amount = np.zeros_like(rows)
 
+    # These coefficients are the fraction of the body's own half-width the
+    # silhouette moves at full slider. They were raised substantially in
+    # v1.2.0: the first calibration produced changes of two or three pixels on
+    # a typical subject, which is arithmetically a few percent and visually
+    # nothing at all. A reshaping control that cannot be seen at 100 is not a
+    # conservative control, it is a broken one.
     if s.body_slim > 0:
-        # A flat 0..4.5% narrowing wherever there is a subject.
-        amount += s.body_slim * 0.045
+        amount += s.body_slim * 0.16
 
     if body is not None:
         torso = max(abs(body.hip_y - body.shoulder_y), h * 0.08)
         if s.waist_shape > 0:
-            amount += _band(rows, body.waist_y, torso * 0.34) * (s.waist_shape * 0.075)
+            amount += _band(rows, body.waist_y, torso * 0.34) * (s.waist_shape * 0.24)
         if s.curve_shape > 0:
             # Hourglass: in at the waist, out at the bust and hips. The
             # outward bands are deliberately weaker than the inward one -
             # widening reads as a distortion far sooner than narrowing does.
             bust_y = body.shoulder_y + torso * 0.38
-            amount += _band(rows, body.waist_y, torso * 0.30) * (s.curve_shape * 0.055)
-            amount -= _band(rows, bust_y, torso * 0.26) * (s.curve_shape * 0.032)
-            amount -= _band(rows, body.hip_y, torso * 0.34) * (s.curve_shape * 0.038)
+            amount += _band(rows, body.waist_y, torso * 0.30) * (s.curve_shape * 0.18)
+            amount -= _band(rows, bust_y, torso * 0.26) * (s.curve_shape * 0.09)
+            amount -= _band(rows, body.hip_y, torso * 0.34) * (s.curve_shape * 0.11)
     elif s.waist_shape > 0 or s.curve_shape > 0:
         # No pose: put the waist at the narrowest row in the middle of the
         # visible silhouette rather than guessing from a fixed proportion.
@@ -342,7 +359,14 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
                 waist_row = rows[mid][int(np.argmin(seg))]
                 span = float(rows[hi] - rows[lo])
                 amount += _band(rows, waist_row, max(span * 0.18, h * 0.05)) * \
-                    (max(s.waist_shape, s.curve_shape) * 0.055)
+                    (max(s.waist_shape, s.curve_shape) * 0.18)
+
+    # Ceiling on the SUM. Each slider alone is capped in settings.py, but three
+    # of them pushed up together would otherwise compound into a caricature -
+    # and the frame-relative clamp in WarpField is too coarse to catch it,
+    # because a small subject can be wildly distorted while moving far fewer
+    # pixels than a frame-relative limit allows.
+    np.clip(amount, -0.18, 0.30, out=amount)
 
     field.add_row_squeeze(centre, half, amount, valid)
 

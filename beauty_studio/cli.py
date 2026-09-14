@@ -141,9 +141,12 @@ def main(argv=None) -> int:
                        progress=lambda d, t_, m: print(f"\r  {m}   ", end="", flush=True))
     print()
     w, h = res["size"]
-    face_pct = 100.0 * res["faces_seen"] / max(res["frames_seen"], 1)
+    seen = max(res["frames_seen"], 1)
     print(f"wrote {res['path']} · {res['frames']} frames at {w}x{h} · "
-          f"{res['seconds']:.1f}s ({res['fps']:.1f} fps) · face on {face_pct:.0f}% of frames")
+          f"{res['seconds']:.1f}s ({res['fps']:.1f} fps)")
+    print(f"  face on {100.0 * res['faces_seen'] / seen:.0f}% of frames · "
+          f"body outline on {100.0 * res['persons_seen'] / seen:.0f}% · "
+          f"largest reshape {res['max_shift_px']:.0f} px")
     for note in res["notes"]:
         print(f"  note: {note}")
     return 0

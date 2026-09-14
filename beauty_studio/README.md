@@ -57,8 +57,20 @@ field that is applied with a single `remap`. Jaw and cheek slimming pull toward
 the face's own centre line, so a tilted head slims correctly. Body work follows
 the silhouette from the segmentation mask - not the pose skeleton, which says
 nothing about how wide a coat is - with the waist, bust and hip bands located
-from the pose. Displacement is hard-capped at a few percent of the frame, which
-is why straight lines in the background stay straight.
+from the pose.
+
+How much it actually moves, measured at the waist on a standing subject:
+
+| | waist narrowing |
+| --- | --- |
+| Natural | ~8% |
+| Glam | ~14% |
+| every body slider at 100 | ~22% |
+
+Two ceilings keep that honest: the per-row total is capped at 30% of the body's
+own half-width, so three sliders pushed up together cannot compound into a
+caricature, and the field as a whole is capped relative to the frame, which is
+why straight lines in the background stay straight.
 
 **Hair.** The mask is built by elimination: person silhouette, inside a
 head-shaped region around the tracked face, minus skin. Strand definition,
@@ -225,17 +237,22 @@ NumPy - no GPU is required and none is used.
 ## Limits, stated plainly
 
 - **HDR10 export is experimental.** It converts to BT.2020 primaries and the PQ
-  transfer function and tags the file so a display switches into HDR mode. It
-  is an inverse tone map of SDR material: it does not recover highlight detail
-  that was never captured. It needs an ffmpeg with `libx265` and `zscale`; if
-  yours lacks either, the render falls back to SDR and tells you.
+  transfer function and tags the file so a display switches into HDR mode
+  (verified: HEVC, `yuv420p10le`, `color_primaries=bt2020`,
+  `color_transfer=smpte2084`). It is an inverse tone map of SDR material: it
+  does not recover highlight detail that was never captured. If this ffmpeg
+  build cannot do it, the render automatically falls back to standard H.264
+  and the report says so - it never hands back a file you cannot play.
 - **Faces need to be findable.** Everything except the grade depends on
   MediaPipe finding the face. Very small, heavily backlit or extremely
   motion-blurred faces will be skipped - the report after each render says on
   what percentage of frames the face was tracked.
 - **Body shaping needs the body in frame.** Waist and hourglass adjustments
   need the hips visible for the pose model to place the bands; with only a
-  head-and-shoulders framing, the overall slimming still works.
+  head-and-shoulders framing, the overall slimming still works. The render
+  report says what was found - face percentage, body-outline percentage, and
+  the largest reshape actually applied in pixels - so "too subtle" and "never
+  ran" are not the same message.
 - **Shape amounts are capped** (see `CAPS` in `settings.py`) at the point where
   each effect starts to read as an edit rather than a flattering adjustment.
 

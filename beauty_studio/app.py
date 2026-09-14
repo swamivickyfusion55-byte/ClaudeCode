@@ -38,7 +38,7 @@ from .settings import DEFAULT_PRESET, PRESETS, Settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.1.0 (Aurora)"
+VERSION = "v1.2.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -178,6 +178,12 @@ def on_preview(path, position, *args):
         out = fp.process(frame)
     finally:
         fp.close()
+    bits = []
+    if fp.frames_with_person:
+        bits.append(f"body outline found, reshaped by {fp.max_shift_px:.0f} px")
+    elif s.touches_body():
+        bits.append("no body outline in this frame — body shaping did nothing")
+    extra = (" · " + " · ".join(bits)) if bits else ""
     if fp.frames_with_face:
         found = "face found"
     elif not mediapipe_ready():
@@ -188,7 +194,7 @@ def on_preview(path, position, *args):
         found = "no face found in this frame"
     return (cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
             cv2.cvtColor(out, cv2.COLOR_BGR2RGB),
-            f"Preview at {float(position):.0f}% · {found}")
+            f"Preview at {float(position):.0f}% · {found}{extra}")
 
 
 def on_photo(image, *args):
@@ -230,12 +236,19 @@ def on_render(path, start, end, *args, progress=gr.Progress()):
             _CANCELLED.discard(job_id)
 
     w, h = res["size"]
-    face_pct = 100.0 * res["faces_seen"] / max(res["frames_seen"], 1)
+    seen = max(res["frames_seen"], 1)
+    face_pct = 100.0 * res["faces_seen"] / seen
+    body_pct = 100.0 * res["persons_seen"] / seen
     # gr.HTML, so the emphasis is markup rather than markdown asterisks.
+    # The second line is what makes a disappointing result diagnosable: it
+    # separates "the subject was never tracked" from "the effect ran and you
+    # wanted more of it", which are the two things a user cannot tell apart
+    # by looking at the output.
     lines = [
         f"<b>Done</b> · {res['frames']} frames at {w}×{h} in {res['seconds']:.1f}s "
         f"({res['fps']:.1f} fps)",
-        f"Face tracked on {face_pct:.0f}% of frames.",
+        f"Face on {face_pct:.0f}% of frames · body outline on {body_pct:.0f}% · "
+        f"largest reshape {res['max_shift_px']:.0f} px",
     ]
     lines += [f"⚠️ {n}" for n in res["notes"]]
     yield res["path"], _status("<br>".join(lines)), gr.update(interactive=True), ""

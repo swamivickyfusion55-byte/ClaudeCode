@@ -79,7 +79,14 @@ class FrameProcessor:
         self.retoucher = Retoucher()
         self.profiler = BodyProfiler(stabilise=self.s.stabilise and not static)
         self.frames_with_face = 0
+        self.frames_with_body = 0
+        self.frames_with_person = 0
         self.frames_seen = 0
+        # Largest displacement any frame's warp actually applied. Reported
+        # afterwards because "the body looks the same" and "the body stage
+        # never ran" are indistinguishable from the outside, and they need
+        # opposite fixes.
+        self.max_shift_px = 0.0
 
     def close(self):
         self.trackers.close()
@@ -98,8 +105,12 @@ class FrameProcessor:
                 self.frames_with_face += 1
         if self.trackers.pose is not None:
             body = self.trackers.pose(frame_u8)
+            if body is not None:
+                self.frames_with_body += 1
         if self.trackers.seg is not None:
             person = self.trackers.seg(frame_u8)
+            if person is not None and float(person.max()) > 0.5:
+                self.frames_with_person += 1
 
         if faces and s.touches_face():
             img = self.retoucher.apply(img, faces, s)
@@ -114,6 +125,7 @@ class FrameProcessor:
                 add_face_reshape(field, f, s)
             add_body_reshape(field, person, body, self.profiler, s, img.shape)
             img = field.apply(img)
+            self.max_shift_px = max(self.max_shift_px, field.max_shift())
 
         img = self.grader.apply(img, s)
         return to_u8(img)
@@ -299,6 +311,15 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         else:
             notes_pre.append("No face was found in this clip, so only the grade "
                              "and any body shaping were applied.")
+    if s.touches_body() and fp.frames_with_person == 0:
+        notes_pre.append("No person outline was found, so the body shaping did "
+                         "nothing. It needs the subject's torso visible in frame.")
+    elif s.touches_body() and fp.frames_with_body == 0 and \
+            (s.waist_shape > 0 or s.curve_shape > 0):
+        notes_pre.append("The hips were never visible, so the waist and curve "
+                         "controls had nothing to anchor to - only the overall "
+                         "slimming was applied. Frame the subject from the "
+                         "thighs up for those two.")
     final = out_path or os.path.join(tmp_dir, "beauty_studio_output.mp4")
     audio_src = src if info.has_audio else None
     encoded, notes = _finish(silent, final, audio_src, s, info.fps, start, end)
@@ -311,6 +332,9 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         "fps": done / max(elapsed, 1e-3),
         "size": (ow, oh),
         "faces_seen": fp.frames_with_face,
+        "bodies_seen": fp.frames_with_body,
+        "persons_seen": fp.frames_with_person,
+        "max_shift_px": fp.max_shift_px,
         "frames_seen": fp.frames_seen,
         "notes": notes,
     }
@@ -335,7 +359,11 @@ def _finish(silent: str, final: str, audio_src: str | None, s: Settings,
         except Exception:
             return silent, notes
 
-    cmd = [FFMPEG, "-y", "-loglevel", "error", "-i", silent]
+    def base_cmd() -> list[str]:
+        cmd = [FFMPEG, "-y", "-loglevel", "error", "-i", silent]
+        return cmd
+
+    cmd = base_cmd()
     if audio_src:
         # Trim the audio to match the frame range that was actually rendered.
         if start > 0 or end < 1:
@@ -363,17 +391,56 @@ def _finish(silent: str, final: str, audio_src: str | None, s: Settings,
                 "-pix_fmt", "yuv420p"]
 
     cmd += ["-movflags", "+faststart", "-shortest", final]
+
+    ok, err = _run_encode(cmd, final)
+    if ok:
+        return final, notes
+
+    # The first command can fail for reasons that are specific to it - an
+    # HDR10 chain this ffmpeg build cannot do, an audio stream it cannot
+    # decode. What must not happen is handing back the raw OpenCV file:
+    # that is MPEG-4 part 2, which browsers do not play, so the user gets a
+    # render they cannot watch. Retry with the plainest possible command -
+    # H.264, no audio, no filters - before giving up on ffmpeg entirely.
+    log.warning("ffmpeg finish failed, retrying as plain H.264: %s", err[-500:])
+    why = "HDR10 export" if s.hdr10 else "the re-encode"
+    notes = [n for n in notes if "HDR10" not in n]
+    notes.append(f"{why} failed in this ffmpeg build - exported as standard "
+                 f"H.264 instead.")
+    simple = base_cmd() + ["-c:v", "libx264", "-crf", str(int(s.quality)),
+                           "-preset", "medium", "-pix_fmt", "yuv420p",
+                           "-movflags", "+faststart", "-an", final]
+    ok, err2 = _run_encode(simple, final)
+    if ok:
+        notes.append("The fallback encode dropped the audio track.")
+        return final, notes
+
+    log.warning("plain H.264 fallback also failed: %s", err2[-500:])
+    notes.append("ffmpeg could not re-encode this render at all - the file is "
+                 "the raw OpenCV output, which some browsers will not play.")
+    return silent, notes
+
+
+def _run_encode(cmd: list[str], out_path: str) -> tuple[bool, str]:
+    """Run an ffmpeg command; success means it exited 0 AND wrote real bytes.
+
+    The exit code alone is not enough: a filter chain that fails per frame
+    still exits 0 having written a zero-byte file, which is exactly how a
+    broken HDR10 export reached a user looking like a successful render.
+    """
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-        if r.returncode != 0 or not os.path.exists(final):
-            log.warning("ffmpeg finish failed: %s", (r.stderr or "")[-400:])
-            notes.append("ffmpeg re-encode failed - returning the raw render.")
-            return silent, notes
     except Exception as e:
-        log.warning("ffmpeg finish error: %s", e)
-        notes.append(f"ffmpeg re-encode error ({e}) - returning the raw render.")
-        return silent, notes
-    return final, notes
+        return False, str(e)
+    if r.returncode != 0:
+        return False, r.stderr or f"exit {r.returncode}"
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 1024:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        return False, (r.stderr or "") + "\n(no output was written)"
+    return True, ""
 
 
 def _hdr10_args() -> tuple[bool, list[str]]:
@@ -398,7 +465,14 @@ def _hdr10_args() -> tuple[bool, list[str]]:
         return False, []
     if "libx265" not in enc or "zscale" not in filt:
         return False, []
-    vf = ("zscale=t=linear:npl=100,format=gbrpf32le,"
+    # `setparams` first is not optional. OpenCV writes the intermediate file
+    # with no colour tags at all, and zscale refuses to convert from an
+    # unspecified space - it fails with "code 3074: no path between
+    # colorspaces" and the whole encode produces a zero-byte file. Declaring
+    # the source as BT.709 (which is what the frames are) gives it the
+    # starting point it needs.
+    vf = ("setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,"
+          "zscale=t=linear:npl=100,format=gbrpf32le,"
           "zscale=p=bt2020:m=bt2020nc:t=smpte2084:r=tv,format=yuv420p10le")
     x265 = ("hdr10=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:"
             "master-display=G(8500,39850)B(6550,2300)R(35400,14600)"
