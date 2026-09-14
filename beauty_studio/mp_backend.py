@@ -9,8 +9,12 @@ with `module 'mediapipe' has no attribute 'solutions'`.
 So detection lives behind three small classes here, each of which speaks
 whichever API is actually installed:
 
-    solutions  - mediapipe 0.10.x: models ship inside the wheel.
-    tasks      - mediapipe 1.x: models are downloaded once and cached.
+    solutions  - up to mediapipe 0.10.21: models ship inside the wheel.
+    tasks      - mediapipe 0.10.30 and later, 1.x included: models are
+                 downloaded once and cached.
+
+The boundary is worth knowing when pinning: `solutions` disappeared at 0.10.30,
+NOT at 1.0, so a `mediapipe<0.11` pin still lands on a release without it.
 
 Everything above this file works in normalised (0..1) landmark coordinates and
 never learns which generation answered. If neither works - no MediaPipe, or

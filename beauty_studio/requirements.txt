@@ -23,15 +23,20 @@ Pillow>=10.0.0,<11
 
 # Face mesh (478 landmarks incl. iris), pose and person segmentation.
 #
-# BOTH MediaPipe generations work - the app detects which one is installed:
-#   0.10.x  the legacy `solutions` API. Models ship inside the wheel, so there
-#           is no download and no network needed at runtime.
-#   1.x     the `tasks` API. MediaPipe 1.0 REMOVED `solutions`, which is why
-#           an unpinned install used to fail with "module 'mediapipe' has no
-#           attribute 'solutions'". Its models are fetched once (~10 MB) from
-#           Google's model CDN and cached, and its native library needs
-#           libEGL - see packages.txt.
+# BOTH MediaPipe APIs work - the app detects which one is installed:
+#   legacy `solutions`  up to and including 0.10.21. Models ship inside the
+#                       wheel: no download, no network, no extra system libs.
+#   `tasks`             0.10.30 and later, including 1.x. `solutions` was
+#                       REMOVED there - which is what makes an unpinned (or
+#                       loosely pinned) install fail with "module 'mediapipe'
+#                       has no attribute 'solutions'". Models are fetched once
+#                       (~10 MB) from Google's CDN and cached, and the native
+#                       library needs libEGL.
 #
-# Pin to `mediapipe>=0.10.14,<0.11` instead if the Space has no outbound
-# network, or if you would rather it never download anything at runtime.
-mediapipe>=0.10.14
+# Note the upper bound: `<0.11` is NOT enough, because 0.10.30 through 0.10.35
+# are inside it and have no `solutions`. This pin picks the last release that
+# needs nothing at runtime, which is what makes a Space deploy reproducible.
+#
+# To run on a current MediaPipe instead, relax this to `mediapipe>=0.10.30`
+# and add libegl1 and libgles2 to packages.txt. The code handles either.
+mediapipe>=0.10.14,<0.10.22

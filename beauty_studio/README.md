@@ -114,20 +114,26 @@ there are now two incompatible MediaPipe APIs:
 
 | Installed | API used | Models | Needs |
 | --- | --- | --- | --- |
-| 0.10.x | legacy `solutions` | inside the wheel | nothing extra |
-| 1.x | `tasks` | downloaded once (~10 MB) and cached | outbound network on first run, and `libEGL` |
+| **≤ 0.10.21** | legacy `solutions` | inside the wheel | nothing extra |
+| **≥ 0.10.30** (1.x included) | `tasks` | downloaded once (~10 MB) and cached | outbound network on first run, and `libEGL` |
 
-The app detects which one is present and uses it; the header line and
-`--doctor` say which is active. **MediaPipe 1.0 removed `solutions`**, so an
-app written against the old API (including this one before v1.1.0) fails on a
-Space that installed `mediapipe` unpinned with:
+The app detects which is present and uses it; the header line and `--doctor`
+say which is active. All three of 0.10.14, 0.10.35 and 1.0.1 are tested, and
+give the same result to within half a percent of a pixel value.
+
+**`solutions` was removed at 0.10.30, not at 1.0.** That is the trap: a
+`mediapipe<0.11` pin looks conservative and still resolves to 0.10.35, which
+does not have it. An app written against the old API (including this one
+before v1.1.0) then fails on the first frame with:
 
 ```
 AttributeError: module 'mediapipe' has no attribute 'solutions'
 ```
 
-If that is what you are seeing, either update to this version, or pin
-`mediapipe>=0.10.14,<0.11` and rebuild.
+If you are seeing that, update to this version. `requirements.txt` here pins
+`mediapipe>=0.10.14,<0.10.22` - the last release that needs nothing at runtime.
+To run on a current MediaPipe instead, relax it to `mediapipe>=0.10.30` and add
+`libegl1` and `libgles2` to `packages.txt`.
 
 Model downloads land in `$BEAUTY_STUDIO_MODELS`, else `$HF_HOME/beauty_studio`,
 else `~/.cache/beauty_studio/models`, else the system temp directory - the
@@ -186,9 +192,13 @@ The header at the top of this file is the same thing for a Space whose root
 
 `packages.txt` installs **ffmpeg**, which carries the original audio into the
 output and re-encodes to browser-safe H.264 (OpenCV writes video only, and
-many OpenCV builds have no H.264 encoder at all). It also installs
-**libegl1/libgles2**, which MediaPipe 1.x's native library needs. Without
+many OpenCV builds have no H.264 encoder at all), plus **libgl1**. Without
 ffmpeg the render still completes, silent, and the UI says so.
+
+That file is fed straight to `xargs apt-get install`, so it takes **bare
+package names only** - one per line, no comments and no apostrophes. A `#`
+comment in it does not get ignored, it gets installed, and the build fails
+with `E: Unable to locate package #`.
 
 **On a Docker Space** `packages.txt` is ignored - your Dockerfile owns the
 system packages, so install them there:
