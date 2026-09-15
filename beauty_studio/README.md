@@ -73,8 +73,18 @@ Three rules keep it from bending the person, all learned the hard way:
   shoulders at the bottom edge. No waist in shot, no waist shaping - the
   render report says when this happens.
 
-Row widths come from the connected run of silhouette through the body's centre
-line, so an arm held away from the body is not counted as part of the torso.
+Row widths are measured about the body's axis, which comes from the pose
+(shoulder, hip, knee and ankle midpoints) rather than from the silhouette.
+Below the knees that axis runs down the gap *between* the legs, where there is
+no silhouette at all - and a profiler that picks the widest run instead latches
+onto one leg, warps it about its own centre, and leaves the other where it was.
+Runs too far from the axis are still excluded, so an arm held away from the
+body is not counted as torso width.
+
+Legs also taper out of the warp below the knee: a calf is narrow, moves fast
+and sits against background, so shaping it buys nothing and only risks calves
+that do not line up with the knees. Thighs - where slimming actually reads -
+keep the full amount.
 
 A fuller **face** is a different mechanism from a slimmer one. Slimming only
 has to move the jaw line inward, but dragging an outline outward leaves the

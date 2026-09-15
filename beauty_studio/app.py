@@ -37,7 +37,7 @@ from .settings import (DEFAULT_PRESET, MAX_STACK, PRESETS, Settings,
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.7.0 (Aurora)"
+VERSION = "v1.8.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec

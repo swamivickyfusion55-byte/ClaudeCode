@@ -27,8 +27,9 @@ import cv2
 from .imaging import EMA, smoothstep
 from .landmarks import (CHIN, JAW_LEFT, JAW_RIGHT, LEFT_EYE, LEFT_IRIS,
                         NOSE_BRIDGE, NOSE_TIP, NOSE_WING_L, NOSE_WING_R,
-                        P_SHOULDER_L, P_SHOULDER_R, RIGHT_EYE, RIGHT_IRIS,
-                        Body, Face)
+                        P_ANKLE_L, P_ANKLE_R, P_HIP_L, P_HIP_R, P_KNEE_L,
+                        P_KNEE_R, P_SHOULDER_L, P_SHOULDER_R, RIGHT_EYE,
+                        RIGHT_IRIS, Body, Face)
 
 # Cache of base coordinate grids, keyed by (w, h). Rebuilding a 1080p meshgrid
 # per frame is pure overhead and it is the same array every time.
@@ -388,33 +389,64 @@ class BodyProfiler:
     WORK_ROWS = 192      # the profile is smooth; it does not need full height
 
     def profile(self, mask: np.ndarray, rows: np.ndarray, w: int,
-                centre_hint: float | None = None):
-        """`rows` are full-resolution y positions (the warp grid's rows)."""
+                centre_line: np.ndarray | None = None):
+        """
+        Per-row centre and half-width for the warp.
+
+        `centre_line` is the body's axis in full-resolution x, sampled at
+        `rows` - from the pose where there is one. It matters most where the
+        silhouette splits in two: below the knees the axis runs down the gap
+        BETWEEN the legs, so no run contains it, and a profiler that picks
+        "the widest run" instead latches onto one leg. The warp then squeezes
+        that leg about its own centre and leaves the other where it was, which
+        is the disjointed-legs artefact - and when the wider leg changes from
+        frame to frame, the centre jumps and the legs shear apart for those
+        frames.
+
+        So the axis is never inferred from a run. Where the row is split, the
+        half-width is the distance from the axis out to the outermost edge of
+        the runs near it, and both legs move symmetrically about the body's
+        real centre line.
+        """
         h, mw = mask.shape[:2]
         small = cv2.resize(mask, (max(32, mw * self.WORK_ROWS // max(h, 1)), self.WORK_ROWS),
                            interpolation=cv2.INTER_AREA)
         sh, sw = small.shape[:2]
+        scale = sw / float(mw)
         binm = small > 0.5
         counts = binm.sum(axis=1).astype(np.float32)
         xs = np.arange(sw, dtype=np.float32)[None, :]
         weighted = (binm * xs).sum(axis=1)
         centroid = np.where(counts > 0, weighted / np.maximum(counts, 1), sw * 0.5)
-        hint = (centre_hint * sw / max(mw, 1)) if centre_hint is not None else None
+
+        if centre_line is not None and len(centre_line):
+            anchors = np.interp(np.arange(sh),
+                                np.linspace(0, sh - 1, num=len(centre_line)),
+                                np.asarray(centre_line, np.float32) * scale)
+        else:
+            anchors = centroid.copy()
 
         centre = np.empty(sh, np.float32)
         half = np.empty(sh, np.float32)
+        reach = max(sw * 0.08, 4.0)      # grows to the body's own width below
         for i in range(sh):
-            anchor = hint if hint is not None else centroid[i]
-            c, hw = _run_through(binm[i], anchor)
-            centre[i] = c if hw > 0 else centroid[i]
-            half[i] = max(hw, 1.0)
+            a = float(anchors[i])
+            c, hw = _row_extent(binm[i], a, reach)
+            if hw <= 0:
+                centre[i], half[i] = a, 1.0
+                continue
+            centre[i], half[i] = c, hw
+            # Carry the body's width downward as the limit on what counts as
+            # part of it, so an outstretched arm cannot inflate the torso and
+            # a far-off object cannot join the legs.
+            reach = max(reach * 0.7 + hw * 2.0 * 0.3, 4.0)
         valid = (counts > sw * 0.01).astype(np.float32)
 
         # Smooth down the body so an arm entering the silhouette does not step
         # the profile, then resample onto the warp grid's rows.
         k = max(3, int(sh * 0.05) | 1)
-        centre = cv2.GaussianBlur(centre.reshape(-1, 1), (1, k), 0).ravel() * (mw / sw)
-        half = cv2.GaussianBlur(half.reshape(-1, 1), (1, k), 0).ravel() * (mw / sw)
+        centre = cv2.GaussianBlur(centre.reshape(-1, 1), (1, k), 0).ravel() / scale
+        half = cv2.GaussianBlur(half.reshape(-1, 1), (1, k), 0).ravel() / scale
         valid = cv2.GaussianBlur(valid.reshape(-1, 1), (1, k), 0).ravel()
 
         # Back to full-resolution rows. The profile was measured on a 192-row
@@ -429,34 +461,37 @@ class BodyProfiler:
                 self._valid.update(v).copy())
 
 
-def _run_through(row: np.ndarray, anchor: float) -> tuple[float, float]:
-    """Centre and half-width of the mask run containing `anchor`.
+def _row_extent(row: np.ndarray, anchor: float, reach: float) -> tuple[float, float]:
+    """
+    Centre and half-width of the body in one row, measured about `anchor`.
 
-    This is the fix for arms. Measuring a row's width by counting its mask
-    pixels means an arm held away from the body is added to the torso's width,
-    so the warp thinks the body is much wider than it is and puts its peak
-    displacement out on the arm - which then bends inward with everything
-    else. Taking only the connected run through the body's centre line
-    measures the torso and leaves a separated arm out of it entirely, where
-    the lateral falloff reduces it to almost nothing.
+    Runs further than `reach` from the anchor are not this body - that is what
+    keeps an outstretched arm from being counted as torso width. Everything
+    nearer is, including the second run when the legs are apart, so a split row
+    reports one width about one centre and the two legs move together.
     """
     idx = np.flatnonzero(row)
     if idx.size == 0:
         return 0.0, 0.0
-    # Run boundaries: positions where the mask turns on or off.
     breaks = np.flatnonzero(np.diff(idx) > 1)
-    starts = np.concatenate(([idx[0]], idx[breaks + 1]))
-    ends = np.concatenate((idx[breaks], [idx[-1]]))
-    a = int(np.clip(round(anchor), 0, row.size - 1))
-    hit = np.flatnonzero((starts <= a) & (ends >= a))
-    if hit.size:
-        i = int(hit[0])
-    else:
-        # The anchor is off the body (an arm-only row, or a gap): fall back to
-        # the widest run, which is the torso wherever there is one.
-        i = int(np.argmax(ends - starts))
-    lo, hi = float(starts[i]), float(ends[i])
-    return (lo + hi) * 0.5, (hi - lo) * 0.5
+    starts = np.concatenate(([idx[0]], idx[breaks + 1])).astype(np.float32)
+    ends = np.concatenate((idx[breaks], [idx[-1]])).astype(np.float32)
+
+    # Distance from the anchor to each run (zero when the anchor is inside it).
+    gap = np.maximum(np.maximum(starts - anchor, anchor - ends), 0.0)
+    keep = gap <= reach
+    if not keep.any():
+        # Nothing close: fall back to the run nearest the anchor, so a frame
+        # where the tracker drifts does not silently disable the row.
+        keep = gap == gap.min()
+    lo = float(starts[keep].min())
+    hi = float(ends[keep].max())
+    # The centre stays on the anchor whenever the anchor is inside the body's
+    # span; only a row entirely to one side re-centres, and then only to the
+    # near edge of what it found.
+    centre = anchor if lo <= anchor <= hi else (lo + hi) * 0.5
+    half = max(abs(hi - centre), abs(centre - lo), 1.0)
+    return float(centre), float(half)
 
 
 def _torso_length(body: Body, frame_h: int) -> float:
@@ -498,6 +533,62 @@ def _torso_bands(body: Body, torso: float, frame_h: int) -> tuple[float, float, 
     return waist_y, bust_y, hip_y
 
 
+def _pose_centre_line(body: Body, rows: np.ndarray) -> np.ndarray | None:
+    """The body's axis, x per row, from the pose.
+
+    Built from the shoulder, hip, knee and ankle midpoints and interpolated
+    between them, so it follows a body that leans or steps sideways - and, for
+    the rows where the legs are apart and the silhouette has no middle, it is
+    the only thing that knows where the middle is.
+    """
+    pts = body.points
+    vis = body.visibility
+    anchors: list[tuple[float, float]] = []
+
+    def pair(a: int, b: int) -> tuple[float, float] | None:
+        ok_a, ok_b = vis[a] >= 0.3, vis[b] >= 0.3
+        if ok_a and ok_b:
+            return ((pts[a][1] + pts[b][1]) * 0.5, (pts[a][0] + pts[b][0]) * 0.5)
+        if ok_a:
+            return (float(pts[a][1]), float(pts[a][0]))
+        if ok_b:
+            return (float(pts[b][1]), float(pts[b][0]))
+        return None
+
+    for a, b in ((P_SHOULDER_L, P_SHOULDER_R), (P_HIP_L, P_HIP_R),
+                 (P_KNEE_L, P_KNEE_R), (P_ANKLE_L, P_ANKLE_R)):
+        got = pair(a, b)
+        if got is not None:
+            anchors.append(got)
+    if len(anchors) < 2:
+        return None
+    anchors.sort(key=lambda t: t[0])
+    ys = np.array([a[0] for a in anchors], np.float32)
+    xs = np.array([a[1] for a in anchors], np.float32)
+    # Flat extrapolation past the ends: above the shoulders and below the feet
+    # the axis simply continues, rather than shooting off at the last slope.
+    return np.interp(rows, ys, xs).astype(np.float32)
+
+
+def _leg_taper(body: Body, rows: np.ndarray) -> np.ndarray:
+    """1 above the knees, fading to 0 at the ankles.
+
+    Below the knee a leg is narrow, moves fast and sits against background, so
+    a warp there buys almost nothing and shows up as calves that do not line up
+    with the knees. The thighs - where slimming actually reads - keep the full
+    amount.
+    """
+    knees = [body.points[i][1] for i in (P_KNEE_L, P_KNEE_R) if body.visibility[i] >= 0.3]
+    ankles = [body.points[i][1] for i in (P_ANKLE_L, P_ANKLE_R) if body.visibility[i] >= 0.3]
+    if not knees:
+        return np.ones_like(rows)
+    knee_y = float(np.mean(knees))
+    ankle_y = float(np.mean(ankles)) if ankles else knee_y + abs(knee_y - body.hip_y)
+    if ankle_y <= knee_y + 1:
+        return np.ones_like(rows)
+    return 1.0 - smoothstep(knee_y, ankle_y, rows)
+
+
 def _band(rows: np.ndarray, centre: float, sigma: float) -> np.ndarray:
     if sigma <= 1:
         return np.zeros_like(rows)
@@ -517,8 +608,8 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
         return
     h, w = shape[:2]
     rows = field.gy
-    hint = body.centre_x if body is not None else None
-    centre, half, valid = profiler.profile(mask, rows, w, centre_hint=hint)
+    axis = _pose_centre_line(body, rows) if body is not None else None
+    centre, half, valid = profiler.profile(mask, rows, w, centre_line=axis)
     if float(valid.max()) <= 0.05:
         return
 
@@ -622,6 +713,11 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
         gate = smoothstep(gate_y - span, gate_y + span * 2.0, rows)
         amount = amount * gate
         band_amount = band_amount * gate
+
+    if body is not None:
+        taper = _leg_taper(body, rows)
+        amount = amount * taper
+        band_amount = band_amount * taper
 
     if np.any(amount):
         field.add_row_squeeze(centre, half, amount, valid)
