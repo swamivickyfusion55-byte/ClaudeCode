@@ -26,10 +26,12 @@ CAPS = {
     "teeth_whiten": 0.70,
     "lip_enhance": 0.55,
     "face_slim": 0.60,
+    "face_round": 0.55,
     "chin_shape": 0.55,
     "nose_slim": 0.45,
     "eye_enlarge": 0.35,
     "body_slim": 0.75,
+    "body_fuller": 0.70,
     "waist_shape": 0.85,
     "curve_shape": 0.80,
     # Widening is capped lower than narrowing on purpose: an outward push
@@ -78,12 +80,14 @@ class Settings:
 
     # ---- face shape ------------------------------------------------------
     face_slim: float = 0.25         # jaw + cheek narrowing
+    face_round: float = 0.0         # jaw + cheek widening (the opposite)
     chin_shape: float = 0.15        # chin taper
     nose_slim: float = 0.10
     eye_enlarge: float = 0.10
 
     # ---- body shape ------------------------------------------------------
     body_slim: float = 0.20         # whole-silhouette narrowing
+    body_fuller: float = 0.0        # whole-silhouette widening (the opposite)
     waist_shape: float = 0.25       # waist pinch
     curve_shape: float = 0.20       # hourglass: waist in, hips/bust out, together
     bust_shape: float = 0.0         # bust/chest width on its own
@@ -141,12 +145,12 @@ class Settings:
         return any(getattr(self, k) > 0 for k in (
             "skin_smooth", "skin_even", "blemish", "glow", "eye_brighten",
             "teeth_whiten", "lip_enhance", "under_eye", "face_slim",
-            "chin_shape", "nose_slim", "eye_enlarge"))
+            "face_round", "chin_shape", "nose_slim", "eye_enlarge"))
 
     def touches_body(self) -> bool:
         return any(getattr(self, k) != 0 for k in
-                   ("body_slim", "waist_shape", "curve_shape", "bust_shape",
-                    "hip_shape", "posture"))
+                   ("body_slim", "body_fuller", "waist_shape", "curve_shape",
+                    "bust_shape", "hip_shape", "posture"))
 
     def touches_hair(self) -> bool:
         return any(getattr(self, k) > 0 for k in
@@ -219,6 +223,40 @@ PRESETS: dict[str, Settings] = {
         bust_shape=0.70, hip_shape=0.80, hair_detail=0.50, hair_shine=0.42,
         hair_volume=0.30, hair_frizz=0.50, hair_richness=0.40, naturalness=1.0),
 
+    # Fuller figure, three strengths. The mirror image of the slimming
+    # presets: the silhouette goes out instead of in, the face rounds rather
+    # than tapers, and the waist is left alone - a fuller figure that keeps a
+    # pinched waist reads as two edits arguing with each other.
+    "Chubby (light)": Settings(
+        hdr_strength=0.50, clarity=0.32, vibrance=0.32, contrast=0.20, bloom=0.14,
+        sharpen=0.26, skin_smooth=0.42, texture=0.68, skin_even=0.40, blemish=0.50,
+        glow=0.26, eye_brighten=0.35, teeth_whiten=0.28, lip_enhance=0.25,
+        under_eye=0.38, face_slim=0.0, face_round=0.15, chin_shape=0.0,
+        nose_slim=0.0, eye_enlarge=0.0, body_slim=0.0, body_fuller=0.25,
+        waist_shape=0.0, curve_shape=0.0, bust_shape=0.10, hip_shape=0.15,
+        hair_detail=0.42, hair_shine=0.32, hair_volume=0.22, hair_frizz=0.42,
+        hair_richness=0.32, naturalness=0.95),
+
+    "Chubby (medium)": Settings(
+        hdr_strength=0.50, clarity=0.32, vibrance=0.32, contrast=0.20, bloom=0.14,
+        sharpen=0.26, skin_smooth=0.45, texture=0.66, skin_even=0.42, blemish=0.52,
+        glow=0.28, eye_brighten=0.36, teeth_whiten=0.28, lip_enhance=0.26,
+        under_eye=0.40, face_slim=0.0, face_round=0.32, chin_shape=0.0,
+        nose_slim=0.0, eye_enlarge=0.0, body_slim=0.0, body_fuller=0.50,
+        waist_shape=0.0, curve_shape=0.0, bust_shape=0.20, hip_shape=0.28,
+        hair_detail=0.42, hair_shine=0.32, hair_volume=0.22, hair_frizz=0.42,
+        hair_richness=0.32, naturalness=0.95),
+
+    "Chubby (heavy)": Settings(
+        hdr_strength=0.50, clarity=0.30, vibrance=0.32, contrast=0.20, bloom=0.14,
+        sharpen=0.24, skin_smooth=0.48, texture=0.64, skin_even=0.45, blemish=0.55,
+        glow=0.30, eye_brighten=0.36, teeth_whiten=0.28, lip_enhance=0.26,
+        under_eye=0.42, face_slim=0.0, face_round=0.52, chin_shape=0.0,
+        nose_slim=0.0, eye_enlarge=0.0, body_slim=0.0, body_fuller=0.80,
+        waist_shape=0.0, curve_shape=0.0, bust_shape=0.30, hip_shape=0.42,
+        hair_detail=0.42, hair_shine=0.32, hair_volume=0.22, hair_frizz=0.42,
+        hair_richness=0.32, naturalness=1.0),
+
     # Shape work only - for when the grade is already done elsewhere.
     "Shape Only": Settings(
         hdr_strength=0.0, clarity=0.0, vibrance=0.0, contrast=0.0, bloom=0.0,
@@ -251,8 +289,8 @@ DEFAULT_PRESET = "Natural"
 PERSON_AMOUNTS = (
     "skin_smooth", "skin_even", "blemish", "glow", "eye_brighten",
     "teeth_whiten", "lip_enhance", "under_eye", "face_slim", "chin_shape",
-    "nose_slim", "eye_enlarge", "body_slim", "waist_shape", "curve_shape",
-    "bust_shape", "hip_shape",
+    "nose_slim", "eye_enlarge", "face_round", "body_slim", "body_fuller",
+    "waist_shape", "curve_shape", "bust_shape", "hip_shape",
     "hair_detail", "hair_shine", "hair_volume", "hair_frizz", "hair_richness",
 )
 

@@ -30,6 +30,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(_here))
     __package__ = os.path.basename(_here)
 
+from . import retention
 from .mp_backend import mediapipe_ready, mediapipe_status
 from .pipeline import (Cancelled, FrameProcessor, capability_report, grab_frame,
                        probe, process_image, render_video)
@@ -38,7 +39,7 @@ from .settings import DEFAULT_PRESET, PRESETS, Settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.3.0 (Aurora)"
+VERSION = "v1.4.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -71,12 +72,14 @@ GROUPS: list[tuple[str, list[tuple[str, str, bool, str]]]] = [
     ]),
     ("Face shape", [
         ("face_slim", "Slim face", False, "Narrows jaw and cheeks toward the face's own centre line"),
+        ("face_round", "Rounder face", False, "The opposite: fuller cheeks and a softer jaw"),
         ("chin_shape", "Chin taper", False, "Shortens and tapers the chin"),
         ("nose_slim", "Nose width", False, "Narrows the nostril wings"),
         ("eye_enlarge", "Eye size", False, "Enlarges the eyes slightly"),
     ]),
     ("Body shape", [
-        ("body_slim", "Slim silhouette", False, "Narrows the whole visible body"),
+        ("body_slim", "Slim silhouette", False, "Narrows the whole visible body below the shoulders"),
+        ("body_fuller", "Fuller body", False, "The opposite: widens the whole visible body"),
         ("waist_shape", "Waist", False, "Pinches at the waist line"),
         ("curve_shape", "Curvy (hourglass)", False,
          "One control for the whole shape: in at the waist, out at bust and hips"),
@@ -257,6 +260,14 @@ def on_render(path, start, end, *args, progress=gr.Progress()):
     yield res["path"], _status("<br>".join(lines)), gr.update(interactive=True), ""
 
 
+def on_purge():
+    items, freed = retention.purge_now()
+    if not items:
+        return _status("Nothing left to delete - the working directories are already empty.")
+    return _status(f"Deleted {items} item{'s' if items != 1 else ''} "
+                   f"({freed / 1e6:.1f} MB) — uploads, renders and previews.")
+
+
 def _status(msg: str, bad: bool = False) -> str:
     colour = "#F2A3B3" if bad else "#94B8D8"
     return (f"<div class='status' style='color:{colour}'>{msg}</div>")
@@ -375,6 +386,7 @@ def build() -> gr.Blocks:
                                         info="Lower is better quality and a bigger file")
                     protect_skin = gr.Checkbox(True, label="Protect skin from the colour boost")
                     stabilise = gr.Checkbox(True, label="Temporal stabilisation (video)")
+                    purge_btn = gr.Button("Delete my files now", elem_classes=["btn-s"])
                     hdr10 = gr.Checkbox(False, label="HDR10 export (experimental)",
                                         info="BT.2020 + PQ, if this ffmpeg build supports it. "
                                              "An inverse tone map of SDR - it does not recover "
@@ -391,8 +403,10 @@ def build() -> gr.Blocks:
                          outputs=[video_out, status, render_btn, job_state])
         stop_btn.click(on_cancel, inputs=job_state, outputs=status)
         photo_btn.click(on_photo, inputs=[photo_in] + controls, outputs=photo_out)
+        purge_btn.click(on_purge, outputs=status)
 
         gr.Markdown(
+            retention.policy_text() + " "
             "Edits are applied to the video you upload, on this machine. "
             "Shape adjustments are capped so the result stays believable - "
             "this is a retouching tool for your own footage, not an identity editor.",
@@ -401,6 +415,7 @@ def build() -> gr.Blocks:
 
 
 def main():
+    retention.start()
     demo = build()
     demo.queue(max_size=8)
     demo.launch(server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),

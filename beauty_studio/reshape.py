@@ -24,7 +24,7 @@ import numpy as np
 
 import cv2
 
-from .imaging import EMA
+from .imaging import EMA, smoothstep
 from .landmarks import (CHIN, JAW_LEFT, JAW_RIGHT, LEFT_EYE, LEFT_IRIS,
                         NOSE_BRIDGE, NOSE_TIP, NOSE_WING_L, NOSE_WING_R,
                         P_SHOULDER_L, P_SHOULDER_R, RIGHT_EYE, RIGHT_IRIS,
@@ -134,7 +134,7 @@ class WarpField:
         off = self.X - cx
         u = np.abs(off) / hw
         inner = u
-        outer = np.exp(-(((u - 1.0) / 0.45) ** 2))
+        outer = np.exp(-(((u - 1.0) / 0.32) ** 2))
         f = np.where(u <= 1.0, inner, outer)
         self.dx += np.sign(off) * f * hw * a * v
         self.dirty = True
@@ -147,7 +147,7 @@ class WarpField:
             return 0.0
         return float(max(np.abs(self.dx).max(), np.abs(self.dy).max()))
 
-    def clamp(self, max_fraction: float = 0.06):
+    def clamp(self, max_fraction: float = 0.045):
         """Hard ceiling on displacement, as a fraction of the long edge.
 
         A slider is a request, not a licence: past a few percent the result
@@ -193,6 +193,18 @@ def _perp_inward(f: Face, p: np.ndarray) -> np.ndarray:
 def add_face_reshape(field: WarpField, f: Face, s) -> None:
     """Jaw, chin, nose and eye adjustments, written into the shared field."""
     fw, fh = f.width, f.height
+
+    if s.face_round > 0:
+        # Outward where face_slim goes inward: a fuller cheek and a softer
+        # jaw. Weaker than the slimming equivalent, because widening a face
+        # has to push into the background and shows sooner.
+        weights = [0.20, 0.50, 0.85, 1.0, 0.95, 0.70, 0.40]
+        amount = -s.face_round * fw * 0.055
+        for side in (JAW_LEFT, JAW_RIGHT):
+            for idx, wgt in zip(side[2:9], weights):
+                p = f.p(idx)
+                d = _perp_inward(f, p) * (amount * wgt)
+                field.add_local_translation(p, p + d, radius=fw * 0.45)
 
     if s.face_slim > 0:
         # Weighted along the jaw: most at the cheek/jaw corner, least at the
@@ -271,34 +283,78 @@ class BodyProfiler:
         self._half = EMA(a, reset_distance=30.0)
         self._valid = EMA(a, reset_distance=0.5)
 
-    def profile(self, mask: np.ndarray, rows: np.ndarray, w: int):
+    WORK_ROWS = 192      # the profile is smooth; it does not need full height
+
+    def profile(self, mask: np.ndarray, rows: np.ndarray, w: int,
+                centre_hint: float | None = None):
         """`rows` are full-resolution y positions (the warp grid's rows)."""
         h, mw = mask.shape[:2]
-        binm = (mask > 0.5)
+        small = cv2.resize(mask, (max(32, mw * self.WORK_ROWS // max(h, 1)), self.WORK_ROWS),
+                           interpolation=cv2.INTER_AREA)
+        sh, sw = small.shape[:2]
+        binm = small > 0.5
         counts = binm.sum(axis=1).astype(np.float32)
-        xs = np.arange(mw, dtype=np.float32)[None, :]
+        xs = np.arange(sw, dtype=np.float32)[None, :]
         weighted = (binm * xs).sum(axis=1)
-        centre = np.where(counts > 0, weighted / np.maximum(counts, 1), mw * 0.5)
-        # Half width from the pixel count rather than the extreme columns: an
-        # outstretched arm should not decide how wide the torso is.
-        half = np.maximum(counts * 0.5, 1.0)
-        valid = (counts > mw * 0.01).astype(np.float32)
+        centroid = np.where(counts > 0, weighted / np.maximum(counts, 1), sw * 0.5)
+        hint = (centre_hint * sw / max(mw, 1)) if centre_hint is not None else None
+
+        centre = np.empty(sh, np.float32)
+        half = np.empty(sh, np.float32)
+        for i in range(sh):
+            anchor = hint if hint is not None else centroid[i]
+            c, hw = _run_through(binm[i], anchor)
+            centre[i] = c if hw > 0 else centroid[i]
+            half[i] = max(hw, 1.0)
+        valid = (counts > sw * 0.01).astype(np.float32)
 
         # Smooth down the body so an arm entering the silhouette does not step
         # the profile, then resample onto the warp grid's rows.
-        k = max(3, int(h * 0.05) | 1)
-        centre = cv2.GaussianBlur(centre.reshape(-1, 1), (1, k), 0).ravel()
-        half = cv2.GaussianBlur(half.reshape(-1, 1), (1, k), 0).ravel()
+        k = max(3, int(sh * 0.05) | 1)
+        centre = cv2.GaussianBlur(centre.reshape(-1, 1), (1, k), 0).ravel() * (mw / sw)
+        half = cv2.GaussianBlur(half.reshape(-1, 1), (1, k), 0).ravel() * (mw / sw)
         valid = cv2.GaussianBlur(valid.reshape(-1, 1), (1, k), 0).ravel()
 
-        yy = np.clip(rows, 0, h - 1)
-        c = np.interp(yy, np.arange(h), centre).astype(np.float32)
-        hw = np.interp(yy, np.arange(h), half).astype(np.float32)
-        v = np.clip(np.interp(yy, np.arange(h), valid), 0.0, 1.0).astype(np.float32)
+        # Back to full-resolution rows. The profile was measured on a 192-row
+        # copy, so the sample positions scale with it.
+        yy = np.clip(rows * (sh / max(h, 1)), 0, sh - 1)
+        c = np.interp(yy, np.arange(sh), centre).astype(np.float32)
+        hw = np.interp(yy, np.arange(sh), half).astype(np.float32)
+        v = np.clip(np.interp(yy, np.arange(sh), valid), 0.0, 1.0).astype(np.float32)
 
         return (self._centre.update(c).copy(),
                 self._half.update(hw).copy(),
                 self._valid.update(v).copy())
+
+
+def _run_through(row: np.ndarray, anchor: float) -> tuple[float, float]:
+    """Centre and half-width of the mask run containing `anchor`.
+
+    This is the fix for arms. Measuring a row's width by counting its mask
+    pixels means an arm held away from the body is added to the torso's width,
+    so the warp thinks the body is much wider than it is and puts its peak
+    displacement out on the arm - which then bends inward with everything
+    else. Taking only the connected run through the body's centre line
+    measures the torso and leaves a separated arm out of it entirely, where
+    the lateral falloff reduces it to almost nothing.
+    """
+    idx = np.flatnonzero(row)
+    if idx.size == 0:
+        return 0.0, 0.0
+    # Run boundaries: positions where the mask turns on or off.
+    breaks = np.flatnonzero(np.diff(idx) > 1)
+    starts = np.concatenate(([idx[0]], idx[breaks + 1]))
+    ends = np.concatenate((idx[breaks], [idx[-1]]))
+    a = int(np.clip(round(anchor), 0, row.size - 1))
+    hit = np.flatnonzero((starts <= a) & (ends >= a))
+    if hit.size:
+        i = int(hit[0])
+    else:
+        # The anchor is off the body (an arm-only row, or a gap): fall back to
+        # the widest run, which is the torso wherever there is one.
+        i = int(np.argmax(ends - starts))
+    lo, hi = float(starts[i]), float(ends[i])
+    return (lo + hi) * 0.5, (hi - lo) * 0.5
 
 
 def _torso_length(body: Body, frame_h: int) -> float:
@@ -347,7 +403,7 @@ def _band(rows: np.ndarray, centre: float, sigma: float) -> np.ndarray:
 
 
 def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | None,
-                     profiler: BodyProfiler, s, shape) -> None:
+                     profiler: BodyProfiler, s, shape, head_y: float | None = None) -> None:
     """
     Silhouette adjustments: overall slimming, waist, and the hourglass.
 
@@ -359,11 +415,21 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
         return
     h, w = shape[:2]
     rows = field.gy
-    centre, half, valid = profiler.profile(mask, rows, w)
+    hint = body.centre_x if body is not None else None
+    centre, half, valid = profiler.profile(mask, rows, w, centre_hint=hint)
     if float(valid.max()) <= 0.05:
         return
 
+    # Two separate fields, because they answer to different widths.
+    #   silhouette: overall slimming or filling, measured on the whole visible
+    #               outline, arms included - they are part of "the body".
+    #   bands:      waist, bust and hips, which are TORSO features. Measuring
+    #               those against a silhouette that includes the arms puts
+    #               their peak displacement out on the arms, which then bulge
+    #               or pinch with the torso. That is what made a chest-up shot
+    #               look bent.
     amount = np.zeros_like(rows)
+    band_amount = np.zeros_like(rows)
 
     # These coefficients are the fraction of the body's own half-width the
     # silhouette moves at full slider. They were raised substantially in
@@ -373,30 +439,48 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
     # conservative control, it is a broken one.
     if s.body_slim > 0:
         amount += s.body_slim * 0.16
+    if s.body_fuller > 0:
+        # The same control pointing the other way: negative amount pushes the
+        # silhouette out instead of in.
+        amount -= s.body_fuller * 0.15
 
     if body is not None:
         torso = _torso_length(body, h)
         waist_y, bust_y, hip_y = _torso_bands(body, torso, h)
+
+        # A band whose centre is off the picture is not a band, it is a guess
+        # with a tail. On a chest-up shot the estimated waist lands below the
+        # frame, and that tail was squeezing the shoulders and arms at the
+        # bottom edge - the "everything curves inwards" this produced. If the
+        # landmark is not in shot, the control that depends on it sits out.
+        def in_frame(y: float) -> bool:
+            return -h * 0.02 <= y <= h * 1.02
+
+        waist_ok, bust_ok, hip_ok = in_frame(waist_y), in_frame(bust_y), in_frame(hip_y)
+
         # Band widths are a fifth to a quarter of the torso, not a third.
         # Wider than this and the bands overlap so heavily that the waist
         # pinch bleeds into the bust band and cancels it - which is exactly
         # what made a "curvy" setting narrow the chest instead of filling it.
-        if s.waist_shape > 0:
-            amount += _band(rows, waist_y, torso * 0.21) * (s.waist_shape * 0.26)
+        if s.waist_shape > 0 and waist_ok:
+            band_amount += _band(rows, waist_y, torso * 0.21) * (s.waist_shape * 0.26)
         if s.curve_shape > 0:
             # Hourglass in one control: in at the waist, out at the bust and
             # hips together. The outward halves are weaker than the inward one
             # - widening reads as a distortion sooner, because it has to
             # invent silhouette where background used to be.
-            amount += _band(rows, waist_y, torso * 0.20) * (s.curve_shape * 0.20)
-            amount -= _band(rows, bust_y, torso * 0.20) * (s.curve_shape * 0.11)
-            amount -= _band(rows, hip_y, torso * 0.26) * (s.curve_shape * 0.13)
+            if waist_ok:
+                band_amount += _band(rows, waist_y, torso * 0.20) * (s.curve_shape * 0.20)
+            if bust_ok:
+                band_amount -= _band(rows, bust_y, torso * 0.20) * (s.curve_shape * 0.11)
+            if hip_ok:
+                band_amount -= _band(rows, hip_y, torso * 0.26) * (s.curve_shape * 0.13)
         # The same two halves as separate controls, for shaping one without
         # the other - a fuller bust with the hips left alone, or the reverse.
-        if s.bust_shape > 0:
-            amount -= _band(rows, bust_y, torso * 0.21) * (s.bust_shape * 0.17)
-        if s.hip_shape > 0:
-            amount -= _band(rows, hip_y, torso * 0.27) * (s.hip_shape * 0.19)
+        if s.bust_shape > 0 and bust_ok:
+            band_amount -= _band(rows, bust_y, torso * 0.21) * (s.bust_shape * 0.17)
+        if s.hip_shape > 0 and hip_ok:
+            band_amount -= _band(rows, hip_y, torso * 0.27) * (s.hip_shape * 0.19)
     elif s.waist_shape > 0 or s.curve_shape > 0 or s.bust_shape > 0 or s.hip_shape > 0:
         # No pose: put the waist at the narrowest row in the middle of the
         # visible silhouette rather than guessing from a fixed proportion.
@@ -408,7 +492,7 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
             if len(seg) > 2:
                 waist_row = rows[mid][int(np.argmin(seg))]
                 span = float(rows[hi] - rows[lo])
-                amount += _band(rows, waist_row, max(span * 0.18, h * 0.05)) * \
+                band_amount += _band(rows, waist_row, max(span * 0.18, h * 0.05)) * \
                     (max(s.waist_shape, s.curve_shape) * 0.18)
                 # No pose means no reliable bust or hip line; widening blind
                 # would land the fullness in the wrong place, so those two
@@ -419,9 +503,34 @@ def add_body_reshape(field: WarpField, mask: np.ndarray | None, body: Body | Non
     # and the frame-relative clamp in WarpField is too coarse to catch it,
     # because a small subject can be wildly distorted while moving far fewer
     # pixels than a frame-relative limit allows.
-    np.clip(amount, -0.22, 0.30, out=amount)
+    np.clip(amount, -0.20, 0.24, out=amount)
+    np.clip(band_amount, -0.20, 0.24, out=band_amount)
 
-    field.add_row_squeeze(centre, half, amount, valid)
+    # Nothing above the shoulders. The person mask includes the head, so a
+    # whole-silhouette squeeze was narrowing the skull and jaw along with the
+    # body - which is most of what "everything curves inwards" looks like. The
+    # gate ramps in over the neck so there is no step at the collar.
+    gate_y = None
+    if body is not None:
+        gate_y = body.shoulder_y
+    elif head_y is not None:
+        gate_y = head_y
+    if gate_y is not None:
+        span = max(float(np.ptp(rows)) * 0.04, 8.0)
+        gate = smoothstep(gate_y - span, gate_y + span * 2.0, rows)
+        amount = amount * gate
+        band_amount = band_amount * gate
+
+    if np.any(amount):
+        field.add_row_squeeze(centre, half, amount, valid)
+    if np.any(band_amount):
+        # Torso width for the bands: the shoulder span from the pose, never
+        # wider than the silhouette itself. Arms sit outside it, where the
+        # lateral falloff leaves them alone.
+        torso_half = half
+        if body is not None:
+            torso_half = np.minimum(half, max(body.shoulder_w * 0.55, 8.0))
+        field.add_row_squeeze(centre, torso_half, band_amount, valid)
 
     if body is not None and s.posture != 0:
         # Shoulders up (or down) a touch. Small radius, small move: this is

@@ -117,13 +117,19 @@ class FrameProcessor:
         if faces and s.touches_hair():
             img = enhance_hair(img, faces, person, body, s)
 
-        if (faces and (s.face_slim or s.chin_shape or s.nose_slim or s.eye_enlarge)) \
+        if (faces and (s.face_slim or s.face_round or s.chin_shape or s.nose_slim
+                       or s.eye_enlarge)) \
                 or (person is not None and s.touches_body()):
             h, w = img.shape[:2]
             field = WarpField(w, h)
             for f in faces:
                 add_face_reshape(field, f, s)
-            add_body_reshape(field, person, body, self.profiler, s, img.shape)
+            # Where the head ends, for the body warp's benefit: without a pose
+            # it is the only way to keep a whole-silhouette squeeze off the
+            # skull.
+            head_y = max((float(f.p(152)[1]) for f in faces), default=None) if faces else None
+            add_body_reshape(field, person, body, self.profiler, s, img.shape,
+                             head_y=head_y)
             img = field.apply(img)
             self.max_shift_px = max(self.max_shift_px, field.max_shift())
 

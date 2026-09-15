@@ -81,12 +81,22 @@ def main(argv=None) -> int:
     ap.add_argument("--list-presets", action="store_true")
     ap.add_argument("--selftest", action="store_true",
                     help="render a synthetic clip to check the install end to end")
+    ap.add_argument("--purge", action="store_true",
+                    help="delete all uploads, renders and working files now")
+    ap.add_argument("--purge-models", action="store_true",
+                    help="with --purge, also drop the cached MediaPipe models")
     ap.add_argument("--doctor", action="store_true",
                     help="print what this install can and cannot do, and why")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     print(capability_report())
+
+    if args.purge:
+        from . import retention
+        items, freed = retention.purge_now(include_models=args.purge_models)
+        print(f"deleted {items} items ({freed / 1e6:.1f} MB)")
+        return 0
 
     if args.doctor:
         from .mp_backend import diagnostics

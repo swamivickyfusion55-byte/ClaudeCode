@@ -59,6 +59,23 @@ the silhouette from the segmentation mask - not the pose skeleton, which says
 nothing about how wide a coat is - with the waist, bust and hip bands located
 from the pose.
 
+Three rules keep it from bending the person, all learned the hard way:
+
+- **Nothing above the shoulders.** The person mask includes the head, so a
+  whole-silhouette squeeze used to narrow the skull and jaw along with the
+  body. The field is gated at the shoulder line now, ramped over the neck.
+- **Torso features use torso width.** Waist, bust and hips are measured
+  against the shoulder span, not the whole outline. Measured against the
+  outline, their peak displacement lands out on the arms, which then bend
+  with the torso.
+- **A band whose centre is off-screen sits out.** On a chest-up shot the
+  estimated waist lands below the frame, and its tail was squeezing the
+  shoulders at the bottom edge. No waist in shot, no waist shaping - the
+  render report says when this happens.
+
+Row widths come from the connected run of silhouette through the body's centre
+line, so an arm held away from the body is not counted as part of the torso.
+
 Bust, waist and hips are separate bands, positioned from the shoulder line and
 the torso length rather than read straight off the pose - a subject framed from
 the chest up still gets a waist in a sensible place instead of one extrapolated
@@ -101,6 +118,7 @@ found one ramps up over a few, so effects never pop on and off between frames.
 | **Glam** | Everything up, still inside the caps. |
 | **Curvy** | The hourglass by name: waist in, bust and hips out, lightly graded. |
 | **Curvy (strong)** | The same shape, pushed. |
+| **Chubby (light / medium / heavy)** | The other direction: fuller silhouette, rounder face, waist left alone. |
 | **Shape Only** | Reshaping with no grade or retouch. |
 | **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
 
@@ -280,6 +298,20 @@ NumPy - no GPU is required and none is used.
 | `imaging.py` | Guided filter, blend modes, masks, EMA |
 | `settings.py` | Every knob, the caps, the presets |
 | `selftest.py` | Synthetic end-to-end check |
+
+## Data retention
+
+Uploads, renders, previews and working files are deleted automatically **three
+hours** after they are last touched. A janitor thread sweeps every ten minutes;
+the UI has a **Delete my files now** button, and the CLI has `--purge`.
+
+- `BEAUTY_RETENTION_HOURS` changes the window (e.g. `0.5` for thirty minutes).
+- Swept: this app's render directories and Gradio's cache, which is where
+  uploads and the files served back to the browser live. Both are addressed by
+  name - sweeping a whole temp directory would risk another process's files.
+- Not swept by default: the MediaPipe model cache. Those are weights, not
+  anyone's data, and dropping them only forces a re-download. Add
+  `BEAUTY_PURGE_MODELS=1` to include them, or use `--purge --purge-models`.
 
 ## A note on what this is for
 
