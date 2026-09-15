@@ -76,6 +76,12 @@ Three rules keep it from bending the person, all learned the hard way:
 Row widths come from the connected run of silhouette through the body's centre
 line, so an arm held away from the body is not counted as part of the torso.
 
+A fuller **face** is a different mechanism from a slimmer one. Slimming only
+has to move the jaw line inward, but dragging an outline outward leaves the
+nose and mouth where they were and stretches the picture between them. So
+**Rounder face** scales the lower face about its own axis instead: everything
+inside widens together, which is what a fuller face actually is.
+
 Bust, waist and hips are separate bands, positioned from the shoulder line and
 the torso length rather than read straight off the pose - a subject framed from
 the chest up still gets a waist in a sensible place instead of one extrapolated
@@ -118,7 +124,7 @@ found one ramps up over a few, so effects never pop on and off between frames.
 | **Glam** | Everything up, still inside the caps. |
 | **Curvy** | The hourglass by name: waist in, bust and hips out, lightly graded. |
 | **Curvy (strong)** | The same shape, pushed. |
-| **Chubby (light / medium / heavy)** | The other direction: fuller silhouette, rounder face, waist left alone. |
+| **Chubby (light / medium / heavy)** | The other direction: fuller face and silhouette, waist left alone. Face widens ~3 / 5 / 7%. |
 | **Shape Only** | Reshaping with no grade or retouch. |
 | **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
 

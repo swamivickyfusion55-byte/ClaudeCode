@@ -87,6 +87,8 @@ class FrameProcessor:
         # never ran" are indistinguishable from the outside, and they need
         # opposite fixes.
         self.max_shift_px = 0.0
+        self.max_face_shift_px = 0.0
+        self.max_body_shift_px = 0.0
 
     def close(self):
         self.trackers.close()
@@ -132,6 +134,19 @@ class FrameProcessor:
                              head_y=head_y)
             img = field.apply(img)
             self.max_shift_px = max(self.max_shift_px, field.max_shift())
+            if faces:
+                # Face and body work fail for different reasons, so they are
+                # measured apart: a face box's worth of displacement, and the
+                # largest anywhere outside it.
+                box = faces[0].box()
+                pad = int(faces[0].width * 0.3)
+                box = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
+                self.max_face_shift_px = max(self.max_face_shift_px,
+                                             field.max_shift(box))
+                self.max_body_shift_px = max(self.max_body_shift_px,
+                                             field.max_shift(box, outside=True))
+            else:
+                self.max_body_shift_px = max(self.max_body_shift_px, field.max_shift())
 
         img = self.grader.apply(img, s)
         return to_u8(img)
@@ -341,6 +356,8 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         "bodies_seen": fp.frames_with_body,
         "persons_seen": fp.frames_with_person,
         "max_shift_px": fp.max_shift_px,
+        "max_face_shift_px": fp.max_face_shift_px,
+        "max_body_shift_px": fp.max_body_shift_px,
         "frames_seen": fp.frames_seen,
         "notes": notes,
     }

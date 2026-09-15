@@ -114,6 +114,38 @@ class WarpField:
         self.dy += ddy * scale
         self.dirty = True
 
+    def add_axis_scale(self, anchor, axis, band_along: float, band_sigma: float,
+                       k: float, max_perp: float):
+        """
+        Widen (k > 0) or narrow (k < 0) about a feature's own axis, in a band
+        along it.
+
+        This is the right primitive for a fuller or thinner FACE, as opposed to
+        a moved jaw line. Dragging the outline outward with local translations
+        leaves the nose and mouth where they were, and the picture stretches
+        between them - the smeared look. A scale about the axis carries the
+        features with the width, which is what a fuller face actually is.
+
+        `anchor` and `axis` are the feature's origin and unit direction;
+        `band_along` is how far up the axis the effect peaks, `max_perp` how
+        far sideways it reaches before it is gone.
+        """
+        if abs(k) < 1e-4 or max_perp <= 1:
+            return
+        anchor = np.asarray(anchor, np.float32)
+        axis = np.asarray(axis, np.float32)
+        vx = self.X - anchor[0]
+        vy = self.Y - anchor[1]
+        along = vx * axis[0] + vy * axis[1]
+        perp_x = vx - along * axis[0]
+        perp_y = vy - along * axis[1]
+        perp = np.sqrt(perp_x * perp_x + perp_y * perp_y)
+        w = np.exp(-(((along - band_along) / max(band_sigma, 1.0)) ** 2))
+        w = w * np.exp(-((perp / float(max_perp)) ** 4))     # flat, then gone
+        self.dx -= perp_x * (k * w)
+        self.dy -= perp_y * (k * w)
+        self.dirty = True
+
     def add_row_squeeze(self, centre_x: np.ndarray, half_width: np.ndarray,
                         amount: np.ndarray, valid: np.ndarray):
         """
@@ -140,12 +172,32 @@ class WarpField:
         self.dirty = True
 
     # ----------------------------------------------------------------- apply
-    def max_shift(self) -> float:
-        """Largest displacement in pixels - what the render report shows so a
-        user can tell "the effect is subtle" from "the effect did not run"."""
+    def max_shift(self, box: tuple[int, int, int, int] | None = None,
+                  outside: bool = False) -> float:
+        """Largest displacement in pixels, optionally restricted to a region.
+
+        The report shows this so a user can tell "the effect is subtle" from
+        "the effect did not run" - and, with `box`, can tell which of the two
+        happened to the face and to the body separately, since those have
+        different causes and different fixes.
+        """
         if not self.dirty:
             return 0.0
-        return float(max(np.abs(self.dx).max(), np.abs(self.dy).max()))
+        mag = np.maximum(np.abs(self.dx), np.abs(self.dy))
+        if box is None:
+            return float(mag.max())
+        x0, y0, x1, y1 = box
+        gx0 = int(np.clip(x0 / self.w * self.gw, 0, self.gw - 1))
+        gx1 = int(np.clip(x1 / self.w * self.gw, 1, self.gw))
+        gy0 = int(np.clip(y0 / self.h * self.gh, 0, self.gh - 1))
+        gy1 = int(np.clip(y1 / self.h * self.gh, 1, self.gh))
+        if gx1 <= gx0 or gy1 <= gy0:
+            return 0.0
+        if not outside:
+            return float(mag[gy0:gy1, gx0:gx1].max())
+        masked = mag.copy()
+        masked[gy0:gy1, gx0:gx1] = 0.0
+        return float(masked.max())
 
     def clamp(self, max_fraction: float = 0.045):
         """Hard ceiling on displacement, as a fraction of the long edge.
@@ -195,16 +247,29 @@ def add_face_reshape(field: WarpField, f: Face, s) -> None:
     fw, fh = f.width, f.height
 
     if s.face_round > 0:
-        # Outward where face_slim goes inward: a fuller cheek and a softer
-        # jaw. Weaker than the slimming equivalent, because widening a face
-        # has to push into the background and shows sooner.
-        weights = [0.20, 0.50, 0.85, 1.0, 0.95, 0.70, 0.40]
-        amount = -s.face_round * fw * 0.055
-        for side in (JAW_LEFT, JAW_RIGHT):
-            for idx, wgt in zip(side[2:9], weights):
-                p = f.p(idx)
-                d = _perp_inward(f, p) * (amount * wgt)
-                field.add_local_translation(p, p + d, radius=fw * 0.45)
+        # A fuller face is not just the slimming warp reversed. Slimming only
+        # has to move the jaw line in; fullness reads from three cues at once,
+        # and with only the first it is invisible at any strength that still
+        # looks like a face:
+        #   - the cheeks and jaw carry outward, widest at the cheekbone,
+        #   - the widest points of the face (the ears' line) go with them,
+        #   - the chin drops a little, which is what softens the jaw instead
+        #     of just making a wide, hard one.
+        chin = f.p(CHIN)
+        # One scale about the face's own axis, centred on the cheek/jaw third
+        # and fading out by the brow. Everything inside widens together, so a
+        # fuller face gets a fuller nose and mouth as well - which is what
+        # makes it read as a face rather than as a stretched picture.
+        field.add_axis_scale(chin, f.axis,
+                             band_along=fh * 0.42, band_sigma=fh * 0.38,
+                             k=s.face_round * 0.13, max_perp=fw * 0.78)
+        # A little more at the jaw itself, and a chin that drops slightly:
+        # together they soften the jaw line instead of widening a hard one.
+        field.add_axis_scale(chin, f.axis,
+                             band_along=fh * 0.12, band_sigma=fh * 0.20,
+                             k=s.face_round * 0.07, max_perp=fw * 0.60)
+        field.add_local_translation(chin, chin - f.axis * (fh * 0.022 * s.face_round),
+                                    radius=fw * 0.38)
 
     if s.face_slim > 0:
         # Weighted along the jaw: most at the cheek/jaw corner, least at the

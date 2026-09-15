@@ -39,7 +39,7 @@ from .settings import DEFAULT_PRESET, PRESETS, Settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.4.0 (Aurora)"
+VERSION = "v1.5.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -185,8 +185,10 @@ def on_preview(path, position, *args):
     finally:
         fp.close()
     bits = []
+    if fp.max_face_shift_px > 0.05:
+        bits.append(f"face reshaped by {fp.max_face_shift_px:.0f} px")
     if fp.frames_with_person:
-        bits.append(f"body outline found, reshaped by {fp.max_shift_px:.0f} px")
+        bits.append(f"body reshaped by {fp.max_body_shift_px:.0f} px")
     elif s.touches_body():
         bits.append("no body outline in this frame — body shaping did nothing")
     extra = (" · " + " · ".join(bits)) if bits else ""
@@ -253,8 +255,9 @@ def on_render(path, start, end, *args, progress=gr.Progress()):
     lines = [
         f"<b>Done</b> · {res['frames']} frames at {w}×{h} in {res['seconds']:.1f}s "
         f"({res['fps']:.1f} fps)",
-        f"Face on {face_pct:.0f}% of frames · body outline on {body_pct:.0f}% · "
-        f"largest reshape {res['max_shift_px']:.0f} px",
+        f"Face on {face_pct:.0f}% of frames · body outline on {body_pct:.0f}%",
+        f"Reshaped: face by {res['max_face_shift_px']:.0f} px · "
+        f"body by {res['max_body_shift_px']:.0f} px",
     ]
     lines += [f"⚠️ {n}" for n in res["notes"]]
     yield res["path"], _status("<br>".join(lines)), gr.update(interactive=True), ""

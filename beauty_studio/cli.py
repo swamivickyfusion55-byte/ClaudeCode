@@ -155,8 +155,9 @@ def main(argv=None) -> int:
     print(f"wrote {res['path']} · {res['frames']} frames at {w}x{h} · "
           f"{res['seconds']:.1f}s ({res['fps']:.1f} fps)")
     print(f"  face on {100.0 * res['faces_seen'] / seen:.0f}% of frames · "
-          f"body outline on {100.0 * res['persons_seen'] / seen:.0f}% · "
-          f"largest reshape {res['max_shift_px']:.0f} px")
+          f"body outline on {100.0 * res['persons_seen'] / seen:.0f}%")
+    print(f"  reshaped: face by {res['max_face_shift_px']:.0f} px · "
+          f"body by {res['max_body_shift_px']:.0f} px")
     for note in res["notes"]:
         print(f"  note: {note}")
     return 0
