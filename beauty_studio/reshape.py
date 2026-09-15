@@ -115,10 +115,10 @@ class WarpField:
         self.dirty = True
 
     def add_axis_scale(self, anchor, axis, band_along: float, band_sigma: float,
-                       k: float, max_perp: float):
+                       k: float, half_left: float, half_right: float):
         """
         Widen (k > 0) or narrow (k < 0) about a feature's own axis, in a band
-        along it.
+        along it, with each side scaled against its OWN half-width.
 
         This is the right primitive for a fuller or thinner FACE, as opposed to
         a moved jaw line. Dragging the outline outward with local translations
@@ -126,24 +126,35 @@ class WarpField:
         between them - the smeared look. A scale about the axis carries the
         features with the width, which is what a fuller face actually is.
 
-        `anchor` and `axis` are the feature's origin and unit direction;
-        `band_along` is how far up the axis the effect peaks, `max_perp` how
-        far sideways it reaches before it is gone.
+        The per-side normalisation is what keeps a turned head from bulging.
+        Displacement proportional to raw distance from the midline means that
+        on a yawed face - where one cheek is much further from the midline
+        than the other in the picture, because the near one is foreshortened -
+        the far cheek gets a far bigger push, and it balloons for exactly the
+        few frames where the subject turns. Measured against each side's own
+        half-width instead, both cheeks move by the same fraction of the face
+        they belong to, and the displacement is bounded at the face's edge
+        rather than growing until the lateral falloff cuts it off.
         """
-        if abs(k) < 1e-4 or max_perp <= 1:
+        if abs(k) < 1e-4 or min(half_left, half_right) <= 1:
             return
         anchor = np.asarray(anchor, np.float32)
         axis = np.asarray(axis, np.float32)
+        normal = np.float32([axis[1], -axis[0]])        # perpendicular, unit
         vx = self.X - anchor[0]
         vy = self.Y - anchor[1]
         along = vx * axis[0] + vy * axis[1]
-        perp_x = vx - along * axis[0]
-        perp_y = vy - along * axis[1]
-        perp = np.sqrt(perp_x * perp_x + perp_y * perp_y)
-        w = np.exp(-(((along - band_along) / max(band_sigma, 1.0)) ** 2))
-        w = w * np.exp(-((perp / float(max_perp)) ** 4))     # flat, then gone
-        self.dx -= perp_x * (k * w)
-        self.dy -= perp_y * (k * w)
+        signed = vx * normal[0] + vy * normal[1]
+
+        side_half = np.where(signed >= 0, float(half_right), float(half_left))
+        u = np.abs(signed) / side_half
+        # Linear to the face's edge, then decaying: the cheek moves by
+        # k * its own half-width at most, whichever side it is on.
+        shape = np.where(u <= 1.0, u, np.exp(-(((u - 1.0) / 0.35) ** 2)))
+        band = np.exp(-(((along - band_along) / max(band_sigma, 1.0)) ** 2))
+        mag = k * side_half * shape * band * np.sign(signed)
+        self.dx -= normal[0] * mag
+        self.dy -= normal[1] * mag
         self.dirty = True
 
     def add_row_squeeze(self, centre_x: np.ndarray, half_width: np.ndarray,
@@ -226,6 +237,21 @@ class WarpField:
 
 # --------------------------------------------------------------------- faces
 
+def _side_half_widths(f: Face) -> tuple[float, float]:
+    """Perpendicular distance from the face's midline to each cheek edge.
+
+    On a frontal face these are near enough equal; on a turned one they are
+    not, and that difference is the whole reason a face-widening warp needs
+    to know about them.
+    """
+    normal = np.float32([f.axis[1], -f.axis[0]])
+    chin = f.p(CHIN)
+    d = [float(np.dot(f.p(idx) - chin, normal)) for idx in (234, 454)]
+    left = max(-min(d), 1.0)
+    right = max(max(d), 1.0)
+    return left, right
+
+
 def _perp_inward(f: Face, p: np.ndarray) -> np.ndarray:
     """Unit vector from point `p` toward the face's own vertical midline.
 
@@ -247,6 +273,15 @@ def add_face_reshape(field: WarpField, f: Face, s) -> None:
     fw, fh = f.width, f.height
 
     if s.face_round > 0:
+        # Each side's own half-width, measured perpendicular to the face axis,
+        # so a head turned away from the camera is scaled by what is actually
+        # visible of each cheek.
+        hl, hr = _side_half_widths(f)
+        # And on a strongly turned head, less of it: a 2D widening of a face
+        # seen at an angle has no good answer, so the honest thing is to back
+        # off rather than invent one.
+        asym = max(hl, hr) / max(min(hl, hr), 1e-3)
+        yaw_damp = 1.0 / (1.0 + 0.9 * max(asym - 1.35, 0.0))
         # A fuller face is not just the slimming warp reversed. Slimming only
         # has to move the jaw line in; fullness reads from three cues at once,
         # and with only the first it is invisible at any strength that still
@@ -262,12 +297,14 @@ def add_face_reshape(field: WarpField, f: Face, s) -> None:
         # makes it read as a face rather than as a stretched picture.
         field.add_axis_scale(chin, f.axis,
                              band_along=fh * 0.42, band_sigma=fh * 0.38,
-                             k=s.face_round * 0.13, max_perp=fw * 0.78)
+                             k=s.face_round * 0.13 * yaw_damp,
+                             half_left=hl, half_right=hr)
         # A little more at the jaw itself, and a chin that drops slightly:
         # together they soften the jaw line instead of widening a hard one.
         field.add_axis_scale(chin, f.axis,
                              band_along=fh * 0.12, band_sigma=fh * 0.20,
-                             k=s.face_round * 0.07, max_perp=fw * 0.60)
+                             k=s.face_round * 0.07 * yaw_damp,
+                             half_left=hl * 0.85, half_right=hr * 0.85)
         field.add_local_translation(chin, chin - f.axis * (fh * 0.022 * s.face_round),
                                     radius=fw * 0.38)
 

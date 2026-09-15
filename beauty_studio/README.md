@@ -139,6 +139,18 @@ settings on one frame (a second or two), then *Render video*. Trim start/end
 render a section instead of the whole clip. The Photo tab runs the same stack
 on a still.
 
+**Renders run on the server, not in your tab.** *Render video* queues a job and
+returns immediately; a worker thread owns it from there. Close the tab, lock
+the phone, lose the wifi - the render carries on, and any tab that comes back
+picks it up by polling. The **History** tab lists every render on the server,
+newest first, with the file to download and the stats for each; renders started
+on another device show up there too. One render at a time, because a second
+concurrent one only makes both slower.
+
+A job whose files have been swept by the retention policy stays in the list as
+a record and reads *expired*. A job that was mid-render when the app restarted
+reads *interrupted* rather than pretending to still be running.
+
 **CLI.**
 
 ```bash
@@ -305,6 +317,21 @@ NumPy - no GPU is required and none is used.
 | `settings.py` | Every knob, the caps, the presets |
 | `selftest.py` | Synthetic end-to-end check |
 
+## Jobs and history
+
+| State | What it means |
+| --- | --- |
+| queued | waiting for the renderer (one runs at a time) |
+| running | in progress; the page shows frames, fps and an ETA |
+| done | finished; the file is in History until the retention window passes |
+| stopped | you pressed Stop |
+| interrupted | the app restarted mid-render - submit it again |
+| expired | the retention policy deleted the file; the row is the record |
+| failed | the reason is on the row |
+
+`BEAUTY_JOBS_DIR` sets where job outputs and the index live (default: a
+`beauty_jobs` directory in the system temp directory).
+
 ## Data retention
 
 Uploads, renders, previews and working files are deleted automatically **three
@@ -312,8 +339,9 @@ hours** after they are last touched. A janitor thread sweeps every ten minutes;
 the UI has a **Delete my files now** button, and the CLI has `--purge`.
 
 - `BEAUTY_RETENTION_HOURS` changes the window (e.g. `0.5` for thirty minutes).
-- Swept: this app's render directories and Gradio's cache, which is where
-  uploads and the files served back to the browser live. Both are addressed by
+- Swept: this app's render directories, finished jobs (one at a time, so the
+  history index survives and the row can say the file expired), and Gradio's
+  cache, which is where uploads and the files served back to the browser live. Both are addressed by
   name - sweeping a whole temp directory would risk another process's files.
 - Not swept by default: the MediaPipe model cache. Those are weights, not
   anyone's data, and dropping them only forces a re-download. Add

@@ -49,6 +49,11 @@ def _model_dirs() -> list[str]:
         return []
 
 
+def jobs_root() -> str:
+    from .jobs import jobs_root as _root
+    return os.path.realpath(_root())
+
+
 def target_dirs(include_models: bool = False) -> list[str]:
     """Directories this app owns, that are safe to delete from."""
     tmp = tempfile.gettempdir()
@@ -57,6 +62,13 @@ def target_dirs(include_models: bool = False) -> list[str]:
     gradio = os.environ.get("GRADIO_TEMP_DIR") or os.path.join(tmp, "gradio")
     if os.path.isdir(gradio):
         dirs.append(gradio)
+    # Explicitly, because BEAUTY_JOBS_DIR can point outside the temp directory
+    # the glob above covers - and an unswept jobs directory is the one place
+    # finished renders pile up.
+    try:
+        dirs.append(jobs_root())
+    except Exception:
+        pass
     if include_models:
         dirs += _model_dirs()
     seen, out = set(), []
@@ -103,6 +115,22 @@ def sweep(hours: float | None = None, include_models: bool = False) -> tuple[int
         try:
             entries = os.listdir(base)
         except OSError:
+            continue
+        # The jobs root is swept a job at a time. Deleting it whole would
+        # take the index with it, and the history would lose the record of
+        # what expired along with the files themselves.
+        try:
+            is_jobs_root = os.path.realpath(base) == jobs_root()
+        except Exception:
+            is_jobs_root = False
+        if is_jobs_root:
+            for name in entries:
+                if name in ("index.json", "index.json.tmp"):
+                    continue
+                path = os.path.join(base, name)
+                if _age_ok(path, cutoff):
+                    freed += _delete(path)
+                    items += 1
             continue
         if base.startswith(os.path.join(tempfile.gettempdir(), "beauty_")):
             if _age_ok(base, cutoff):
