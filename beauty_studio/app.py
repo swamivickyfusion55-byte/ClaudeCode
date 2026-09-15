@@ -31,12 +31,13 @@ from . import jobs, retention
 from .mp_backend import mediapipe_ready, mediapipe_status
 from .pipeline import (FrameProcessor, capability_report, grab_frame, probe,
                        process_image)
-from .settings import DEFAULT_PRESET, PRESETS, Settings
+from .settings import (DEFAULT_PRESET, MAX_STACK, PRESETS, Settings,
+                       combine_presets, stack_label)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.6.0 (Aurora)"
+VERSION = "v1.7.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -119,13 +120,13 @@ def settings_from(values, protect_skin, stabilise, scale, out_long, quality, hdr
     ).normalised()
 
 
-def preset_values(name: str) -> list[float]:
-    """Preset amounts as whole-number slider positions.
+def preset_values(names) -> list[float]:
+    """Slider positions for a preset, or for a stack of up to three.
 
     Rounded because 0.55 * 100 is 55.00000000000001 in binary floating point,
     and that is exactly what the number box next to the slider would display.
     """
-    s = PRESETS.get(name, PRESETS[DEFAULT_PRESET])
+    s = combine_presets(names)
     return [round(float(getattr(s, f)) * 100.0) for f in FIELDS]
 
 
@@ -204,7 +205,7 @@ def on_submit(path, preset_name, start, end, *args):
     a, b = sorted((float(start) / 100.0, float(end) / 100.0))
     if b - a < 0.01:
         a, b = 0.0, 1.0
-    job = jobs.manager().submit(path, s, str(preset_name or "custom"), a, b)
+    job = jobs.manager().submit(path, s, stack_label(preset_name), a, b)
     return (job.id,
             _status(f"Queued as <b>{job.id[:6]}</b>. This runs on the server — "
                     f"you can close this tab and come back to it in History."),
@@ -427,7 +428,13 @@ def build() -> gr.Blocks:
 
             # --------------------------------------------------- right column
             with gr.Column(scale=4):
-                preset = gr.Dropdown(list(PRESETS.keys()), value=DEFAULT_PRESET, label="Preset")
+                preset = gr.Dropdown(
+                    list(PRESETS.keys()), value=[DEFAULT_PRESET], multiselect=True,
+                    max_choices=MAX_STACK, label=f"Presets — stack up to {MAX_STACK}",
+                    info="Each preset writes only the part of the picture it is "
+                         "about, so Chubby + HDR Cinematic gives you both. Order "
+                         "does not matter: the specific one always wins over the "
+                         "general one.")
                 gr.HTML("<span class='sec-lbl'>Adjustments</span>")
                 sliders: list[gr.Slider] = []
                 for gi, (group, items) in enumerate(GROUPS):

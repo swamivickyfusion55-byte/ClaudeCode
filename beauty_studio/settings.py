@@ -282,6 +282,88 @@ PRESETS: dict[str, Settings] = {
 
 DEFAULT_PRESET = "Natural"
 
+# ----------------------------------------------------------- combining presets
+#
+# Presets can be stacked - "Chubby (medium) + HDR Cinematic" - and that only
+# works if each one knows which part of the picture it is about. A preset
+# contributes the fields of the domains it owns and leaves the rest alone, so
+# stacking a grade onto a shape preset gives you both instead of whichever was
+# applied last.
+
+DOMAIN_FIELDS: dict[str, tuple[str, ...]] = {
+    "grade": ("hdr_strength", "shadows", "highlights", "clarity", "vibrance",
+              "saturation", "warmth", "tint", "contrast", "bloom", "sharpen",
+              "protect_skin_colour"),
+    "skin": ("skin_smooth", "texture", "skin_even", "blemish", "glow",
+             "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye"),
+    "face": ("face_slim", "face_round", "chin_shape", "nose_slim", "eye_enlarge"),
+    "body": ("body_slim", "body_fuller", "waist_shape", "curve_shape",
+             "bust_shape", "hip_shape", "posture"),
+    "hair": ("hair_detail", "hair_shine", "hair_volume", "hair_frizz",
+             "hair_richness"),
+    "finish": ("naturalness",),
+}
+
+ALL_DOMAINS = tuple(DOMAIN_FIELDS)
+
+# What each preset is *about*. A full look owns everything; a specialist owns
+# only its own part, so stacking it changes only that part.
+PRESET_DOMAINS: dict[str, tuple[str, ...]] = {
+    "Natural": ALL_DOMAINS,
+    "Natural+ (subtle)": ALL_DOMAINS,
+    "Professional Portrait": ALL_DOMAINS,
+    "Glam": ALL_DOMAINS,
+    "HDR Cinematic": ("grade",),
+    "HDR Only (no retouch)": ("grade",),
+    "Curvy": ("body",),
+    "Curvy (strong)": ("body",),
+    "Chubby (light)": ("body", "face"),
+    "Chubby (medium)": ("body", "face"),
+    "Chubby (heavy)": ("body", "face"),
+    "Shape Only": ("face", "body"),
+}
+
+MAX_STACK = 3
+
+
+def combine_presets(names) -> Settings:
+    """
+    Stack up to three presets into one Settings.
+
+    The broadest preset is applied first and the most specific last, whatever
+    order they were picked in, and each one only writes the domains it owns.
+    So "Chubby (medium) + HDR Cinematic" keeps the chubby shaping and takes
+    the cinematic grade either way round, and adding a full look like
+    Professional Portrait on top brings its skin and hair without quietly
+    undoing the shaping you asked for first.
+    """
+    if isinstance(names, str):
+        names = [names]
+    names = [n for n in (names or []) if n in PRESETS][:MAX_STACK]
+    if not names:
+        return PRESETS[DEFAULT_PRESET]
+
+    # Broad to narrow. Without this, a full look picked last silently
+    # overwrites the specialist picked first - the user asks for curvy plus a
+    # portrait look and gets the portrait's default body back.
+    ordered = sorted(names, key=lambda n: -len(PRESET_DOMAINS.get(n, ALL_DOMAINS)))
+
+    out = PRESETS[ordered[0]]
+    for name in ordered[1:]:
+        preset = PRESETS[name]
+        fields: set[str] = set()
+        for domain in PRESET_DOMAINS.get(name, ALL_DOMAINS):
+            fields.update(DOMAIN_FIELDS[domain])
+        out = out.with_(**{f: getattr(preset, f) for f in fields})
+    return out
+
+
+def stack_label(names) -> str:
+    if isinstance(names, str):
+        names = [names]
+    names = [n for n in (names or []) if n in PRESETS][:MAX_STACK]
+    return " + ".join(names) if names else DEFAULT_PRESET
+
 
 # Amounts that describe work done ON A PERSON, as opposed to the grade. These
 # are the ones scaled by `naturalness`, and by a tracker's confidence when a

@@ -27,7 +27,8 @@ if __package__ in (None, ""):
     __package__ = os.path.basename(_here)
 
 from .pipeline import capability_report, probe, process_image, render_video
-from .settings import DEFAULT_PRESET, PRESETS, Settings
+from .settings import (DEFAULT_PRESET, MAX_STACK, PRESET_DOMAINS, PRESETS,
+                       Settings, combine_presets, stack_label)
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -53,8 +54,20 @@ def _apply_overrides(s: Settings, pairs: list[str]) -> Settings:
     return s.with_(**kw)
 
 
+def parse_presets(text: str) -> list[str]:
+    """`--preset "Chubby (medium),HDR Cinematic"` - up to three, comma separated."""
+    names = [n.strip() for n in (text or "").split(",") if n.strip()]
+    unknown = [n for n in names if n not in PRESETS]
+    if unknown:
+        raise SystemExit(f"unknown preset(s): {', '.join(unknown)}\n"
+                         f"known: {', '.join(PRESETS)}")
+    if len(names) > MAX_STACK:
+        raise SystemExit(f"at most {MAX_STACK} presets can be stacked")
+    return names or [DEFAULT_PRESET]
+
+
 def build_settings(args) -> Settings:
-    s = PRESETS.get(args.preset, PRESETS[DEFAULT_PRESET])
+    s = combine_presets(parse_presets(args.preset))
     s = s.with_(process_scale=args.scale, quality=args.quality, hdr10=args.hdr10,
                 out_long_edge=args.out_long_edge, stabilise=not args.no_stabilise)
     if args.set:
@@ -67,7 +80,9 @@ def main(argv=None) -> int:
                                  description="HDR grading and natural retouching for video and photos")
     ap.add_argument("source", nargs="?", help="input video or image")
     ap.add_argument("-o", "--output", help="output path (default: alongside the input)")
-    ap.add_argument("--preset", default=DEFAULT_PRESET, choices=list(PRESETS.keys()))
+    ap.add_argument("--preset", default=DEFAULT_PRESET,
+                    help="preset name, or up to %d comma separated to stack them "
+                         "(e.g. \"Chubby (medium),HDR Cinematic\")" % MAX_STACK)
     ap.add_argument("--set", action="append", metavar="NAME=VALUE",
                     help="override one setting, 0-100 like the UI sliders (repeatable)")
     ap.add_argument("--scale", type=int, default=1080, metavar="PX",
@@ -108,9 +123,11 @@ def main(argv=None) -> int:
         return 0
 
     if args.list_presets:
+        print(f"stack up to {MAX_STACK}, comma separated; each writes only its own domains")
         for name, preset in PRESETS.items():
-            print(f"  {name:24s} hdr={preset.hdr_strength:.2f} skin={preset.skin_smooth:.2f} "
-                  f"face={preset.face_slim:.2f} body={preset.body_slim:.2f}")
+            domains = ",".join(PRESET_DOMAINS.get(name, ()))
+            print(f"  {name:24s} [{domains:22s}] hdr={preset.hdr_strength:.2f} "
+                  f"skin={preset.skin_smooth:.2f} body={preset.body_slim:.2f}")
         return 0
 
     if args.selftest:
@@ -146,6 +163,7 @@ def main(argv=None) -> int:
             ap.error("--trim expects A:B in percent, e.g. 10:90")
 
     print(f"input: {probe(args.source).label}")
+    print(f"preset: {stack_label(parse_presets(args.preset))}")
     out = args.output or f"{stem}_enhanced.mp4"
     res = render_video(args.source, s, out_path=out, start=a, end=b,
                        progress=lambda d, t_, m: print(f"\r  {m}   ", end="", flush=True))

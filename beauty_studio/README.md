@@ -128,6 +128,25 @@ found one ramps up over a few, so effects never pop on and off between frames.
 | **Shape Only** | Reshaping with no grade or retouch. |
 | **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
 
+### Stacking presets
+
+Up to three presets can be combined - *Chubby (medium) + HDR Cinematic*, say.
+Each preset writes only the part of the picture it is about, so they add up
+instead of overwriting each other:
+
+| Preset | Writes |
+| --- | --- |
+| Natural, Natural+, Professional Portrait, Glam | everything (full looks) |
+| HDR Cinematic, HDR Only | the grade |
+| Curvy, Curvy (strong) | the body |
+| Chubby (light / medium / heavy) | the body and the face |
+| Shape Only | the face and the body |
+
+**Order does not matter.** The broadest preset is applied first and the most
+specific last, whichever order you picked them in - so adding a full look on
+top of a shape preset brings its skin and hair without quietly undoing the
+shaping. In the CLI: `--preset "Chubby (medium),HDR Cinematic"`.
+
 Every slider is 0-100 and every preset is just a set of slider positions, so
 you can start from one and adjust. **Naturalness** scales every person-effect
 at once without touching the grade.
