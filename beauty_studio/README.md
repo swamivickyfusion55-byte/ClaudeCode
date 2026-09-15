@@ -353,10 +353,24 @@ NumPy - no GPU is required and none is used.
 | queued | waiting for the renderer (one runs at a time) |
 | running | in progress; the page shows frames, fps and an ETA |
 | done | finished; the file is in History until the retention window passes |
-| stopped | you pressed Stop |
+| stopped | you pressed Stop or Cancel this job; the row keeps the percentage it reached |
 | interrupted | the app restarted mid-render - submit it again |
 | expired | the retention policy deleted the file; the row is the record |
 | failed | the reason is on the row |
+
+**Progress** is on both tabs: the Video tab shows a bar with the percentage,
+frames done and an ETA, and History has a progress column that updates while
+you watch it - so a render started on your phone can be followed from a laptop.
+
+**Stopping** works from either tab and from any device. *Stop* on the Video
+tab halts whatever this tab started, or, in a tab that did not start anything,
+whatever is currently rendering. *Cancel this job* in History stops the render
+you picked from the list. A stopped render finishes the frame it is on and
+then gives up, and its row keeps the percentage it reached.
+
+Messages from buttons stay on screen for a few seconds before the status line
+goes back to reporting the job - otherwise the two-second refresh wipes
+"Stopping…" off the screen before it can be read.
 
 `BEAUTY_JOBS_DIR` sets where job outputs and the index live (default: a
 `beauty_jobs` directory in the system temp directory).

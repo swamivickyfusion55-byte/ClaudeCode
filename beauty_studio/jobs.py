@@ -275,6 +275,15 @@ class JobManager:
                 self._save_locked()
         return True
 
+    def queue_position(self, job_id: str) -> int:
+        """How many jobs are ahead of this one - so a queued job can say so
+        instead of sitting at "waiting" with no sense of how long."""
+        with self._lock:
+            try:
+                return self._queue.index(job_id)
+            except ValueError:
+                return 0
+
     def get(self, job_id: str | None) -> Job | None:
         if not job_id:
             return None

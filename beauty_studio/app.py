@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 
 import cv2
 import gradio as gr
@@ -37,7 +38,7 @@ from .settings import (DEFAULT_PRESET, MAX_STACK, PRESETS, Settings,
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.8.0 (Aurora)"
+VERSION = "v1.9.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -196,6 +197,16 @@ def on_photo(image, *args):
 
 IDLE_HTML = "Load a video, pick a preset, preview a frame, then render."
 
+# How long a message written by a button survives before the status line goes
+# back to reporting the job. Without this the poller - which fires every two
+# seconds - wipes "Stopping 78281b…" off the screen before it can be read, and
+# the button looks like it did nothing.
+NOTICE_SECONDS = 8.0
+
+
+def _notice(msg: str, bad: bool = False):
+    return _status(msg, bad), time.time() + NOTICE_SECONDS
+
 
 def on_submit(path, preset_name, start, end, *args):
     """Queue a render and return at once - the work is not this request's."""
@@ -206,18 +217,42 @@ def on_submit(path, preset_name, start, end, *args):
     if b - a < 0.01:
         a, b = 0.0, 1.0
     job = jobs.manager().submit(path, s, stack_label(preset_name), a, b)
-    return (job.id,
-            _status(f"Queued as <b>{job.id[:6]}</b>. This runs on the server — "
-                    f"you can close this tab and come back to it in History."),
-            gr.update(choices=_history_choices()))
+    html, until = _notice(f"Queued as <b>{job.id[:6]}</b>. This runs on the server — "
+                          f"you can close this tab and come back to it in History.")
+    return job.id, html, gr.update(choices=_history_choices()), until
 
 
 def on_cancel(job_id):
-    if not job_id:
-        return _status("Nothing is rendering.")
-    if jobs.manager().cancel(job_id):
-        return _status("Stopping after the current frame…")
-    return _status("That job has already finished.")
+    """Stop a render.
+
+    Falls back to whatever is actually running when this tab does not know a
+    job id - which is the normal case for a tab opened after the render
+    started, and exactly when someone most wants to stop it.
+    """
+    manager = jobs.manager()
+    job = manager.get(job_id)
+    if job is None or not job.active:
+        job = manager.latest_active()
+    if job is None:
+        return _notice("Nothing is rendering.")
+    if manager.cancel(job.id):
+        return _notice(f"Stopping {job.id[:6]} after the current frame…")
+    return _notice(f"Job {job.id[:6]} has already finished.")
+
+
+def on_cancel_selected(job_id):
+    """Stop the job picked in History, whichever tab or device started it."""
+    manager = jobs.manager()
+    job = manager.get(job_id)
+    if job is None:
+        html, until = _notice("Pick a render from the list first.")
+        return html, _history_rows(), until
+    if not job.active:
+        html, until = _notice(f"Job {job.id[:6]} is already {job.status} — nothing to stop.")
+        return html, _history_rows(), until
+    manager.cancel(job.id)
+    html, until = _notice(f"Stopping {job.id[:6]} after the current frame…")
+    return html, _history_rows(), until
 
 
 def _job_html(job) -> str:
@@ -227,10 +262,16 @@ def _job_html(job) -> str:
                f"border-radius:6px;height:10px;margin:6px 0;overflow:hidden'>"
                f"<div style='background:linear-gradient(90deg,#97144D,#C9A227);"
                f"height:100%;width:{pct:.1f}%'></div></div>")
-        return (f"<b>Rendering {job.id[:6]}</b> · {job.source_name} · {job.preset}{bar}"
-                f"{job.message}")
+        # Before the first frame lands there is no percentage to report - the
+        # time is going into opening the file and starting the models - and a
+        # confident "0%" reads like something is stuck.
+        head = f"{pct:.0f}%" if job.done_frames else "starting"
+        return (f"<b>Rendering {job.id[:6]} — {head}</b> · {job.source_name} · "
+                f"{job.preset}{bar}{job.message}")
     if job.status == "queued":
-        return f"<b>Queued</b> · {job.source_name} · waiting for the renderer"
+        ahead = jobs.manager().queue_position(job.id)
+        place = f" · {ahead} ahead of it" if ahead else " · next"
+        return (f"<b>Queued</b> · {job.source_name} · waiting for the renderer{place}")
     if job.status == "done":
         lines = [f"<b>Done</b> · {job.id[:6]} · {job.done_frames} frames at "
                  f"{job.width}×{job.height} in {job.seconds:.1f}s",
@@ -257,23 +298,42 @@ def _history_choices():
 def _history_rows():
     rows = []
     for j in jobs.manager().list_jobs():
-        rows.append([j.id[:6], j.source_name, j.preset, j.status,
+        if j.status == "running":
+            if not j.done_frames:
+                progress = "starting"
+            else:
+                progress = f"{j.progress * 100:.0f}%"
+                if j.total_frames:
+                    progress += f" ({j.done_frames}/{j.total_frames})"
+        elif j.status == "queued":
+            progress = "waiting"
+        elif j.status == "done":
+            progress = "100%"
+        else:
+            # A stopped or failed job froze somewhere; where it got to is the
+            # useful thing to show, not a dash.
+            progress = f"{j.progress * 100:.0f}%" if j.done_frames else "—"
+        rows.append([j.id[:6], j.source_name, j.preset, j.status, progress,
                      f"{j.width}×{j.height}" if j.width else "—",
                      f"{j.size_mb():.1f} MB" if j.size_mb() else "—",
                      j.age_text()])
     return rows
 
 
-def poll(job_id, shown_path):
+def poll(job_id, shown_path, notice_until):
     """Called on a timer: the only thing keeping the page in step with the
     worker. Cheap by construction - it reads in-memory job state."""
     manager = jobs.manager()
     job = manager.get(job_id) or manager.latest_active()
     rows = _history_rows()
     choices = gr.update(choices=_history_choices())
+    # A button said something recently: leave it on screen.
+    quiet = bool(notice_until) and time.time() < float(notice_until)
     if job is None:
-        return _status(IDLE_HTML), gr.update(), shown_path, rows, choices
-    html = _status(_job_html(job), bad=job.status in ("failed", "interrupted"))
+        status = gr.update() if quiet else _status(IDLE_HTML)
+        return status, gr.update(), shown_path, rows, choices
+    html = (gr.update() if quiet
+            else _status(_job_html(job), bad=job.status in ("failed", "interrupted")))
     if (job.status == "done" and job.out_path and os.path.exists(job.out_path)
             and job.out_path != shown_path):
         # Only when it changes: handing the same path back every two seconds
@@ -288,15 +348,16 @@ def on_load_history(job_id):
         raise gr.Error("Pick a render from the list first.")
     if job.status != "done" or not job.out_path or not os.path.exists(job.out_path):
         raise gr.Error(f"That render is {job.status} — there is no file to load.")
-    return job.out_path, job.out_path, _status(_job_html(job))
+    html, until = _notice(_job_html(job))
+    return job.out_path, job.out_path, html, until
 
 
 def on_purge():
     items, freed = retention.purge_now()
     jobs.manager().forget_missing()
     if not items:
-        return _status("Nothing left to delete - the working directories are already empty.")
-    return _status(f"Deleted {items} item{'s' if items != 1 else ''} "
+        return _notice("Nothing left to delete - the working directories are already empty.")
+    return _notice(f"Deleted {items} item{'s' if items != 1 else ''} "
                    f"({freed / 1e6:.1f} MB) — uploads, renders and previews.")
 
 
@@ -413,14 +474,16 @@ def build() -> gr.Blocks:
                             elem_classes=["note"])
                         history_df = gr.Dataframe(
                             headers=["job", "source", "preset", "status",
-                                     "resolution", "size", "when"],
-                            datatype=["str"] * 7, interactive=False, wrap=True,
+                                     "progress", "resolution", "size", "when"],
+                            datatype=["str"] * 8, interactive=False, wrap=True,
                             label="Renders")
                         history_dd = gr.Dropdown(choices=[], label="Pick a render",
                                                  interactive=True)
                         with gr.Row():
                             history_load = gr.Button("Load it", elem_classes=["btn-p"],
                                                      variant="primary")
+                            history_cancel = gr.Button("Cancel this job",
+                                                       elem_classes=["btn-s"])
                             history_refresh = gr.Button("Refresh", elem_classes=["btn-s"])
                         history_video = gr.Video(label="Saved render", height=280,
                                                  interactive=False)
@@ -468,6 +531,9 @@ def build() -> gr.Blocks:
         # Which finished file the player is already showing, so the poller can
         # leave it alone until it actually changes.
         shown_state = gr.State("")
+        # When a button's message expires; until then the poller leaves the
+        # status line alone.
+        notice_state = gr.State(0.0)
 
         preset.change(lambda name: preset_values(name), inputs=preset, outputs=sliders)
         video_in.change(on_video, inputs=video_in, outputs=[info_md, before_img, after_img])
@@ -475,21 +541,23 @@ def build() -> gr.Blocks:
                           outputs=[before_img, after_img, preview_note])
         render_btn.click(on_submit,
                          inputs=[video_in, preset, trim_a, trim_b] + controls,
-                         outputs=[job_state, status, history_dd])
-        stop_btn.click(on_cancel, inputs=job_state, outputs=status)
+                         outputs=[job_state, status, history_dd, notice_state])
+        stop_btn.click(on_cancel, inputs=job_state, outputs=[status, notice_state])
         history_load.click(on_load_history, inputs=history_dd,
-                           outputs=[history_video, history_file, status])
+                           outputs=[history_video, history_file, status, notice_state])
+        history_cancel.click(on_cancel_selected, inputs=history_dd,
+                             outputs=[status, history_df, notice_state])
         history_refresh.click(lambda: (_history_rows(), gr.update(choices=_history_choices())),
                               outputs=[history_df, history_dd])
 
         # The heartbeat. Everything the page knows about a running render comes
         # through here, which is why closing the tab costs nothing: the work is
         # not in the request, only the view of it is.
-        demo.load(poll, inputs=[job_state, shown_state],
+        demo.load(poll, inputs=[job_state, shown_state, notice_state],
                   outputs=[status, video_out, shown_state, history_df, history_dd],
                   every=2)
         photo_btn.click(on_photo, inputs=[photo_in] + controls, outputs=photo_out)
-        purge_btn.click(on_purge, outputs=status)
+        purge_btn.click(on_purge, outputs=[status, notice_state])
 
         gr.Markdown(
             retention.policy_text() + " "
