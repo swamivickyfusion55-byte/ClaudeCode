@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1550 760" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B7280"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="1550" height="760" fill="#FFFFFF"/>
+
+  <!-- title -->
+  <text x="775" y="30" text-anchor="middle" font-size="24" font-weight="bold" fill="#111827">Advertisement Compliance Review Tool &#8212; Solution Architecture</text>
+  <text x="775" y="50" text-anchor="middle" font-size="13" fill="#6B7280">Built entirely on Microsoft 365: SharePoint + Power Automate + Power Apps + Copilot (no custom code)</text>
+
+  <!-- ================= USERS ROW ================= -->
+  <text x="20" y="100" font-size="11" font-weight="bold" fill="#111827" letter-spacing="1">USERS</text>
+  <rect x="145" y="75" width="1370" height="55" rx="10" fill="#111827"/>
+  <text x="830" y="97" text-anchor="middle" font-size="15" font-weight="bold" fill="#FFFFFF">Compliance Team &#8212; SharePoint Site Members (3 users)</text>
+  <text x="830" y="115" text-anchor="middle" font-size="11" fill="#D1D5DB">CCO (site Owner) + 2 Reviewers (site Members) &#8212; access from any browser, single sign-on, no separate login</text>
+
+  <!-- Arrow Users -> Presentation -->
+  <line x1="830" y1="130" x2="830" y2="153" stroke="#6B7280" stroke-width="3" marker-end="url(#arrowhead)"/>
+
+  <!-- ================= SITE CONTAINER ================= -->
+  <rect x="145" y="150" width="1370" height="580" rx="14" fill="none" stroke="#9CA3AF" stroke-width="2" stroke-dasharray="8,6"/>
+  <rect x="175" y="141" width="440" height="20" fill="#FFFFFF"/>
+  <text x="185" y="156" font-size="12" font-weight="bold" fill="#374151">SharePoint Site: &#8220;Advertisement Compliance Review&#8221;</text>
+
+  <!-- ================= PRESENTATION LAYER ================= -->
+  <text x="20" y="212" font-size="11" font-weight="bold" fill="#2563EB" letter-spacing="1">PRESENT-</text>
+  <text x="20" y="226" font-size="11" font-weight="bold" fill="#2563EB" letter-spacing="1">ATION</text>
+
+  <!-- P1 -->
+  <rect x="150" y="165" width="325" height="85" rx="8" fill="#2563EB"/>
+  <text x="312" y="196" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Home &amp; Dashboard Page</text>
+  <text x="312" y="215" text-anchor="middle" font-size="10.5" fill="#DBEAFE">Live KPIs, review queue,</text>
+  <text x="312" y="229" text-anchor="middle" font-size="10.5" fill="#DBEAFE">filters &#8212; for the CCO</text>
+
+  <!-- P2 -->
+  <rect x="495" y="165" width="325" height="85" rx="8" fill="#2563EB"/>
+  <text x="657" y="196" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">New Ad Review (Page 1)</text>
+  <text x="657" y="215" text-anchor="middle" font-size="10.5" fill="#DBEAFE">Reviewer submits ad,</text>
+  <text x="657" y="229" text-anchor="middle" font-size="10.5" fill="#DBEAFE">selects category</text>
+
+  <!-- P3 -->
+  <rect x="840" y="165" width="325" height="85" rx="8" fill="#2563EB"/>
+  <text x="1002" y="196" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Checklist Detail (Page 2)</text>
+  <text x="1002" y="215" text-anchor="middle" font-size="10.5" fill="#DBEAFE">Item-by-item checklist,</text>
+  <text x="1002" y="229" text-anchor="middle" font-size="10.5" fill="#DBEAFE">comments &amp; evidence</text>
+
+  <!-- P4 -->
+  <rect x="1185" y="165" width="325" height="85" rx="8" fill="#2563EB"/>
+  <text x="1347" y="196" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Checklist Admin Page</text>
+  <text x="1347" y="215" text-anchor="middle" font-size="10.5" fill="#DBEAFE">Manage master checklist +</text>
+  <text x="1347" y="229" text-anchor="middle" font-size="10.5" fill="#DBEAFE">Copilot chat interface</text>
+
+  <!-- Arrow Presentation -> Logic -->
+  <line x1="830" y1="250" x2="830" y2="278" stroke="#6B7280" stroke-width="3" marker-end="url(#arrowhead)"/>
+  <text x="845" y="268" font-size="10" font-style="italic" fill="#6B7280">clicks &amp; form submissions trigger flows</text>
+
+  <!-- ================= LOGIC LAYER ================= -->
+  <text x="20" y="325" font-size="11" font-weight="bold" fill="#0D9488" letter-spacing="1">LOGIC</text>
+
+  <!-- L1 -->
+  <rect x="150" y="280" width="325" height="85" rx="8" fill="#0D9488"/>
+  <text x="312" y="311" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Notification Flows</text>
+  <text x="312" y="330" text-anchor="middle" font-size="10.5" fill="#CCFBF1">Email/Teams alerts and</text>
+  <text x="312" y="344" text-anchor="middle" font-size="10.5" fill="#CCFBF1">overdue-review reminders</text>
+
+  <!-- L2 -->
+  <rect x="495" y="280" width="325" height="85" rx="8" fill="#0D9488"/>
+  <text x="657" y="311" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">ID + Checklist Builder Flow</text>
+  <text x="657" y="330" text-anchor="middle" font-size="10.5" fill="#CCFBF1">Assigns unique Ad ID, loads</text>
+  <text x="657" y="344" text-anchor="middle" font-size="10.5" fill="#CCFBF1">matching checklist items</text>
+
+  <!-- L3 -->
+  <rect x="840" y="280" width="325" height="85" rx="8" fill="#0D9488"/>
+  <text x="1002" y="311" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Decision &amp; Log Update Flow</text>
+  <text x="1002" y="330" text-anchor="middle" font-size="10.5" fill="#CCFBF1">Saves decision, builds the</text>
+  <text x="1002" y="344" text-anchor="middle" font-size="10.5" fill="#CCFBF1">Page 2 hyperlink in the log</text>
+
+  <!-- L4 -->
+  <rect x="1185" y="280" width="325" height="85" rx="8" fill="#0D9488"/>
+  <text x="1347" y="311" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Checklist Master Update Flow</text>
+  <text x="1347" y="330" text-anchor="middle" font-size="10.5" fill="#CCFBF1">Applies CCO-approved edits;</text>
+  <text x="1347" y="344" text-anchor="middle" font-size="10.5" fill="#CCFBF1">archives the prior version</text>
+
+  <!-- Arrow Logic -> Data -->
+  <line x1="830" y1="365" x2="830" y2="393" stroke="#6B7280" stroke-width="3" marker-end="url(#arrowhead)"/>
+  <text x="845" y="383" font-size="10" font-style="italic" fill="#6B7280">flows read/write SharePoint list items</text>
+
+  <!-- ================= DATA LAYER ================= -->
+  <text x="20" y="440" font-size="11" font-weight="bold" fill="#7C3AED" letter-spacing="1">DATA</text>
+
+  <!-- D1 -->
+  <rect x="150" y="395" width="256" height="85" rx="8" fill="#7C3AED"/>
+  <text x="278" y="424" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#FFFFFF">Ad Categories</text>
+  <text x="278" y="442" text-anchor="middle" font-size="10" fill="#EDE9FE">Lookup values used</text>
+  <text x="278" y="456" text-anchor="middle" font-size="9" font-style="italic" fill="#EDE9FE">List</text>
+
+  <!-- D2 -->
+  <rect x="426" y="395" width="256" height="85" rx="8" fill="#7C3AED"/>
+  <text x="554" y="424" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#FFFFFF">Advertisement Log</text>
+  <text x="554" y="442" text-anchor="middle" font-size="10" fill="#EDE9FE">The master register</text>
+  <text x="554" y="456" text-anchor="middle" font-size="9" font-style="italic" fill="#EDE9FE">List</text>
+
+  <!-- D3 -->
+  <rect x="702" y="395" width="256" height="85" rx="8" fill="#7C3AED"/>
+  <text x="830" y="424" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#FFFFFF">Checklist Responses</text>
+  <text x="830" y="442" text-anchor="middle" font-size="10" fill="#EDE9FE">Page 2 detail, one row</text>
+  <text x="830" y="456" text-anchor="middle" font-size="9" font-style="italic" fill="#EDE9FE">per checklist item &#8212; List</text>
+
+  <!-- D4 -->
+  <rect x="978" y="395" width="256" height="85" rx="8" fill="#7C3AED"/>
+  <text x="1106" y="424" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#FFFFFF">Checklist Master</text>
+  <text x="1106" y="442" text-anchor="middle" font-size="10" fill="#EDE9FE">+ Archive of prior versions</text>
+  <text x="1106" y="456" text-anchor="middle" font-size="9" font-style="italic" fill="#EDE9FE">List</text>
+
+  <!-- D5 -->
+  <rect x="1254" y="395" width="256" height="85" rx="8" fill="#7C3AED"/>
+  <text x="1382" y="424" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#FFFFFF">Regulations Library</text>
+  <text x="1382" y="442" text-anchor="middle" font-size="10" fill="#EDE9FE">Source regulatory PDFs</text>
+  <text x="1382" y="456" text-anchor="middle" font-size="9" font-style="italic" fill="#EDE9FE">Document Library</text>
+
+  <!-- Arrows Data <-> Intelligence -->
+  <line x1="1140" y1="480" x2="1140" y2="506" stroke="#6B7280" stroke-width="3" marker-end="url(#arrowhead)"/>
+  <line x1="1170" y1="506" x2="1170" y2="480" stroke="#6B7280" stroke-width="3" marker-end="url(#arrowhead)"/>
+  <text x="1190" y="497" font-size="9.5" font-style="italic" fill="#6B7280">reads &amp; writes back approved edits</text>
+
+  <!-- ================= INTELLIGENCE LAYER ================= -->
+  <text x="12" y="550" font-size="11" font-weight="bold" fill="#D97706" letter-spacing="1">INTELLI-</text>
+  <text x="12" y="564" font-size="11" font-weight="bold" fill="#D97706" letter-spacing="1">GENCE</text>
+  <rect x="150" y="510" width="1360" height="90" rx="10" fill="#D97706"/>
+  <text x="830" y="536" text-anchor="middle" font-size="15" font-weight="bold" fill="#FFFFFF">Copilot / Copilot Studio Agent &#8212; &#8220;Checklist Refresh Assistant&#8221;</text>
+  <text x="830" y="557" text-anchor="middle" font-size="11.5" fill="#FFEDD5">Reads the Regulations Library and current Checklist Master, then drafts suggested checklist updates by category</text>
+  <text x="830" y="576" text-anchor="middle" font-size="10.5" font-style="italic" fill="#FFEDD5">Human-in-the-loop: the CCO reviews and approves every suggested change before the Checklist Master Update Flow applies it</text>
+
+  <!-- ================= FOOTER / GOVERNANCE ================= -->
+  <rect x="150" y="630" width="1360" height="90" rx="8" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1.5"/>
+  <text x="170" y="652" font-size="12.5" font-weight="bold" fill="#111827">Governance &amp; audit trail (built in, not bolted on)</text>
+  <text x="170" y="671" font-size="11" fill="#374151">&#8226; Versioning is ON for every list &#8212; every edit to the Advertisement Log and Checklist Master is time-stamped and recoverable.</text>
+  <text x="170" y="688" font-size="11" fill="#374151">&#8226; Permissions: CCO = Full Control (Owner) &#183; Reviewers = Contribute (Members) &#183; no Delete rights on Checklist Master.</text>
+  <text x="170" y="705" font-size="11" fill="#374151">&#8226; Each advertisement keeps a permanent link to the exact checklist version it was reviewed against, even after later updates.</text>
+
+</svg>
