@@ -32,13 +32,13 @@ from . import jobs, retention
 from .mp_backend import mediapipe_ready, mediapipe_status
 from .pipeline import (FrameProcessor, capability_report, grab_frame, probe,
                        process_image)
-from .settings import (DEFAULT_PRESET, MAX_STACK, PRESETS, Settings,
-                       combine_presets, stack_label)
+from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESETS,
+                       Settings, combine_presets, stack_label)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v1.9.0 (Aurora)"
+VERSION = "v2.0.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -60,7 +60,10 @@ GROUPS: list[tuple[str, list[tuple[str, str, bool, str]]]] = [
     ]),
     ("Skin & face detail", [
         ("skin_smooth", "Skin smoothing", False, "Frequency-separated - it flattens tone, not pores"),
-        ("texture", "Keep texture", False, "How much real skin detail is put back (high = most natural)"),
+        ("texture", "Keep texture", False, "How much real skin detail survives the smoothing (high = most natural)"),
+        ("skin_texture", "Add skin texture", False,
+         "The other direction: brings micro-detail back to skin that arrived flat "
+         "— a phone's own beauty mode, heavy denoise, a low-bitrate upload"),
         ("blemish", "Blemish removal", False, "Suppresses small dark spots only"),
         ("skin_even", "Even skin tone", False, "Evens colour blotches, leaves the lighting alone"),
         ("under_eye", "Under-eye circles", False, "Lifts and de-blues the shadow under the eyes"),
@@ -87,6 +90,9 @@ GROUPS: list[tuple[str, list[tuple[str, str, bool, str]]]] = [
         ("posture", "Posture", True, "Lifts (right) or drops (left) the shoulders"),
     ]),
     ("Hair", [
+        ("hair_colour_amount", "Colour strength", False,
+         "How far toward the colour chosen above. Nothing happens while the "
+         "colour is \"none\""),
         ("hair_detail", "Strand definition", False, "Brings out individual strands"),
         ("hair_shine", "Shine", False, "Gloss along the light that is already there"),
         ("hair_richness", "Colour depth", False, "Richer colour, deeper shadow"),
@@ -106,11 +112,14 @@ SCALE_CHOICES = [("Source resolution (slowest)", 0), ("2160p / 4K", 2160),
                  ("720p (fastest)", 720)]
 
 
-def settings_from(values, protect_skin, stabilise, scale, out_long, quality, hdr10) -> Settings:
+def settings_from(values, hair_colour, hair_hue, protect_skin, stabilise, scale,
+                  out_long, quality, hdr10) -> Settings:
     kw = {}
     for field, v in zip(FIELDS, values):
         kw[field] = float(v) / 100.0
     return Settings(
+        hair_colour=str(hair_colour or "none"),
+        hair_hue=float(hair_hue),
         protect_skin_colour=bool(protect_skin),
         stabilise=bool(stabilise),
         process_scale=int(scale) if int(scale) > 0 else 100000,
@@ -119,6 +128,12 @@ def settings_from(values, protect_skin, stabilise, scale, out_long, quality, hdr
         hdr10=bool(hdr10),
         **kw,
     ).normalised()
+
+
+def preset_extras(names) -> tuple[str, float]:
+    """The preset's non-slider hair-colour settings, for the dropdown."""
+    s = combine_presets(names)
+    return s.hair_colour, float(s.hair_hue)
 
 
 def preset_values(names) -> list[float]:
@@ -500,8 +515,27 @@ def build() -> gr.Blocks:
                          "general one.")
                 gr.HTML("<span class='sec-lbl'>Adjustments</span>")
                 sliders: list[gr.Slider] = []
+                hair_colour = None
+                hair_hue = None
                 for gi, (group, items) in enumerate(GROUPS):
                     with gr.Accordion(group, open=(gi == 0)):
+                        if group == "Hair":
+                            # The colour is a name, not a number, so it is not
+                            # part of the generated slider set - and it goes
+                            # first, because the strength slider below it means
+                            # nothing until a colour is chosen.
+                            hair_colour = gr.Dropdown(
+                                list(HAIR_COLOURS.keys()), value="none",
+                                label="Hair colour",
+                                info="Recolours the hair and nothing else. Going "
+                                     "darker (blonde to black) is the strong "
+                                     "direction; lightening dark hair is limited, "
+                                     "because near-black pixels hold little detail "
+                                     "to carry.")
+                            hair_hue = gr.Slider(0, 359, 30, step=1,
+                                                 label="Custom hue (degrees)",
+                                                 info="Used when the colour above is "
+                                                      "\"custom\"")
                         for field, label, bipolar, tip in items:
                             lo = -100 if bipolar else 0
                             sliders.append(gr.Slider(
@@ -526,7 +560,8 @@ def build() -> gr.Blocks:
                                              "An inverse tone map of SDR - it does not recover "
                                              "detail the source never had.")
 
-        extras = [protect_skin, stabilise, scale, out_long, quality, hdr10]
+        extras = [hair_colour, hair_hue, protect_skin, stabilise, scale,
+                  out_long, quality, hdr10]
         controls = sliders + extras
         # Which finished file the player is already showing, so the poller can
         # leave it alone until it actually changes.
@@ -535,7 +570,9 @@ def build() -> gr.Blocks:
         # status line alone.
         notice_state = gr.State(0.0)
 
-        preset.change(lambda name: preset_values(name), inputs=preset, outputs=sliders)
+        preset.change(lambda names: preset_values(names), inputs=preset, outputs=sliders)
+        preset.change(lambda names: preset_extras(names), inputs=preset,
+                      outputs=[hair_colour, hair_hue])
         video_in.change(on_video, inputs=video_in, outputs=[info_md, before_img, after_img])
         preview_btn.click(on_preview, inputs=[video_in, preview_pos] + controls,
                           outputs=[before_img, after_img, preview_note])

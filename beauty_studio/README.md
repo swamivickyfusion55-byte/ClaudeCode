@@ -112,11 +112,30 @@ own half-width, so three sliders pushed up together cannot compound into a
 caricature, and the field as a whole is capped relative to the frame, which is
 why straight lines in the background stay straight.
 
-**Hair.** The mask is built by elimination: person silhouette, inside a
-head-shaped region around the tracked face, minus skin. Strand definition,
-gloss that follows the light already in the shot, colour depth, flyaway control
-on the outer edge only, and a volume pass that grows the silhouette by a few
-pixels of real re-sampled hair.
+**Hair.** The mask is seeded on the crown - which is hair beyond argument -
+and grown outward through pixels that are both joined to it and the same
+colour. Elimination alone was not enough: the earlier version leaned on a
+skin-tone test, and blonde hair sits squarely inside the skin-tone window, so
+on the reference frame it scored real hair at 0.13 while a space helmet's
+visor stayed at 1.0. Seed-and-grow gets the hair and nothing else.
+
+On that mask: strand definition, gloss that follows the light already in the
+shot, colour depth, flyaway control on the outer edge only, a volume pass that
+grows the silhouette by a few pixels of real re-sampled hair - and
+**recolouring**.
+
+**Hair colour.** Pick a target (black, dark brown, brown, light brown, auburn,
+red, blonde, platinum, grey, or a custom hue) and a strength. The hair's
+average colour is moved to the target while every pixel keeps its own
+departure from that average, so the variation between strands survives instead
+of becoming one flat colour; lightness is scaled about the mean rather than
+offset, because dark hair genuinely has a narrower range than blonde; and
+specular highlights are held back so gloss survives the change.
+
+Going darker is the strong direction. Lightening dark hair is limited and
+honestly so: near-black pixels hold little detail to carry, so the result is
+flatter than life. Nothing here is generated - every pixel still comes from
+your footage.
 
 **Video, not stills.** Landmarks, silhouette profiles and exposure statistics
 are all smoothed over time; a lost face is coasted for a few frames and a newly
@@ -135,6 +154,8 @@ found one ramps up over a few, so effects never pop on and off between frames.
 | **Curvy** | The hourglass by name: waist in, bust and hips out, lightly graded. |
 | **Curvy (strong)** | The same shape, pushed. |
 | **Chubby (light / medium / heavy)** | The other direction: fuller face and silhouette, waist left alone. Face widens ~3 / 5 / 7%. |
+| **Hair colour only** | Recolours the hair and changes nothing else at all. |
+| **Skin texture only** | Adds skin micro-detail back and changes nothing else at all. |
 | **Shape Only** | Reshaping with no grade or retouch. |
 | **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
 
@@ -150,6 +171,8 @@ instead of overwriting each other:
 | HDR Cinematic, HDR Only | the grade |
 | Curvy, Curvy (strong) | the body |
 | Chubby (light / medium / heavy) | the body and the face |
+| Hair colour only | the hair |
+| Skin texture only | the skin |
 | Shape Only | the face and the body |
 
 **Order does not matter.** The broadest preset is applied first and the most

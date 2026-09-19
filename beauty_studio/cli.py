@@ -27,8 +27,8 @@ if __package__ in (None, ""):
     __package__ = os.path.basename(_here)
 
 from .pipeline import capability_report, probe, process_image, render_video
-from .settings import (DEFAULT_PRESET, MAX_STACK, PRESET_DOMAINS, PRESETS,
-                       Settings, combine_presets, stack_label)
+from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESET_DOMAINS,
+                       PRESETS, Settings, combine_presets, stack_label)
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -45,7 +45,9 @@ def _apply_overrides(s: Settings, pairs: list[str]) -> Settings:
         if name not in known:
             raise SystemExit(f"unknown setting {name!r}. Known: {', '.join(sorted(known))}")
         current = getattr(s, name)
-        if isinstance(current, bool):
+        if isinstance(current, str):
+            kw[name] = value.strip()
+        elif isinstance(current, bool):
             kw[name] = value.strip().lower() in ("1", "true", "yes", "on")
         elif name in ("process_scale", "out_long_edge", "quality"):
             kw[name] = int(float(value))
@@ -70,6 +72,12 @@ def build_settings(args) -> Settings:
     s = combine_presets(parse_presets(args.preset))
     s = s.with_(process_scale=args.scale, quality=args.quality, hdr10=args.hdr10,
                 out_long_edge=args.out_long_edge, stabilise=not args.no_stabilise)
+    if args.hair_colour:
+        name = args.hair_colour.strip().lower()
+        if name not in HAIR_COLOURS:
+            raise SystemExit(f"unknown hair colour {args.hair_colour!r}. "
+                             f"known: {', '.join(HAIR_COLOURS)}")
+        s = s.with_(hair_colour=name)
     if args.set:
         s = _apply_overrides(s, args.set)
     return s.normalised()
@@ -91,6 +99,10 @@ def main(argv=None) -> int:
                     help="resize the output further (0 = same as working)")
     ap.add_argument("--trim", metavar="A:B", help="percent range of the clip to render, e.g. 10:90")
     ap.add_argument("--quality", type=int, default=18, metavar="CRF", help="x264 CRF (default 18)")
+    ap.add_argument("--hair-colour", "--hair-color", dest="hair_colour", default=None,
+                    metavar="NAME",
+                    help="recolour the hair: " + ", ".join(
+                        k for k in HAIR_COLOURS if k != "none"))
     ap.add_argument("--hdr10", action="store_true", help="experimental BT.2020/PQ export")
     ap.add_argument("--no-stabilise", action="store_true", help="disable temporal smoothing")
     ap.add_argument("--list-presets", action="store_true")

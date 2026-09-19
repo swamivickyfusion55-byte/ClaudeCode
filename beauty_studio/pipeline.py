@@ -31,7 +31,7 @@ import numpy as np
 import cv2
 
 from .grade import Grader
-from .hair import enhance_hair
+from .hair import HairColourist, enhance_hair
 from .imaging import even, to_float, to_u8
 from .landmarks import Trackers
 # A function, not a flag copied at import time: a backend can disable itself
@@ -76,7 +76,8 @@ class FrameProcessor:
         self.static = bool(static)
         self.trackers = Trackers(self.s, static=static, max_faces=max_faces)
         self.grader = Grader(stabilise=self.s.stabilise and not static)
-        self.retoucher = Retoucher()
+        self.retoucher = Retoucher(stabilise=self.s.stabilise and not static)
+        self.colourist = HairColourist(stabilise=self.s.stabilise and not static)
         self.profiler = BodyProfiler(stabilise=self.s.stabilise and not static)
         self.frames_with_face = 0
         self.frames_with_body = 0
@@ -117,7 +118,7 @@ class FrameProcessor:
         if faces and s.touches_face():
             img = self.retoucher.apply(img, faces, s)
         if faces and s.touches_hair():
-            img = enhance_hair(img, faces, person, body, s)
+            img = enhance_hair(img, faces, person, body, s, colourist=self.colourist)
 
         if (faces and (s.face_slim or s.face_round or s.chin_shape or s.nose_slim
                        or s.eye_enlarge)) \

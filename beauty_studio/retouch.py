@@ -18,8 +18,9 @@ import numpy as np
 
 import cv2
 
-from .imaging import (edge_preserving_smooth, gaussian, guided_filter,
-                      luminance, skin_likelihood, smoothstep, to_u8, unsharp)
+from .imaging import (EMA, blend, edge_preserving_smooth, gaussian,
+                      guided_filter, luminance, skin_likelihood, smoothstep,
+                      to_u8, unsharp)
 from .landmarks import Face
 
 
@@ -44,8 +45,17 @@ def _shifted(face: Face, ox: int, oy: int) -> Face:
 
 
 class Retoucher:
-    """Stateless per frame - all temporal smoothing already happened on the
-    landmarks, so the same call is used for photos and for video."""
+    """
+    Per-frame work, with one piece of memory: how much texture the skin has.
+
+    Everything else here is driven by landmarks that were already smoothed
+    over time. The texture measurement is not - it is a statistic of the
+    pixels - so it gets its own averaging, or the amount of detail added would
+    change from frame to frame and the skin would seem to crawl.
+    """
+
+    def __init__(self, stabilise: bool = True):
+        self._texture_amp = EMA(0.2 if stabilise else 1.0, reset_distance=0.02)
 
     def apply(self, bgr: np.ndarray, faces: list[Face], s) -> np.ndarray:
         if not faces or not s.touches_face():
@@ -72,6 +82,8 @@ class Retoucher:
             sub = self._smooth_skin(sub, f, skin, s.skin_smooth, s.texture)
         if s.skin_even > 0:
             sub = self._even_tone(sub, f, skin, s.skin_even)
+        if s.skin_texture > 0:
+            sub = self._add_texture(sub, f, skin, s.skin_texture)
         if s.under_eye > 0:
             sub = self._under_eye(sub, f, s.under_eye)
         if s.glow > 0:
@@ -134,6 +146,65 @@ class Retoucher:
         retouched = base + fine * 1.0 + (detail - fine) * texture
         w = skin * amount
         return sub * (1.0 - w[:, :, None]) + retouched * w[:, :, None]
+
+    # Band-pass amplitude of skin that has its own texture, measured on real
+    # footage. Smoothed skin comes in around 0.009-0.012, so this is the level
+    # the control restores toward.
+    NATURAL_TEXTURE = 0.0165
+
+    def _add_texture(self, sub: np.ndarray, f: Face, skin: np.ndarray,
+                     amount: float) -> np.ndarray:
+        """
+        Put micro-detail back into skin that has none.
+
+        The opposite end of the same axis as smoothing, and a separate control
+        because it answers a different problem: `texture` decides how much of
+        the real detail SURVIVES this app's smoothing, which is no help when
+        the footage arrived flat - a phone's own beauty mode, a heavy denoise,
+        a low-bitrate upload. This amplifies what structure is left.
+
+        Two things had to be measured rather than guessed. The detail is taken
+        as a BAND (roughly 0.6 to 2 pixels at a 130-pixel face) rather than
+        the finest frequency available: at the finest, even untouched skin
+        holds only about 1.7 levels out of 255, so restoring it is invisible
+        no matter what gain is applied - the structure people read as "skin"
+        sits a band lower. And the gain is set from the skin's own current
+        amplitude toward a natural level, so footage that still has its
+        texture is barely touched while footage that has been smoothed flat
+        gets real detail back.
+        """
+        s1 = max(0.6, f.width * 0.004)
+        s2 = max(1.8, f.width * 0.016)
+        band = gaussian(sub, s1) - gaussian(sub, s2)
+
+        sel = skin > 0.5
+        if int(sel.sum()) < 64:
+            return sub
+        amp = float(np.abs(band).mean(axis=2)[sel].mean())
+        amp = float(self._texture_amp.update(np.float32([amp]))[0])
+        # The slider reaches past "natural" on purpose: restoring merely to
+        # natural is a one-level change on footage that is only lightly
+        # smoothed, which is not worth a control. Half way up returns skin
+        # that reads as real; the top end is deliberately crisper than life,
+        # for footage that arrived with nothing left.
+        target = self.NATURAL_TEXTURE * (0.6 + 1.8 * amount)
+        # Capped at 2.5x. This amplifies whatever band-pass structure is
+        # there, and on footage smoothed hard enough to posterise, that
+        # structure is the smoother's own patch edges - past this the result
+        # is crunch, not skin. It cannot invent pores that are gone; what it
+        # does well is bring back skin that is merely soft.
+        gain = float(np.clip(target / max(amp, 1e-4), 1.0, 2.5)) - 1.0
+        if gain <= 0.01:
+            return sub
+
+        lum_band = np.abs(band).mean(axis=2)
+        energy = gaussian(lum_band, s2 * 1.5)
+        # Only suppressed where there is essentially no signal to amplify - a
+        # blown highlight, a crushed shadow - rather than trying to tell a
+        # pore from sensor noise, which at this scale is not possible.
+        gate = smoothstep(0.0015, 0.0060, energy)
+        boosted = sub + band * gain * gate[:, :, None]
+        return blend(sub, np.clip(boosted, 0.0, 1.0), skin)
 
     @staticmethod
     def _even_tone(sub: np.ndarray, f: Face, skin: np.ndarray, amount: float) -> np.ndarray:

@@ -19,6 +19,7 @@ from dataclasses import dataclass, asdict, fields, replace
 # numbers come from where each effect starts to read as a filter on a 27" panel.
 CAPS = {
     "skin_smooth": 0.85,
+    "skin_texture": 0.90,
     "skin_even": 0.80,
     "blemish": 0.90,
     "glow": 0.55,
@@ -39,6 +40,7 @@ CAPS = {
     # it has to invent silhouette where the background used to be.
     "bust_shape": 0.70,
     "hip_shape": 0.75,
+    "hair_colour_amount": 1.00,
     "hair_detail": 0.80,
     "hair_shine": 0.65,
     "hair_volume": 0.50,
@@ -69,7 +71,8 @@ class Settings:
 
     # ---- skin ------------------------------------------------------------
     skin_smooth: float = 0.45       # frequency-separated smoothing
-    texture: float = 0.65           # how much real pore detail is put back (1 = all)
+    texture: float = 0.65           # how much real pore detail SURVIVES smoothing (1 = all)
+    skin_texture: float = 0.0       # ADDS micro-detail back to flat or over-smoothed skin
     skin_even: float = 0.40         # evens blotchy colour, not brightness
     blemish: float = 0.50           # spot suppression
     glow: float = 0.25              # soft luminosity on skin
@@ -99,7 +102,13 @@ class Settings:
     hair_shine: float = 0.30        # gloss highlights
     hair_volume: float = 0.20       # fuller silhouette
     hair_frizz: float = 0.35        # flyaway suppression
-    hair_richness: float = 0.30     # colour depth
+    hair_richness: float = 0.30     # colour depth of the hair's own colour
+    # Recolouring. `hair_colour` names a target from HAIR_COLOURS ("none"
+    # leaves the colour alone); `hair_colour_amount` is how far toward it to
+    # go; `hair_hue` is the hue in degrees used when the target is "custom".
+    hair_colour: str = "none"
+    hair_colour_amount: float = 0.75
+    hair_hue: float = 30.0
 
     # ---- global ----------------------------------------------------------
     naturalness: float = 0.85       # 1.0 = full effect, lower = blend back toward source
@@ -116,7 +125,14 @@ class Settings:
         out = {}
         for f in fields(self):
             v = getattr(self, f.name)
-            if f.type == "bool" or isinstance(v, bool):
+            if f.name == "hair_colour":
+                # A name, not a number. Anything unrecognised means "leave the
+                # colour alone" rather than an exception mid-render.
+                name = str(v or "none").strip().lower()
+                out[f.name] = name if name in HAIR_COLOURS else "none"
+            elif f.name == "hair_hue":
+                out[f.name] = float(v) % 360.0
+            elif f.type == "bool" or isinstance(v, bool):
                 out[f.name] = bool(v)
             elif isinstance(v, int) and f.name in ("process_scale", "out_long_edge", "quality"):
                 out[f.name] = int(v)
@@ -143,9 +159,9 @@ class Settings:
 
     def touches_face(self) -> bool:
         return any(getattr(self, k) > 0 for k in (
-            "skin_smooth", "skin_even", "blemish", "glow", "eye_brighten",
-            "teeth_whiten", "lip_enhance", "under_eye", "face_slim",
-            "face_round", "chin_shape", "nose_slim", "eye_enlarge"))
+            "skin_smooth", "skin_texture", "skin_even", "blemish", "glow",
+            "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye",
+            "face_slim", "face_round", "chin_shape", "nose_slim", "eye_enlarge"))
 
     def touches_body(self) -> bool:
         return any(getattr(self, k) != 0 for k in
@@ -153,8 +169,14 @@ class Settings:
                     "bust_shape", "hip_shape", "posture"))
 
     def touches_hair(self) -> bool:
+        if self.recolours_hair():
+            return True
         return any(getattr(self, k) > 0 for k in
                    ("hair_detail", "hair_shine", "hair_volume", "hair_frizz", "hair_richness"))
+
+    def recolours_hair(self) -> bool:
+        return (str(self.hair_colour).lower() not in ("", "none")
+                and self.hair_colour_amount > 0)
 
 
 # --------------------------------------------------------------------- presets
@@ -257,6 +279,33 @@ PRESETS: dict[str, Settings] = {
         hair_detail=0.42, hair_shine=0.32, hair_volume=0.22, hair_frizz=0.42,
         hair_richness=0.32, naturalness=1.0),
 
+    # Skin texture and nothing else: for footage that arrives already smoothed
+    # - a phone's own beauty mode, a heavy denoise, a low-bitrate upload -
+    # where the problem is not too much detail but none left.
+    "Skin texture only": Settings(
+        hdr_strength=0.0, shadows=0.0, highlights=0.0, clarity=0.0, vibrance=0.0,
+        saturation=0.0, warmth=0.0, tint=0.0, contrast=0.0, bloom=0.0, sharpen=0.0,
+        skin_smooth=0.0, texture=1.0, skin_texture=0.55, skin_even=0.0, blemish=0.0,
+        glow=0.0, eye_brighten=0.0, teeth_whiten=0.0, lip_enhance=0.0, under_eye=0.0,
+        face_slim=0.0, face_round=0.0, chin_shape=0.0, nose_slim=0.0, eye_enlarge=0.0,
+        body_slim=0.0, body_fuller=0.0, waist_shape=0.0, curve_shape=0.0,
+        bust_shape=0.0, hip_shape=0.0, hair_detail=0.0, hair_shine=0.0,
+        hair_volume=0.0, hair_frizz=0.0, hair_richness=0.0, naturalness=1.0),
+
+    # Colour the hair and nothing else: no grade, no retouch, no reshaping,
+    # and none of the other hair work either. Stack it with anything.
+    "Hair colour only": Settings(
+        hdr_strength=0.0, shadows=0.0, highlights=0.0, clarity=0.0, vibrance=0.0,
+        saturation=0.0, warmth=0.0, tint=0.0, contrast=0.0, bloom=0.0, sharpen=0.0,
+        skin_smooth=0.0, texture=1.0, skin_even=0.0, blemish=0.0, glow=0.0,
+        eye_brighten=0.0, teeth_whiten=0.0, lip_enhance=0.0, under_eye=0.0,
+        face_slim=0.0, face_round=0.0, chin_shape=0.0, nose_slim=0.0,
+        eye_enlarge=0.0, body_slim=0.0, body_fuller=0.0, waist_shape=0.0,
+        curve_shape=0.0, bust_shape=0.0, hip_shape=0.0,
+        hair_detail=0.0, hair_shine=0.0, hair_volume=0.0, hair_frizz=0.0,
+        hair_richness=0.0, hair_colour="black", hair_colour_amount=0.85,
+        naturalness=1.0),
+
     # Shape work only - for when the grade is already done elsewhere.
     "Shape Only": Settings(
         hdr_strength=0.0, clarity=0.0, vibrance=0.0, contrast=0.0, bloom=0.0,
@@ -282,6 +331,24 @@ PRESETS: dict[str, Settings] = {
 
 DEFAULT_PRESET = "Natural"
 
+# Target colours for recolouring, as sRGB. Deliberately real hair colours
+# rather than saturated paint: the transform moves the hair's average toward
+# one of these and keeps every pixel's own deviation from that average, which
+# is where the strands and the gloss live.
+HAIR_COLOURS: dict[str, tuple[int, int, int] | None] = {
+    "none": None,
+    "black": (30, 27, 25),
+    "dark brown": (61, 42, 32),
+    "brown": (94, 63, 41),
+    "light brown": (134, 96, 56),
+    "auburn": (110, 48, 28),
+    "red": (165, 72, 30),
+    "blonde": (200, 165, 100),
+    "platinum": (222, 210, 190),
+    "grey": (150, 148, 145),
+    "custom": None,          # built from `hair_hue` instead
+}
+
 # ----------------------------------------------------------- combining presets
 #
 # Presets can be stacked - "Chubby (medium) + HDR Cinematic" - and that only
@@ -294,13 +361,13 @@ DOMAIN_FIELDS: dict[str, tuple[str, ...]] = {
     "grade": ("hdr_strength", "shadows", "highlights", "clarity", "vibrance",
               "saturation", "warmth", "tint", "contrast", "bloom", "sharpen",
               "protect_skin_colour"),
-    "skin": ("skin_smooth", "texture", "skin_even", "blemish", "glow",
-             "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye"),
+    "skin": ("skin_smooth", "texture", "skin_texture", "skin_even", "blemish",
+             "glow", "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye"),
     "face": ("face_slim", "face_round", "chin_shape", "nose_slim", "eye_enlarge"),
     "body": ("body_slim", "body_fuller", "waist_shape", "curve_shape",
              "bust_shape", "hip_shape", "posture"),
     "hair": ("hair_detail", "hair_shine", "hair_volume", "hair_frizz",
-             "hair_richness"),
+             "hair_richness", "hair_colour", "hair_colour_amount", "hair_hue"),
     "finish": ("naturalness",),
 }
 
@@ -321,6 +388,8 @@ PRESET_DOMAINS: dict[str, tuple[str, ...]] = {
     "Chubby (medium)": ("body", "face"),
     "Chubby (heavy)": ("body", "face"),
     "Shape Only": ("face", "body"),
+    "Hair colour only": ("hair",),
+    "Skin texture only": ("skin",),
 }
 
 MAX_STACK = 3
@@ -369,11 +438,12 @@ def stack_label(names) -> str:
 # are the ones scaled by `naturalness`, and by a tracker's confidence when a
 # face is being acquired or coasted through a dropout.
 PERSON_AMOUNTS = (
-    "skin_smooth", "skin_even", "blemish", "glow", "eye_brighten",
+    "skin_smooth", "skin_texture", "skin_even", "blemish", "glow", "eye_brighten",
     "teeth_whiten", "lip_enhance", "under_eye", "face_slim", "chin_shape",
     "nose_slim", "eye_enlarge", "face_round", "body_slim", "body_fuller",
     "waist_shape", "curve_shape", "bust_shape", "hip_shape",
     "hair_detail", "hair_shine", "hair_volume", "hair_frizz", "hair_richness",
+    "hair_colour_amount",
 )
 
 
