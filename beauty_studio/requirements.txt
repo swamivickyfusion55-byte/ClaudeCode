@@ -1,0 +1,42 @@
+# Swamitech Beauty Studio · HF Spaces · Python 3.10+ · CPU-only pack
+#
+# Pinned as a matched set. The three web pins below are not cosmetic: with
+# newer versions of any of them, gradio 4.44.1 fails while rendering its own
+# index page or while building its API schema, and the Space comes up as a
+# 500 with a traceback that points into starlette or gradio_client rather
+# than at the version conflict that caused it.
+gradio==4.44.1
+gradio-client==1.3.0
+huggingface_hub>=0.23.2,<0.28.0
+starlette>=0.27.0,<0.38.0
+fastapi>=0.100.0,<0.113.0
+# gradio_client 1.3.0 walks the JSON schema pydantic generates; from pydantic
+# 2.10 that schema can contain a bare `true`, and the walk dies with
+# "TypeError: argument of type 'bool' is not iterable" on every page load.
+pydantic>=2.0,<2.10
+
+# numpy stays below 2.0: mediapipe 0.10.x and the opencv wheels here are both
+# built against the 1.x C API.
+numpy>=1.24.0,<2.0
+opencv-python-headless>=4.8.0,<4.12
+Pillow>=10.0.0,<11
+
+# Face mesh (478 landmarks incl. iris), pose and person segmentation.
+#
+# BOTH MediaPipe APIs work - the app detects which one is installed:
+#   legacy `solutions`  up to and including 0.10.21. Models ship inside the
+#                       wheel: no download, no network, no extra system libs.
+#   `tasks`             0.10.30 and later, including 1.x. `solutions` was
+#                       REMOVED there - which is what makes an unpinned (or
+#                       loosely pinned) install fail with "module 'mediapipe'
+#                       has no attribute 'solutions'". Models are fetched once
+#                       (~10 MB) from Google's CDN and cached, and the native
+#                       library needs libEGL.
+#
+# Note the upper bound: `<0.11` is NOT enough, because 0.10.30 through 0.10.35
+# are inside it and have no `solutions`. This pin picks the last release that
+# needs nothing at runtime, which is what makes a Space deploy reproducible.
+#
+# To run on a current MediaPipe instead, relax this to `mediapipe>=0.10.30`
+# and add libegl1 and libgles2 to packages.txt. The code handles either.
+mediapipe>=0.10.14,<0.10.22
