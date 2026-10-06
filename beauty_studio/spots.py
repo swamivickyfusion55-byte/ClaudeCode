@@ -33,7 +33,9 @@ import numpy as np
 
 import cv2
 
-from .imaging import to_u8
+from .imaging import feather, poly_mask, to_u8
+from .landmarks import (FACE_OVAL, LEFT_BROW, LEFT_EYE, LIPS_OUTER, RIGHT_BROW,
+                        RIGHT_EYE)
 
 log = logging.getLogger(__name__)
 
@@ -152,12 +154,23 @@ def locate_spot(bgr: np.ndarray, x: int, y: int, max_radius: int):
     count, labels = cv2.connectedComponents(different, connectivity=8)
     lab_id = labels[iy, ix]
     if lab_id == 0:
-        # The tap landed beside the mark rather than on it: take the nearest
-        # region instead of giving up, since nobody taps dead centre.
-        near = labels[(dist < max(5.0, r * 0.6)) & (labels > 0)]
-        if near.size == 0:
+        # The tap landed beside the mark rather than on it. Nobody taps dead
+        # centre, and on a phone a fingertip covers a good fraction of the
+        # frame as displayed, so the search reaches a full tap-radius out -
+        # and takes the nearest candidate of a plausible size, not the
+        # largest, which at that reach would start preferring the eyebrow.
+        reach = max(6.0, r * 1.2)
+        best_id, best_d = 0, None
+        for cand in range(1, count):
+            cys, cxs = np.nonzero(labels == cand)
+            if len(cxs) < 4 or np.sqrt(len(cxs) / np.pi) > r:
+                continue
+            d = np.hypot(float(cxs.mean()) - cx, float(cys.mean()) - cy)
+            if d <= reach and (best_d is None or d < best_d):
+                best_id, best_d = cand, d
+        if best_id == 0:
             return fallback
-        lab_id = int(np.bincount(near).argmax())
+        lab_id = best_id
     ys, xs = np.nonzero(labels == lab_id)
     area = float(len(xs))
     mx, my = float(xs.mean()), float(ys.mean())
@@ -558,3 +571,430 @@ def heal(bgr: np.ndarray, spots, strength: float = 1.0) -> np.ndarray:
         alpha = (soft * float(np.clip(strength, 0.0, 1.0)))[:, :, None]
         out[y0:y1, x0:x1] = np.clip(roi * (1.0 - alpha) + healed * alpha, 0.0, 1.0)
     return out
+
+
+# ------------------------------------------------------------- auto-detection
+
+# Nothing smaller is a mark worth healing (it is grain), and nothing larger is
+# one (it is a shadow, a tattoo, a nipple, the shade under a jaw). Both are
+# fractions of the frame's long edge, so they mean the same thing at any size.
+AUTO_MIN_RADIUS = 0.0030
+AUTO_MAX_RADIUS = 0.0180
+
+# A blob has to be roughly round. A hair, an eyelash, a crease and the line of
+# a seam all read as "darker than their surroundings" and none of them is a
+# mole; the one thing that separates them is that they are long and thin.
+AUTO_MIN_ROUNDNESS = 0.42
+
+
+def detect_spots(bgr: np.ndarray, skin: np.ndarray, sensitivity: float = 0.5,
+                 limit: int = 12, reference: np.ndarray | None = None
+                 ) -> list[tuple[float, float, float, float]]:
+    """
+    Find the marks on this frame by themselves: (x, y, radius, strength).
+
+    The same measurement a tap uses, run everywhere at once. A mark is a small
+    region that differs in colour from the skin immediately around it, so the
+    detector is a local one: the image minus a median of itself over a window
+    a few mark-widths across, read in Lab with lightness weighted down, which
+    is what lets it find a brown patch on brown skin as readily as a black
+    mole on pale skin.
+
+    Three filters do the work of not healing the person's face off:
+
+      * size, in both directions. Below the floor it is grain; above the
+        ceiling it is a shadow, a tattoo or the shade under a jaw, and this
+        heals marks, not regions.
+      * roundness. A hair, a lash, a crease and the edge of a seam are all
+        darker than what is around them, and all long and thin.
+      * the same surround test a tap goes through. A candidate sitting on an
+        edge has no single colour to carry across it, so it is dropped rather
+        than filled with something matching neither side.
+
+    `skin` is where it is allowed to look, as a 0..1 mask - the face's own
+    skin mask (which already excludes eyes, brows, lips and nostrils) plus
+    whatever else is the person. Nothing outside it is ever considered.
+
+    `reference` is where the bar is set FROM, and it is a different mask on
+    purpose: the part that is confidently skin, before the search region was
+    widened to cover the marks themselves. Setting the bar from the widened
+    region lets a sleeve or a jacket raise it, and then the mole on the cheek
+    measures as ordinary.
+    """
+    h, w = bgr.shape[:2]
+    long_edge = float(max(w, h))
+    r_min = max(1.5, AUTO_MIN_RADIUS * long_edge)
+    r_max = max(r_min + 1.0, AUTO_MAX_RADIUS * long_edge)
+    allow = (np.asarray(skin, np.float32) > 0.5)
+    if not allow.any():
+        return []
+
+    f32 = bgr.astype(np.float32) / 255.0 if bgr.dtype == np.uint8 else bgr
+    lab = cv2.cvtColor(np.clip(f32, 0, 1), cv2.COLOR_BGR2Lab)
+    # A window a few mark-widths across: wide enough that a mole cannot define
+    # its own background, narrow enough to follow the shading of a cheek.
+    k = int(r_max * 4) | 1
+    base = cv2.medianBlur(to_u8(f32), min(k, 31)).astype(np.float32) / 255.0
+    base = cv2.cvtColor(base, cv2.COLOR_BGR2Lab)
+    delta = np.sqrt((0.55 * (lab[:, :, 0] - base[:, :, 0])) ** 2 +
+                    (lab[:, :, 1] - base[:, :, 1]) ** 2 +
+                    (lab[:, :, 2] - base[:, :, 2]) ** 2)
+    # Darker than its surroundings, or a different colour at the same
+    # lightness. Lighter-and-otherwise-identical is a highlight, not a mark.
+    darker = lab[:, :, 0] < base[:, :, 0] + 0.5
+    chroma = np.sqrt((lab[:, :, 1] - base[:, :, 1]) ** 2 +
+                     (lab[:, :, 2] - base[:, :, 2]) ** 2)
+    signal = np.where(darker | (chroma > 2.0), delta, 0.0)
+
+    ref = allow if reference is None else (np.asarray(reference, np.float32) > 0.5)
+    inside = signal[ref]
+    if inside.size < 64:
+        inside = signal[allow]
+    if inside.size < 64:
+        return []
+    level = float(np.median(inside))
+    spread = 1.4826 * float(np.median(np.abs(inside - level))) + 1e-4
+    # Sensitivity moves the bar between "only what is unmistakable" and "every
+    # freckle", in robust deviations of the skin's own signal. The floor keeps
+    # the top of the range from finding compression noise on flat skin.
+    k_sigma = 4.0 - 2.2 * float(np.clip(sensitivity, 0.0, 1.0))
+    # And an absolute floor as well as a relative one: a mark somebody would
+    # ask to have removed differs from the skin around it by more than this,
+    # and nothing that does not is worth a heal.
+    thresh = max(level + k_sigma * spread, 4.0)
+    mask = ((signal > thresh) & allow).astype(np.uint8)
+    if not mask.any():
+        return []
+
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+    found = []
+    ys_all, xs_all = np.nonzero(labels)
+    order = np.argsort(labels[ys_all, xs_all], kind="stable")
+    ys_all, xs_all = ys_all[order], xs_all[order]
+    ids = labels[ys_all, xs_all]
+    bounds = np.searchsorted(ids, np.arange(1, n))
+    bounds = np.append(bounds, len(ids))
+    start = 0
+    for lab_id in range(1, n):
+        end = bounds[lab_id - 1]
+        xs, ys = xs_all[start:end], ys_all[start:end]
+        start = end
+        area = float(len(xs))
+        if area < 4:
+            continue
+        equiv = np.sqrt(area / np.pi)
+        if equiv < r_min * 0.8 or equiv > r_max:
+            continue
+        mx, my = float(xs.mean()), float(ys.mean())
+        reach = float(np.percentile(np.sqrt((xs - mx) ** 2 + (ys - my) ** 2), 92))
+        if reach > r_max * 1.4:
+            continue
+        if area / (np.pi * max(reach, 0.5) ** 2) < AUTO_MIN_ROUNDNESS:
+            continue                              # a hair, a lash, a crease
+        radius = float(np.clip(max(equiv, reach) * 1.15, r_min, r_max * 1.3))
+        strength = float(signal[ys, xs].mean())
+        found.append((mx, my, radius, strength))
+
+    found.sort(key=lambda t: -t[3])
+    kept = []
+    for (mx, my, radius, strength) in found:
+        if len(kept) >= max(1, int(limit)):
+            break
+        # Two detections on top of each other are one mark seen twice.
+        if any((mx - kx) ** 2 + (my - ky) ** 2 < (radius + kr) ** 2
+               for kx, ky, kr, _ in kept):
+            continue
+        pad = int(np.ceil(radius * 4.0))
+        x0, x1 = max(0, int(mx) - pad), min(w, int(mx) + pad + 1)
+        y0, y1 = max(0, int(my) - pad), min(h, int(my) + pad + 1)
+        roi = f32[y0:y1, x0:x1]
+        if roi.shape[0] < 8 or roi.shape[1] < 8:
+            continue
+        yy, xx = np.ogrid[:roi.shape[0], :roi.shape[1]]
+        dist = np.sqrt((xx - (mx - x0)) ** 2 + (yy - (my - y0)) ** 2)
+        _, share = dominant_surround(roi, dist, radius)
+        if share and share < MIN_SURROUND_SHARE:
+            continue                              # on an edge: leave it
+        kept.append((mx, my, radius, strength))
+    return kept
+
+
+def skin_region(bgr, faces, person, shape, scale: float = 1.0):
+    """
+    Where auto-detection may look, and where it reads the skin from.
+
+    Two masks come back, and they are not the same one. The first is the
+    search region; the second is the part that is confidently skin, which is
+    what the bar for "this is a mark" is set from. The search region has to be
+    the wider of the two - a mole is not skin-coloured, so a colour gate
+    excludes the very thing being looked for - and setting the bar from that
+    wider region is what lets a sleeve raise it until the mole on the cheek
+    measures as ordinary skin.
+
+    The face mask is the easy part - it already excludes eyes, brows, lips and
+    nostrils, which are the four things on a face most reliably darker than
+    what surrounds them.
+
+    The body is the part that needs care, because the person mask is a mask of
+    the PERSON: it includes their clothes. Run a mark-finder over a dark
+    jumper and it finds a dozen marks a frame, every one of them a fold or a
+    print, and they crowd out the real ones. So the body half is gated on
+    colour - and the colour it is gated on is measured from this subject's own
+    face in this frame, not from a table. That is what makes it work at any
+    skin tone instead of at the ones a table happened to list.
+
+    With no face in shot there is nothing to calibrate from, so it falls back
+    to a broad generic skin window, which is weaker: auto-detection on a body
+    is at its best when a face is in the same frame.
+
+    The body outline is also eroded, because the rim of a person against the
+    background is the one place a "dark patch" is guaranteed to be the
+    background showing through.
+    """
+    h, w = shape[:2]
+    face_px = np.zeros((h, w), np.float32)
+    for f in faces or []:
+        face_px = np.maximum(face_px, _face_skin(f, shape, scale))
+    allow = face_px.copy()
+    core = face_px.copy()
+
+    if person is not None:
+        body = np.asarray(person, np.float32)
+        if body.shape[:2] != (h, w):
+            body = cv2.resize(body, (w, h), interpolation=cv2.INTER_LINEAR)
+        # Close both masks by a little more than the largest mark this will
+        # heal, before anything else is done with them. A mole is not
+        # skin-coloured - that is the whole point of it - so a colour gate
+        # punches a hole in the mask exactly where the mark is, and some
+        # segmenters drop a dark patch out of the person too. Closing fills
+        # holes of that size and nothing larger; the result is still bounded
+        # by the person's own outline, so nothing leaks into the background.
+        #
+        # Square structuring elements on uint8, not round ones on float: these
+        # are coarse region masks, a square is indistinguishable in the result,
+        # and OpenCV runs a rectangle separably. Measured on one 640x480 frame,
+        # that one substitution took this from 46 ms to 0.6 ms - and it runs on
+        # every frame of the render.
+        # Just over the diameter of the largest mark this will heal, and no
+        # more. Closing by a generous margin instead bridges the gate's gaps
+        # back together and quietly re-admits whatever sat between them - on
+        # one test frame, the dark folds of a flight suit.
+        fill = int(max(4, AUTO_MAX_RADIUS * 1.15 * max(h, w)))
+        kf = cv2.getStructuringElement(cv2.MORPH_RECT, (fill * 2 + 1,) * 2)
+        body = cv2.morphologyEx((body > 0.5).astype(np.uint8), cv2.MORPH_CLOSE, kf)
+        grow = max(3, int(min(h, w) * 0.012))
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (grow * 2 + 1,) * 2)
+        body = cv2.erode(body, k).astype(np.float32)
+        skin = _skin_like(bgr, face_px)
+        if skin is not None:
+            core = np.maximum(core, body * skin)
+            closed = cv2.morphologyEx((skin > 0.5).astype(np.uint8), cv2.MORPH_CLOSE, kf)
+            body = body * closed.astype(np.float32)
+        else:
+            core = np.maximum(core, body)
+        allow = np.maximum(allow, body)
+    if not allow.any():
+        return None, None
+    return allow, (core if core.any() else allow)
+
+
+def _face_skin(face, shape, scale: float = 1.0):
+    """The face's skin mask, built directly at the size wanted.
+
+    `Face.skin_mask` builds it at the frame's own size, which is the right
+    thing everywhere else and the wrong thing here: auto-detection runs on a
+    downscaled copy, and rasterising a 4K mask only to shrink it costs more
+    than everything else in the detector put together. The landmarks are
+    pixel coordinates, so scaling them is all it takes.
+    """
+    if scale >= 0.999:
+        return face.skin_mask(shape, feather_px=1.0)
+    pts = np.asarray(face.points, np.float32) * float(scale)
+    poly = lambda idx: pts[list(idx)]
+    m = poly_mask(shape, [poly(FACE_OVAL)])
+    excl = np.clip(poly_mask(shape, [poly(LEFT_EYE), poly(RIGHT_EYE),
+                                     poly(LEFT_BROW), poly(RIGHT_BROW)])
+                   + poly_mask(shape, [poly(LIPS_OUTER)]), 0, 1)
+    grow = max(2, int(face.width * scale * 0.015))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow * 2 + 1,) * 2)
+    return feather(np.clip(m - cv2.dilate(excl, k), 0, 1), 1.0)
+
+
+def _skin_like(bgr, face_mask):
+    """A 0/1 mask of pixels the same colour as this person's face."""
+    f32 = bgr.astype(np.float32) / 255.0 if bgr.dtype == np.uint8 else bgr
+    lab = cv2.cvtColor(np.clip(f32, 0, 1), cv2.COLOR_BGR2Lab)
+    sample = lab[face_mask > 0.5]
+    if sample.shape[0] >= 200:
+        med = np.median(sample, axis=0)
+        ab = np.linalg.norm(sample[:, 1:] - med[1:], axis=1)
+        tol = max(3.0 * 1.4826 * float(np.median(np.abs(ab - np.median(ab)))), 7.0)
+        near = np.linalg.norm(lab[:, :, 1:] - med[1:], axis=2) <= tol
+        # Lightness is allowed to wander - an arm in shade is still the arm -
+        # but not all the way to black, where chroma stops meaning anything
+        # and a dark fold in a garment passes for skin.
+        lit = np.abs(lab[:, :, 0] - med[0]) <= 32.0
+        return (near & lit).astype(np.float32)
+    # No face to learn from: a generic window, deliberately broad, because a
+    # narrow one simply fails on the skin tones it was not built around.
+    ycc = cv2.cvtColor(to_u8(f32), cv2.COLOR_BGR2YCrCb)
+    cr, cb = ycc[:, :, 1].astype(np.int16), ycc[:, :, 2].astype(np.int16)
+    y = ycc[:, :, 0].astype(np.int16)
+    return ((cr >= 130) & (cr <= 184) & (cb >= 74) & (cb <= 132)
+            & (y >= 40)).astype(np.float32)
+
+
+class AutoSpotter:
+    """
+    Auto-detect across a clip, without the flicker that healing a per-frame
+    detection straight off would give.
+
+    A detector run independently on every frame does not agree with itself
+    frame to frame - a mark on the threshold is found, missed, found - and
+    healing that switches a patch of skin on and off at twenty-four frames a
+    second, which is far more visible than the mark was. So detections are
+    carried as tracks, exactly as faces are elsewhere in this app: a track has
+    to be seen twice before anything is healed, it is coasted for a few frames
+    when it is missed, and its strength ramps in and out instead of
+    switching. The first heal of a mark is one frame later than it could be;
+    nothing pops.
+
+    Tracks are matched to the face mesh where there is a face, so a track
+    survives the head moving between frames rather than being matched by
+    pixel position and lost on the first quick turn.
+    """
+
+    CONFIRM = 2          # frames a track must be seen on before it is healed
+    COAST = 4            # frames it survives being missed
+    RAMP = 3             # frames to fade in and out over
+
+    # Detection runs at this long edge, whatever the footage is. The smallest
+    # mark this acts on is 0.3% of the long edge, which is two pixels here -
+    # still a blob - and the alternative is paying for 4K on every frame to
+    # locate something that will be healed at full resolution anyway.
+    WORK_EDGE = 640
+
+    def __init__(self, sensitivity: float = 0.5, limit: int = 12,
+                 stabilise: bool = True):
+        self.sensitivity = float(sensitivity)
+        self.limit = int(limit)
+        self.stabilise = bool(stabilise)
+        self.tracks: list[dict] = []
+        self.frames = 0
+
+    def __call__(self, bgr, faces, person, shape) -> list[tuple[float, float, float]]:
+        h, w = shape[:2]
+        k = min(1.0, self.WORK_EDGE / float(max(h, w, 1)))
+        if k < 0.999:
+            sw, sh = max(16, int(round(w * k))), max(16, int(round(h * k)))
+            small = cv2.resize(bgr, (sw, sh), interpolation=cv2.INTER_AREA)
+            small_person = (None if person is None else
+                            cv2.resize(np.asarray(person, np.float32), (sw, sh),
+                                       interpolation=cv2.INTER_LINEAR))
+            k = sw / float(w)          # the scale actually used, after rounding
+        else:
+            small, small_person, k = bgr, person, 1.0
+
+        allow, ref = self._where_to_look(small, faces, small_person,
+                                         small.shape, scale=k)
+        if allow is None:
+            return []
+        found = detect_spots(small, allow, self.sensitivity, self.limit, reference=ref)
+        if k != 1.0:
+            found = [(x / k, y / k, r / k, st) for x, y, r, st in found]
+        if not self.stabilise:
+            return [(x, y, r) for x, y, r, _ in found]
+        return self._carry(found, faces, shape)
+
+    # ------------------------------------------------------------- internals
+    def _where_to_look(self, bgr, faces, person, shape, scale=1.0):
+        return skin_region(bgr, faces, person, shape, scale=scale)
+
+    def _carry(self, found, faces, shape):
+        # The first frame is the exception to both rules below. Confirming
+        # over two frames and ramping over three exist to stop a mark
+        # appearing and vanishing mid-clip; at the very first frame there is
+        # nothing to appear from, and waiting leaves the mark visible on the
+        # one frame people are most likely to look at - the thumbnail.
+        first = self.frames == 0
+        self.frames += 1
+        face = faces[0] if faces else None
+        tol = (face.width * 0.09) if face is not None else max(shape[:2]) * 0.02
+        tol = max(float(tol), 4.0)
+
+        for t in self.tracks:
+            t["matched"] = False
+            if face is not None and t.get("weights"):
+                pos = _reconstruct(t, face)
+                if pos is not None:
+                    t["x"], t["y"] = pos
+
+        for (mx, my, radius, _strength) in found:
+            best, best_d = None, None
+            for t in self.tracks:
+                if t["matched"]:
+                    continue
+                d = np.hypot(mx - t["x"], my - t["y"])
+                if d <= tol + radius and (best_d is None or d < best_d):
+                    best, best_d = t, d
+            if best is None:
+                best = {"seen": 0, "missed": 0, "level": 0.0}
+                self.tracks.append(best)
+            best.update(x=mx, y=my, r=radius, matched=True, missed=0)
+            best["seen"] += 1
+            if face is not None:
+                best.update(_anchor(mx, my, face))
+
+        out = []
+        for t in self.tracks:
+            if not t["matched"]:
+                t["missed"] += 1
+            confirm = 1 if first else self.CONFIRM
+            target = 1.0 if (t["matched"] and t["seen"] >= confirm) else 0.0
+            if t["missed"] > self.COAST:
+                target = 0.0
+            if first:
+                t["level"] = target
+            else:
+                step = 1.0 / max(self.RAMP, 1)
+                t["level"] = float(np.clip(
+                    t["level"] + (step if target > t["level"] else -step), 0.0, 1.0))
+            if t["level"] > 0.02:
+                out.append((t["x"], t["y"], t["r"] * (0.6 + 0.4 * t["level"])))
+        self.tracks = [t for t in self.tracks
+                       if t["level"] > 0.02 or t["missed"] <= self.COAST]
+        return out
+
+
+def _anchor(x, y, face):
+    """Store a detection against the face mesh, the same way a tap is."""
+    px = np.float32([x, y])
+    d = np.linalg.norm(face.points - px, axis=1)
+    if float(d.min()) > face.width * 0.9:
+        return {"weights": None}
+    idx = np.argsort(d)[:ANCHOR_POINTS]
+    w0 = 1.0 / np.maximum(d[idx], 1e-3)
+    w0 = (w0 / float(w0.sum())).astype(np.float32)
+    base = (np.asarray(face.points, np.float32)[idx] * w0[:, None]).sum(0)
+    along, across = _face_frame(face)
+    gap = px - base
+    scale = max(float(face.width), 1.0)
+    return {"weights": [(int(i), float(v)) for i, v in zip(idx, w0)],
+            "offset": (float(np.dot(gap, across) / scale),
+                       float(np.dot(gap, along) / scale))}
+
+
+def _reconstruct(track, face):
+    """Where a tracked detection has moved to on this frame."""
+    weights = track.get("weights")
+    if not weights:
+        return None
+    pos = np.zeros(2, np.float32)
+    for i, wt in weights:
+        if i >= len(face.points):
+            return None
+        pos += face.points[i] * wt
+    ox, oy = track.get("offset", (0.0, 0.0))
+    along, across = _face_frame(face)
+    pos = pos + (across * ox + along * oy) * max(float(face.width), 1.0)
+    return float(pos[0]), float(pos[1])

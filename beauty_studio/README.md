@@ -94,6 +94,66 @@ beside it. On a moving limb - a shaded, grainy arm that travels and rotates
 across 40 frames with a brown patch riding it - a single tap on frame 20 clears
 every frame of the clip, frame 0 included.
 
+**Or let it find them: auto-detect.** A slider — *Find and remove marks* —
+runs the same measurement over the whole person on every frame, with no tapping
+at all. Low finds only what is unmistakable; high finds every freckle; zero is
+off. Beside it, **Find marks on this frame** runs the detector once, here, and
+adds what it finds to the list as if you had tapped each one, so you can see
+what it caught before committing an hour of rendering to it — and clear it if
+it caught something you wanted kept. Marks are ringed and numbered on the
+Before frame either way.
+
+Three things keep it from healing a face off:
+
+- **It only looks at skin.** On a face that is the face's own skin mask, which
+  already excludes eyes, brows, lips and nostrils — the four things on a face
+  most reliably darker than their surroundings. On a body the person mask is a
+  mask of the *person*, clothes included, so the body half is gated on colour
+  — and the colour it is gated on is measured from this subject's own face in
+  this frame, not from a table. That is what makes it work at any skin tone
+  rather than at the ones a table happened to list. Both masks are closed by a
+  little more than the largest mark it will heal, because a mole is not
+  skin-coloured and a colour gate otherwise punches a hole in the mask exactly
+  where the mark is.
+- **Size in both directions, and roundness.** Below the floor it is grain;
+  above the ceiling it is a shadow, a tattoo or the shade under a jaw. A hair,
+  a lash, a crease and the edge of a seam are all darker than what surrounds
+  them, and all long and thin.
+- **An absolute bar as well as a relative one.** The threshold is set in
+  robust deviations of the skin's own signal — measured on the part that is
+  confidently skin, not on the widened search region, or a sleeve raises the
+  bar until the mole on the cheek measures as ordinary — and a mark has to
+  clear a fixed contrast too.
+
+Measured on synthetic skin at three tones, six marks of four colours and sizes
+per tone: **6/6 found with no false positives at every sensitivity** on light
+and mid tones, 4–5/6 on deep (the misses are the ones already invisible there),
+and the marks' visibility falls from 35–49 to 1–2. On a real photograph — a
+640×480 frame with a 78-pixel-wide face, which is about as hard as it gets —
+eyes, brows, lips and nostrils were untouched at every sensitivity.
+
+**It does not flicker.** A detector run independently on each frame does not
+agree with itself: a mark on the threshold is found, missed, found, and healing
+that switches a patch of skin on and off twenty-four times a second, which is
+far more visible than the mark was. So detections are carried as tracks, the
+way faces are elsewhere in this app — seen twice before anything is healed,
+coasted for a few frames when missed, ramped in and out rather than switched,
+and matched to the face mesh so a track survives a turn of the head. The first
+frame is the one exception: there is nothing to appear from, so it heals
+immediately rather than leaving the mark on the frame most likely to end up as
+the thumbnail. Measured frame-to-frame change at a healed mark comes out
+*below* the source clip's own: 0.06 against 0.22 on a moving limb, 0.63 against
+0.54 on a face.
+
+**It costs the same at 4K as at 480p.** Detection runs on a 640-pixel copy and
+the heal happens at full resolution, so the detector's cost does not scale with
+the footage: about 70 ms a frame at any size. Getting there needed one other
+fix — the region masks were being closed with round structuring elements on
+float arrays, which took 46 ms a frame where squares on uint8 take 0.6 ms, and
+OpenCV runs a rectangle separably. On a 60-frame 640×480 clip, a full Natural
+render goes from 3.3 fps to 2.6 with auto-detect on; the *Spot clean (auto)*
+preset on its own runs at 7.2.
+
 **A tap on an edge is declined, and says so.** Where skin meets a sleeve, a
 hemline or hair, the ring around the mark is made of two different things and a
 fit over both lands halfway between them - a patch matching neither, which is
@@ -231,6 +291,7 @@ found one ramps up over a few, so effects never pop on and off between frames.
 | **Chubby (light / medium / heavy)** | The other direction: fuller face and silhouette, waist left alone. Face widens ~3 / 5 / 7%. |
 | **Hair colour only** | Recolours the hair and changes nothing else at all. |
 | **Skin texture only** | Adds skin micro-detail back and changes nothing else at all. |
+| **Spot clean (auto)** | Finds marks on the face and body and takes them out. Nothing else at all — stack it onto any look. |
 | **Shape Only** | Reshaping with no grade or retouch. |
 | **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
 
@@ -248,6 +309,7 @@ instead of overwriting each other:
 | Chubby (light / medium / heavy) | the body and the face |
 | Hair colour only | the hair |
 | Skin texture only | the skin |
+| Spot clean (auto) | the skin |
 | Shape Only | the face and the body |
 
 **Order does not matter.** The broadest preset is applied first and the most
@@ -266,8 +328,11 @@ settings on one frame (a second or two), then *Render video*. Trim start/end
 render a section instead of the whole clip. The Photo tab runs the same stack
 on a still.
 
-**Removing a mole or a dark patch: tap it.** Press *Preview frame*, then tap
-(or click) the mark on the **Before** image. It is measured, anchored and
+**Removing a mole or a dark patch: tap it, or let it find them.** Press
+*Preview frame*, then tap (or click) the mark on the **Before** image —
+or press *Find marks on this frame* and let it do the looking. Everything it
+marks is ringed and numbered on the frame, so you can see what is in play
+before you render. It is measured, anchored and
 listed under the frame, and it is gone from every frame of the render - not
 just from the one you tapped. Mark up to as many as you like, anywhere on the
 body; *Clear spot marks* starts over. If a tap lands on an edge rather than on
@@ -434,6 +499,14 @@ NumPy - no GPU is required and none is used.
   ran" are not the same message.
 - **Shape amounts are capped** (see `CAPS` in `settings.py`) at the point where
   each effect starts to read as an edit rather than a flattering adjustment.
+- **Auto-detect wants a face in the frame.** It gates the body half on the
+  skin colour it measures from the subject's own face; with no face in shot it
+  falls back to a broad generic window, which is weaker. It also gates on the
+  person outline, so footage the segmenter cannot resolve gets face-only
+  detection. And it is deliberately conservative: it finds marks, not
+  freckle-fields, and on deep skin tones a brown patch that is barely visible
+  in the first place is left alone, because at that point there is nothing to
+  remove.
 - **Spot removal needs skin around the spot.** It carries the surrounding skin
   across the mark, so it needs a ring of one surface to carry: a mole in open
   skin goes, a mark straddling a hemline, a sleeve edge or a hairline is

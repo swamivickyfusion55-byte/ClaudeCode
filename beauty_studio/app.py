@@ -30,19 +30,19 @@ if __package__ in (None, ""):
     __package__ = os.path.basename(_here)
 
 from . import jobs, retention
-from .landmarks import FaceTracker
+from .landmarks import FaceTracker, PersonSegmenter
 from .mp_backend import mediapipe_ready, mediapipe_status
 from .pipeline import (FrameProcessor, capability_report, grab_frame, probe,
                        process_image)
 from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESETS,
                        Settings, combine_presets, stack_label)
 from .spots import (MIN_SURROUND_SHARE, SpotMark, anchor_to_face,
-                    dominant_surround, locate_spot)
+                    detect_spots, dominant_surround, locate_spot, skin_region)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v2.1.0 (Aurora)"
+VERSION = "v2.2.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -68,6 +68,10 @@ GROUPS: list[tuple[str, list[tuple[str, str, bool, str]]]] = [
         ("skin_texture", "Add skin texture", False,
          "The other direction: brings micro-detail back to skin that arrived flat "
          "— a phone's own beauty mode, heavy denoise, a low-bitrate upload"),
+        ("auto_spots", "Find and remove marks", False,
+         "Auto-detect: finds moles and dark patches anywhere on the person and "
+         "takes them out, no tapping. Low finds only what is unmistakable, high "
+         "finds every freckle. 0 = off"),
         ("blemish", "Blemish removal", False, "Suppresses small dark spots only"),
         ("skin_even", "Even skin tone", False, "Evens colour blotches, leaves the lighting alone"),
         ("under_eye", "Under-eye circles", False, "Lifts and de-blues the shadow under the eyes"),
@@ -197,7 +201,12 @@ def on_preview(path, position, *args):
         found = f"face features unavailable — {mediapipe_status()}"
     else:
         found = "no face found in this frame"
-    return (cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+    if s.auto_spots > 0:
+        bits.append(f"auto-detect found {fp.auto_found} mark(s) on this frame")
+    extra = (" · " + " · ".join(bits)) if bits else ""
+    # Keep the rings: the Before frame is the only place that says which marks
+    # are in play, and a preview must not quietly wipe them.
+    return (_draw_marks(frame, s.spots),
             cv2.cvtColor(out, cv2.COLOR_BGR2RGB),
             f"Preview at {float(position):.0f}% · {found}{extra}")
 
@@ -242,7 +251,8 @@ def on_mark_spot(path, position, marks, evt: gr.SelectData):
             f"That spot sits on an edge — only {share * 100:.0f}% of what surrounds "
             f"it is one surface, so there is no single colour to carry across it. "
             f"Tap a point with even skin around it.", bad=True)
-        return list(marks or []), _marks_text(marks), html, until
+        return (list(marks or []), _marks_text(marks), html, until,
+                _draw_marks(frame, marks))
     mark = SpotMark(x=sx / w, y=sy / h, radius=radius_px / max(w, h),
                     frame=_frame_index(path, position), label=f"({x},{y})")
     tracker = FaceTracker(static=True)
@@ -261,7 +271,7 @@ def on_mark_spot(path, position, marks, evt: gr.SelectData):
         f"Nothing stood out under that tap, so spot {len(marks)} covers a small "
         f"area around ({x}, {y}) instead. If you meant a mole, tap closer to it; "
         f"<b>Clear spot marks</b> undoes this.")
-    return marks, _marks_text(marks), html, until
+    return marks, _marks_text(marks), html, until, _draw_marks(frame, marks)
 
 
 def _frame_index(path, position) -> int:
@@ -282,9 +292,97 @@ def _marks_text(marks) -> str:
     return f"**{len(marks)} spot(s):** " + " · ".join(bits)
 
 
-def on_clear_spots():
+def on_auto_find(path, position, marks, sensitivity):
+    """
+    Find the marks on this frame and add them as if they had been tapped.
+
+    The slider beside this runs the same detector on every frame of the
+    render, which is what catches a mole that only comes into view halfway
+    through. This button is the other half of the same idea: run it once, here,
+    so you can SEE what it found before committing an hour of rendering to it -
+    and so you can clear it if it found something you wanted kept.
+    """
+    if not path:
+        raise gr.Error("Load a video first.")
+    frame = grab_frame(path, float(position) / 100.0)
+    if frame is None:
+        raise gr.Error("Could not read that frame.")
+    h, w = frame.shape[:2]
+    marks = list(marks or [])
+
+    tracker, seg = FaceTracker(static=True), PersonSegmenter(static=True)
+    try:
+        faces = tracker(frame)
+        person = seg(frame)
+    finally:
+        tracker.close()
+        seg.close()
+
+    allow, ref = skin_region(frame, faces, person, frame.shape)
+    if allow is None:
+        html, until = _notice(
+            "No face or body found in this frame, so there is nowhere to look. "
+            "Try a frame where the person is clearly in shot.", bad=True)
+        return marks, _marks_text(marks), html, until, _draw_marks(frame, marks)
+
+    # The slider is the sensitivity; at zero, use a middling setting rather
+    # than finding nothing, because pressing the button IS the request.
+    level = (float(sensitivity) / 100.0) or 0.5
+    found = detect_spots(frame, allow, level, limit=24, reference=ref)
+
+    added = 0
+    for (mx, my, radius, _strength) in found:
+        if any((mx - m["x"] * w) ** 2 + (my - m["y"] * h) ** 2
+               < (radius + m["radius"] * max(w, h)) ** 2 for m in marks):
+            continue                      # already marked, by hand or by this
+        mark = SpotMark(x=mx / w, y=my / h, radius=radius / max(w, h),
+                        frame=_frame_index(path, position),
+                        label=f"({mx:.0f},{my:.0f})")
+        marks.append(anchor_to_face(mark, faces, frame.shape).to_dict())
+        added += 1
+
+    where = "on the face" if faces and person is None else "on the face and body"
+    if added:
+        html, until = _notice(
+            f"Found {added} mark{'s' if added != 1 else ''} {where} and added "
+            f"{'them' if added != 1 else 'it'} to the list — press <b>Preview "
+            f"frame</b> to see the result, or <b>Clear spot marks</b> to undo. "
+            f"Each one is followed through the whole clip.")
+    else:
+        html, until = _notice(
+            "Nothing stood out on this frame at that sensitivity. Raise "
+            "<b>Find and remove marks</b> to look harder, or tap a mark yourself.")
+    return marks, _marks_text(marks), html, until, _draw_marks(frame, marks)
+
+
+def _draw_marks(frame, marks):
+    """Ring every mark on the Before frame.
+
+    On a phone especially, a list of coordinates under the picture answers the
+    wrong question. What someone needs to know after tapping - or after the
+    detector has gone looking by itself - is WHICH thing it took, and the only
+    honest way to say that is to draw it on the frame.
+    """
+    if frame is None:
+        return None
+    img = frame.copy()
+    h, w = img.shape[:2]
+    for i, m in enumerate(marks or [], 1):
+        cx, cy = int(m["x"] * w), int(m["y"] * h)
+        r = max(6, int(m["radius"] * max(w, h) * 1.9))
+        cv2.circle(img, (cx, cy), r + 1, (12, 12, 12), 3, cv2.LINE_AA)
+        cv2.circle(img, (cx, cy), r, (39, 162, 201), 2, cv2.LINE_AA)   # gold, BGR
+        cv2.putText(img, str(i), (cx + r + 4, cy - r - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (12, 12, 12), 3, cv2.LINE_AA)
+        cv2.putText(img, str(i), (cx + r + 4, cy - r - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (39, 162, 201), 1, cv2.LINE_AA)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def on_clear_spots(path, position):
     html, until = _notice("Spot marks cleared.")
-    return [], _marks_text([]), html, until
+    frame = grab_frame(path, float(position) / 100.0) if path else None
+    return [], _marks_text([]), html, until, _draw_marks(frame, [])
 
 
 def on_photo(image, *args):
@@ -528,7 +626,27 @@ footer{ display:none!important; }
   font-size:12px!important; border-color:rgba(255,255,255,.08)!important; }
 .table-wrap td span,.table-wrap th span,.cell-wrap span{ color:inherit!important; }
 .table-wrap tbody tr:hover td{ background:#122E55!important; }
-@media (max-width:820px){ .gradio-container{ max-width:100%!important; padding:0 6px!important; } }
+/* The Before image is a tap target, not a picture. On a phone a browser waits
+   300 ms on every tap in case a second one follows (double-tap to zoom), and
+   long-presses offer to save the image - both make tapping a mole feel broken.
+   touch-action:manipulation drops the wait, and the rest stops the tap being
+   taken for a drag, a text selection or a save. */
+.tappable img,.tappable canvas{
+  touch-action:manipulation!important; -ms-touch-action:manipulation!important;
+  cursor:crosshair!important; -webkit-user-select:none!important; user-select:none!important;
+  -webkit-touch-callout:none!important; -webkit-tap-highlight-color:rgba(201,162,39,.35)!important;
+}
+.tappable{ touch-action:manipulation!important; }
+.tappable .image-frame,.tappable [data-testid="image"]{ cursor:crosshair!important; }
+.tappable label span,.tappable .block-label{ color:#E4BA3E!important; }
+@media (max-width:820px){
+  .gradio-container{ max-width:100%!important; padding:0 6px!important; }
+  /* A fingertip covers far more of a 360 px-wide phone than a mouse pointer
+     does, so the frame you tap gets the full width and the height to match. */
+  .tappable{ min-height:300px!important; }
+  .tappable img,.tappable canvas{ min-height:280px!important; object-fit:contain!important; }
+  .btn-s,.btn-p{ min-height:50px!important; }
+}
 """
 
 
@@ -565,11 +683,15 @@ def build() -> gr.Blocks:
                         with gr.Row():
                             before_img = gr.Image(
                                 label="Before — tap a mole or dark patch to remove it",
-                                height=250, interactive=False)
+                                height=250, interactive=False,
+                                elem_classes=["tappable"])
                             after_img = gr.Image(label="After", height=250, interactive=False)
                         marks_md = gr.Markdown(_marks_text([]), elem_classes=["note", "marks"])
-                        clear_spots_btn = gr.Button("Clear spot marks",
-                                                    elem_classes=["btn-s"])
+                        with gr.Row():
+                            auto_find_btn = gr.Button("Find marks on this frame",
+                                                      elem_classes=["btn-s"])
+                            clear_spots_btn = gr.Button("Clear spot marks",
+                                                        elem_classes=["btn-s"])
                         preview_note = gr.Markdown("", elem_classes=["note"])
                         status = gr.HTML(_status("Load a video, pick a preset, preview a frame, then render."))
                         video_out = gr.Video(label="Result", height=300, interactive=False)
@@ -676,9 +798,16 @@ def build() -> gr.Blocks:
         preview_btn.click(on_preview, inputs=[video_in, preview_pos] + controls,
                           outputs=[before_img, after_img, preview_note])
         before_img.select(on_mark_spot, inputs=[video_in, preview_pos, spots_state],
-                          outputs=[spots_state, marks_md, status, notice_state])
-        clear_spots_btn.click(on_clear_spots,
-                              outputs=[spots_state, marks_md, status, notice_state])
+                          outputs=[spots_state, marks_md, status, notice_state,
+                                   before_img])
+        auto_find_btn.click(
+            on_auto_find,
+            inputs=[video_in, preview_pos, spots_state,
+                    sliders[FIELDS.index("auto_spots")]],
+            outputs=[spots_state, marks_md, status, notice_state, before_img])
+        clear_spots_btn.click(on_clear_spots, inputs=[video_in, preview_pos],
+                              outputs=[spots_state, marks_md, status, notice_state,
+                                       before_img])
         render_btn.click(on_submit,
                          inputs=[video_in, preset, trim_a, trim_b] + controls,
                          outputs=[job_state, status, history_dd, notice_state])

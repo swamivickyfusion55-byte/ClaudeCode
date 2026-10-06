@@ -21,6 +21,7 @@ CAPS = {
     "skin_smooth": 0.85,
     "skin_texture": 0.90,
     "spot_strength": 1.00,
+    "auto_spots": 1.00,
     "skin_even": 0.80,
     "blemish": 0.90,
     "glow": 0.55,
@@ -86,6 +87,12 @@ class Settings:
     # stacking or switching presets never clears them.
     spots: list = field(default_factory=list)
     spot_strength: float = 0.90
+    # Auto-detect, as a sensitivity rather than a switch: 0 is off, low finds
+    # only what is unmistakable, high finds every freckle. `auto_spot_limit`
+    # bounds how many it will act on in one frame, so a textured surface
+    # cannot turn into a hundred little heals.
+    auto_spots: float = 0.0
+    auto_spot_limit: int = 12
 
     # ---- face shape ------------------------------------------------------
     face_slim: float = 0.25         # jaw + cheek narrowing
@@ -144,6 +151,8 @@ class Settings:
                 out[f.name] = float(v) % 360.0
             elif f.type == "bool" or isinstance(v, bool):
                 out[f.name] = bool(v)
+            elif f.name == "auto_spot_limit":
+                out[f.name] = int(max(1, min(60, int(v))))
             elif isinstance(v, int) and f.name in ("process_scale", "out_long_edge", "quality"):
                 out[f.name] = int(v)
             else:
@@ -168,7 +177,12 @@ class Settings:
         return replace(self, **kw)
 
     def removes_spots(self) -> bool:
-        return bool(self.spots) and self.spot_strength > 0
+        return (bool(self.spots) or self.auto_spots > 0) and self.spot_strength > 0
+
+    def finds_spots(self) -> bool:
+        """Auto-detection on: the renderer needs the person's outline for it,
+        so marks on an arm or a shoulder are looked for as well as on a face."""
+        return self.auto_spots > 0 and self.spot_strength > 0
 
     def touches_face(self) -> bool:
         if self.removes_spots():
@@ -308,6 +322,20 @@ PRESETS: dict[str, Settings] = {
         bust_shape=0.0, hip_shape=0.0, hair_detail=0.0, hair_shine=0.0,
         hair_volume=0.0, hair_frizz=0.0, hair_richness=0.0, naturalness=1.0),
 
+    # Find the marks and take them out, and do nothing else whatsoever. The
+    # one to stack onto a look you already like, and the one to try first if
+    # you are not sure how strong to set the detector.
+    "Spot clean (auto)": Settings(
+        hdr_strength=0.0, shadows=0.0, highlights=0.0, clarity=0.0, vibrance=0.0,
+        saturation=0.0, warmth=0.0, tint=0.0, contrast=0.0, bloom=0.0, sharpen=0.0,
+        skin_smooth=0.0, texture=1.0, skin_texture=0.0, skin_even=0.0, blemish=0.0,
+        glow=0.0, eye_brighten=0.0, teeth_whiten=0.0, lip_enhance=0.0, under_eye=0.0,
+        auto_spots=0.50, auto_spot_limit=12, spot_strength=0.90,
+        face_slim=0.0, face_round=0.0, chin_shape=0.0, nose_slim=0.0, eye_enlarge=0.0,
+        body_slim=0.0, body_fuller=0.0, waist_shape=0.0, curve_shape=0.0,
+        bust_shape=0.0, hip_shape=0.0, hair_detail=0.0, hair_shine=0.0,
+        hair_volume=0.0, hair_frizz=0.0, hair_richness=0.0, naturalness=1.0),
+
     # Colour the hair and nothing else: no grade, no retouch, no reshaping,
     # and none of the other hair work either. Stack it with anything.
     "Hair colour only": Settings(
@@ -379,7 +407,7 @@ DOMAIN_FIELDS: dict[str, tuple[str, ...]] = {
               "protect_skin_colour"),
     "skin": ("skin_smooth", "texture", "skin_texture", "skin_even", "blemish",
              "glow", "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye",
-             "spot_strength"),
+             "spot_strength", "auto_spots", "auto_spot_limit"),
     "face": ("face_slim", "face_round", "chin_shape", "nose_slim", "eye_enlarge"),
     "body": ("body_slim", "body_fuller", "waist_shape", "curve_shape",
              "bust_shape", "hip_shape", "posture"),
@@ -407,6 +435,7 @@ PRESET_DOMAINS: dict[str, tuple[str, ...]] = {
     "Shape Only": ("face", "body"),
     "Hair colour only": ("hair",),
     "Skin texture only": ("skin",),
+    "Spot clean (auto)": ("skin",),
 }
 
 MAX_STACK = 3
@@ -460,7 +489,7 @@ PERSON_AMOUNTS = (
     "nose_slim", "eye_enlarge", "face_round", "body_slim", "body_fuller",
     "waist_shape", "curve_shape", "bust_shape", "hip_shape",
     "hair_detail", "hair_shine", "hair_volume", "hair_frizz", "hair_richness",
-    "hair_colour_amount",
+    "hair_colour_amount", "auto_spots",
 )
 
 

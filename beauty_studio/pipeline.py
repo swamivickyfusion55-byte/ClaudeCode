@@ -41,7 +41,7 @@ from .mp_backend import mediapipe_ready, mediapipe_status
 from .reshape import BodyProfiler, WarpField, add_body_reshape, add_face_reshape
 from .retouch import Retoucher
 from .settings import Settings, scale_person_amounts
-from .spots import FlowTrack, heal, marks_from, resolve_face
+from .spots import AutoSpotter, FlowTrack, heal, marks_from, resolve_face
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +83,10 @@ class FrameProcessor:
         self.marks = marks_from(self.s.spots)
         self.flow = flow
         self.frame_index = 0
+        self.auto = (AutoSpotter(self.s.auto_spots, self.s.auto_spot_limit,
+                                 stabilise=self.s.stabilise and not static)
+                     if self.s.finds_spots() else None)
+        self.auto_found = 0
         self.profiler = BodyProfiler(stabilise=self.s.stabilise and not static)
         self.frames_with_face = 0
         self.frames_with_body = 0
@@ -122,11 +126,20 @@ class FrameProcessor:
             if person is not None and float(person.max()) > 0.5:
                 self.frames_with_person += 1
 
-        if self.marks and s.spot_strength > 0:
+        if (self.marks or self.auto is not None) and s.spot_strength > 0:
             # Before the retouch: a spot that is still there while the skin is
             # smoothed gets smeared into its surroundings, and then there is
             # no clean edge left to heal against.
-            img = heal(img, self._spot_positions(faces, img.shape), s.spot_strength)
+            spots = self._spot_positions(faces, img.shape)
+            if self.auto is not None:
+                auto = self.auto(frame_u8, faces, person, img.shape)
+                self.auto_found = max(self.auto_found, len(auto))
+                # A tap wins where the two overlap: someone who marked a spot
+                # by hand gets the size they marked, not the detector's.
+                spots += [a for a in auto
+                          if not any((a[0] - m[0]) ** 2 + (a[1] - m[1]) ** 2
+                                     < (a[2] + m[2]) ** 2 for m in spots)]
+            img = heal(img, spots, s.spot_strength)
 
         if faces and s.touches_face():
             img = self.retoucher.apply(img, faces, s)
@@ -390,6 +403,7 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         "max_shift_px": fp.max_shift_px,
         "max_face_shift_px": fp.max_face_shift_px,
         "spots": len(fp.marks),
+        "spots_auto": fp.auto_found,
         "max_body_shift_px": fp.max_body_shift_px,
         "frames_seen": fp.frames_seen,
         "notes": notes,
