@@ -1,0 +1,7210 @@
+"""
+Phoenix core pipeline — models, swap, temporal, jobs, cleanup.
+UI lives in app.py. Constants live in config.py.
+"""
+import os
+for _k, _v in {
+    "GRADIO_ANALYTICS_ENABLED": "False",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1",
+    "GRADIO_TEMP_DIR": "/tmp/gradio",
+}.items():
+    os.environ.setdefault(_k, _v)
+os.environ["GRADIO_TEMP_DIR"] = "/tmp/gradio"
+try:
+    os.makedirs("/tmp/gradio", exist_ok=True)
+    os.makedirs("/tmp/phoenix_uploads", exist_ok=True)
+except Exception:
+    pass
+
+import gradio as gr
+import cv2, numpy as np, subprocess, threading, uuid, time, shutil, bisect, logging, queue, tempfile, re
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from pathlib import Path
+
+# PHASE 1: Optional boundary validation (safe fallback if unavailable)
+try:
+    from swap_engine import validate_detection_confidence, TrackingState, FaceTrackState
+    HAS_PHASE1 = True
+except ImportError:
+    HAS_PHASE1 = False
+    def validate_detection_confidence(bbox, frame_shape, landmarks=None):
+        return 1.0
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Fix Gradio client schema crash on HF
+try:
+    import gradio_client.utils as _gc_utils
+    _orig_get_type = _gc_utils.get_type
+    def _safe_get_type(schema):
+        if not isinstance(schema, dict):
+            return "Any"
+        return _orig_get_type(schema)
+    _gc_utils.get_type = _safe_get_type
+    if hasattr(_gc_utils, "_json_schema_to_python_type"):
+        _orig_js = _gc_utils._json_schema_to_python_type
+        def _safe_js(schema, defs=None):
+            if not isinstance(schema, dict):
+                return "Any"
+            try:
+                return _orig_js(schema, defs)
+            except TypeError:
+                return "Any"
+        _gc_utils._json_schema_to_python_type = _safe_js
+        def _safe_js_public(schema):
+            defs = schema.get("$defs") if isinstance(schema, dict) else None
+            return _safe_js(schema, defs)
+        _gc_utils.json_schema_to_python_type = _safe_js_public
+except Exception as _patch_err:
+    logging.warning("gradio schema patch skipped: %s", _patch_err)
+
+_cpu_n = max(1, os.cpu_count() or 1)
+# CPU-only policy: one small native thread budget shared by ORT/OpenCV/BLAS.
+# Cap the default at 4 so an 8-vCPU HF Pro box does not thrash when ffmpeg
+# also runs. Override with PHOENIX_NATIVE_THREADS=1..8 for A/B tests.
+try:
+    _default_native = max(1, min(4, _cpu_n))
+    _native_threads = max(1, min(8, int(os.environ.get("PHOENIX_NATIVE_THREADS", str(_default_native)))))
+except Exception:
+    _native_threads = max(1, min(4, _cpu_n))
+os.environ.setdefault("OMP_NUM_THREADS", str(_native_threads))
+os.environ.setdefault("ORT_NUM_THREADS", str(_native_threads))
+os.environ.setdefault("MKL_NUM_THREADS", str(_native_threads))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_native_threads))
+try:
+    cv2.setNumThreads(_native_threads)
+    cv2.setUseOptimized(True)
+except Exception:
+    pass
+
+_tmp_registry, _reg_lock = set(), threading.Lock()
+def _reg(path):
+    with _reg_lock: _tmp_registry.add(path)
+    return path
+
+def _cleanup():
+    try:
+        from config import RETAIN_SEC as _RS, ORPHAN_SEC as _OS
+        RETAIN, ORPHAN = int(_RS), int(_OS)
+    except Exception:
+        RETAIN, ORPHAN = 10800, 86400  # 3h history files, 24h orphan tmp
+    cycle = 0
+    while True:
+        now = time.time(); cycle += 1
+        try:
+            with _lock:
+                known = set(jobs.keys())
+                expired = []
+                for j in jobs.values():
+                    if j.get('done_at') and now - j['done_at'] > RETAIN and j.get('result_path'):
+                        expired.append(j['result_path'])
+                        j['result_path'] = None
+                        if j.get('status') == 'done':
+                            j['message'] = (j.get('message','') or '') + " · file auto-deleted"
+            for rp in expired:
+                try:
+                    _server_delete_result(rp) if str(rp).startswith(str(PERSISTENT_OUTPUT_DIR)) else os.remove(rp)
+                except Exception: pass
+                with _reg_lock: _tmp_registry.discard(rp)
+            # Remove expired authoritative server outputs even if the in-memory
+            # job registry was lost during a Space restart.
+            try:
+                root = _persistent_output_dir()
+                if root is not None:
+                    for meta in root.glob("*/metadata.json"):
+                        try:
+                            import json
+                            d = json.loads(meta.read_text(encoding="utf-8"))
+                            if float(d.get("expires_at") or 0) <= now:
+                                job_dir = meta.parent
+                                shutil.rmtree(job_dir, ignore_errors=True)
+                                logging.info("Expired server output deleted → %s", job_dir)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            with _reg_lock: _reg_snapshot = list(_tmp_registry)
+            for fp in _reg_snapshot:
+                try:
+                    p = Path(fp)
+                    if not p.exists():
+                        with _reg_lock: _tmp_registry.discard(fp)
+                    elif (now - p.stat().st_mtime > ORPHAN and not any(jid in p.name for jid in known)):
+                        p.unlink()
+                        with _reg_lock: _tmp_registry.discard(fp)
+                except Exception: pass
+            if cycle % 3:
+                time.sleep(180)
+                continue
+            for pat in ["face_*","src_*","vid_*","raw_*","result_*","image_swap_*"]:
+                for f in Path("/tmp").glob(pat):
+                    try:
+                        if any(jid in f.name for jid in known): continue
+                        if now - f.stat().st_mtime > ORPHAN: f.unlink()
+                    except Exception: pass
+            gdir = Path(os.environ.get("GRADIO_TEMP_DIR","/tmp/gradio"))
+            try:
+                gdir.mkdir(parents=True, exist_ok=True)
+                Path("/tmp/gradio").mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            if gdir.exists():
+                for f in gdir.rglob("*"):
+                    try:
+                        if f.is_file() and now - f.stat().st_mtime > ORPHAN: f.unlink()
+                    except Exception: pass
+            # Expired per-session dirs (audit NSDOS-016)
+            try:
+                sroot = Path("/tmp/swamitech_sessions")
+                if sroot.is_dir():
+                    for d in sroot.iterdir():
+                        if not d.is_dir():
+                            continue
+                        sj = d / "session.json"
+                        exp = None
+                        if sj.is_file():
+                            try:
+                                import json
+                                with open(sj) as f:
+                                    exp = float((json.load(f) or {}).get("expires_at") or 0)
+                            except Exception:
+                                exp = None
+                        mtime = d.stat().st_mtime
+                        if (exp and now > exp) or (now - mtime > ORPHAN):
+                            shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+        except Exception: pass
+        time.sleep(180)
+
+jobs, _lock = {}, threading.RLock()
+# Bounded video workers (audit NSDOS-003) — do not spawn unbounded threads
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="phoenix-video")
+_FFMPEG_ENCODER = None  # cached "libx264" / "h264_nvenc" probe
+_JOB_FUTURES = {}
+
+# Refresh-safe job snapshots. UI state is not the source of truth for jobs.
+try:
+    from config import PERSISTENT_OUTPUT_DIR, PERSISTENT_JOB_STATE_DIR, SERVER_OUTPUT_TTL_SEC
+except Exception:
+    PERSISTENT_OUTPUT_DIR = os.environ.get("PHOENIX_PERSISTENT_OUTPUT_DIR", "/data/phoenix_outputs")
+    PERSISTENT_JOB_STATE_DIR = os.environ.get("PHOENIX_PERSISTENT_JOB_STATE_DIR", "/data/phoenix_jobs")
+    SERVER_OUTPUT_TTL_SEC = 10800
+
+# Prefer the mounted persistent volume for authoritative job state. Fall back
+# to /tmp only when the volume is unavailable; this is explicitly logged so a
+# deployment never silently claims persistence that it does not have.
+_PERSIST_ROOT = Path(os.environ.get("PHOENIX_PERSISTENT_ROOT", PERSISTENT_JOB_STATE_DIR))
+try:
+    _PERSIST_ROOT.mkdir(parents=True, exist_ok=True)
+    _PERSIST_OK = os.access(_PERSIST_ROOT, os.W_OK)
+except Exception:
+    _PERSIST_OK = False
+if not _PERSIST_OK:
+    _PERSIST_ROOT = Path("/tmp/swamitech_jobs")
+    _PERSIST_ROOT.mkdir(parents=True, exist_ok=True)
+    logging.warning("Persistent job volume unavailable; job metadata will be ephemeral at %s", _PERSIST_ROOT)
+else:
+    logging.info("Persistent job metadata directory: %s", _PERSIST_ROOT)
+JOB_STATE_ROOT = _PERSIST_ROOT
+_JOB_PERSIST_LAST = {}
+_JOB_PERSIST_MIN_INTERVAL = 0.75
+try:
+    JOB_STATE_ROOT.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+
+def _job_state_path(jid):
+    return JOB_STATE_ROOT / f"{jid}.json"
+
+def _persist_job(jid, force=False):
+    """Write a small atomic job snapshot without turning progress I/O into a
+    per-frame bottleneck. Terminal state is always persisted immediately."""
+    try:
+        import json
+        now = time.monotonic()
+        with _lock:
+            j = jobs.get(jid)
+            if not j:
+                return
+            terminal = j.get("status") in ("done", "error", "cancelled")
+            if not force and not terminal and now - _JOB_PERSIST_LAST.get(jid, 0.0) < _JOB_PERSIST_MIN_INTERVAL:
+                return
+            data = {k:v for k,v in j.items() if isinstance(v,(str,int,float,bool)) or v is None}
+            _JOB_PERSIST_LAST[jid] = now
+        tmp = _job_state_path(jid).with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, separators=(",",":")), encoding="utf-8")
+        os.replace(tmp, _job_state_path(jid))
+    except Exception as e:
+        logging.debug("job snapshot failed for %s: %s", jid, e)
+
+def _remove_job_snapshot(jid):
+    try:
+        _job_state_path(jid).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+def _restore_job_snapshots():
+    """Restore job metadata after a process restart; never falsely resume work."""
+    import json
+    try:
+        for fp in JOB_STATE_ROOT.glob("*.json"):
+            try:
+                data=json.loads(fp.read_text(encoding="utf-8"))
+                jid=fp.stem
+                if not isinstance(data,dict): continue
+                old=data.get("status")
+                if old not in ("done","error","cancelled"):
+                    data.update(status="error", progress=int(data.get("progress") or 0),
+                                 message="Processing interrupted by Space restart; please resubmit.",
+                                 done_at=time.time(), eta_seconds=None)
+                elif old == "done" and (not data.get("result_path") or not os.path.exists(data.get("result_path"))):
+                    data.update(status="error", message="Completed result is no longer available after Space restart.", done_at=time.time())
+                with _lock: jobs[jid]=data
+            except Exception as e:
+                logging.debug("job restore failed for %s: %s", fp, e)
+    except Exception as e:
+        logging.debug("job restore scan failed: %s", e)
+_restore_job_snapshots()
+threading.Thread(target=_cleanup, daemon=True).start()
+
+try:
+    import pyzipper
+    _PYZIP_OK = True
+except Exception:
+    _PYZIP_OK = False
+
+def _encrypt_zip(src_path, password, out_path):
+    if not password:
+        raise ValueError("no password supplied")
+    # Prefer pyzipper — avoids password on process cmdline (audit NSDOS-013)
+    if not _PYZIP_OK:
+        raise RuntimeError("pyzipper is required for encrypted ZIP (install pyzipper)")
+    with pyzipper.AESZipFile(out_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as z:
+        z.setpassword(password.encode('utf-8'))
+        z.setencryption(pyzipper.WZ_AES, nbits=256)
+        z.write(src_path, os.path.basename(src_path))
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError("encrypted archive was not created")
+    return out_path
+
+
+def _autosave_cfg():
+    try:
+        from config import (
+            AUTO_SAVE_ENABLED,
+            AUTO_SAVE_DIR,
+            AUTO_SAVE_RETAIN_SEC,
+            HF_OUTPUT_REPO,
+            HF_UPLOAD_ENABLED,
+            RETAIN_SEC,
+            ORPHAN_SEC,
+        )
+        return {
+            "enabled": bool(AUTO_SAVE_ENABLED),
+            "dir": AUTO_SAVE_DIR or "/tmp/.swamitech_autosave",
+            "retain": int(AUTO_SAVE_RETAIN_SEC),
+            "hf_repo": HF_OUTPUT_REPO or "",
+            "hf_upload": bool(HF_UPLOAD_ENABLED),
+            "retain_hist": int(RETAIN_SEC),
+            "orphan": int(ORPHAN_SEC),
+        }
+    except Exception:
+        return {
+            "enabled": True,
+            "dir": "/tmp/.swamitech_autosave",
+            "retain": 86400 * 3,
+            "hf_repo": os.environ.get("SWAMITECH_HF_OUTPUT_REPO", "").strip(),
+            "hf_upload": bool(os.environ.get("HF_TOKEN")) and bool(
+                os.environ.get("SWAMITECH_HF_OUTPUT_REPO", "").strip()
+            ),
+            "retain_hist": 21600,
+            "orphan": 86400,
+        }
+
+
+
+def _persistent_output_dir():
+    """Return/create the authoritative server output directory."""
+    root = Path(os.environ.get("PHOENIX_PERSISTENT_OUTPUT_DIR", PERSISTENT_OUTPUT_DIR))
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        if not os.access(root, os.W_OK):
+            raise PermissionError(f"not writable: {root}")
+        return root
+    except Exception as e:
+        logging.warning("Persistent output volume unavailable: %s", e)
+        return None
+
+def _server_save_result(jid, result_path):
+    """Atomically copy the completed result to authoritative server storage.
+
+    This happens BEFORE the job is marked done. The Android client is therefore
+    never the owner of the only completed copy. The server copy expires three
+    hours after completion and is removed by the cleanup thread.
+    """
+    root = _persistent_output_dir()
+    if root is None or not result_path or not os.path.isfile(result_path):
+        raise RuntimeError("Persistent server storage is not available")
+    job_dir = root / jid
+    job_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(result_path).suffix.lower() or ".mp4"
+    # Split parts asked for a sequential name (Phoenix_<group>-1.mp4). The
+    # browser and the phone both download this path, so the name has to be
+    # the file's own name. Anything else stays final.mp4.
+    named = ""
+    with _lock:
+        named = str((jobs.get(jid) or {}).get("save_name") or "")
+    named = os.path.basename(named).strip()
+    if not re.fullmatch(r"Phoenix_[A-Z0-9]{8}(?:-\d{1,2})?\.mp4", named):
+        named = f"final{suffix}"
+    dest = job_dir / named
+    tmp = job_dir / f"{named}.part"
+    shutil.copy2(result_path, tmp)
+    if not tmp.is_file() or tmp.stat().st_size < 1000:
+        try: tmp.unlink()
+        except Exception: pass
+        raise RuntimeError("Server-side result copy is invalid or empty")
+    os.replace(tmp, dest)
+    meta = job_dir / "metadata.json"
+    now = time.time()
+    try:
+        import json
+        meta.write_text(json.dumps({
+            "job_id": jid,
+            "completed_at": now,
+            "expires_at": now + int(SERVER_OUTPUT_TTL_SEC),
+            "result": dest.name,
+            "size_bytes": dest.stat().st_size,
+        }, separators=(",", ":")), encoding="utf-8")
+    except Exception as e:
+        logging.warning("Server result metadata write failed for %s: %s", jid, e)
+    logging.info("Authoritative server save → %s · expires in %ds", dest, int(SERVER_OUTPUT_TTL_SEC))
+    return str(dest), now + int(SERVER_OUTPUT_TTL_SEC)
+
+def _server_delete_result(result_path):
+    if not result_path:
+        return
+    try:
+        p = Path(result_path)
+        if p.exists(): p.unlink()
+        if p.parent.name and p.parent.name not in ("/", "phoenix_outputs"):
+            # Only remove an empty per-job directory under the configured root.
+            root = Path(os.environ.get("PHOENIX_PERSISTENT_OUTPUT_DIR", PERSISTENT_OUTPUT_DIR)).resolve()
+            try:
+                if p.parent.parent.resolve() == root and not any(p.parent.iterdir()):
+                    p.parent.rmdir()
+            except Exception:
+                pass
+    except Exception as e:
+        logging.debug("server result delete failed: %s", e)
+
+def _auto_save_result(jid, result_path, password=""):
+    cfg = _autosave_cfg()
+    notes = []
+    dest = None
+    pw = (password or "").strip()
+    if not cfg["enabled"] or not result_path or not os.path.isfile(result_path):
+        return ""
+    if not pw:
+        return " · 💾 autosave skipped (set Password for encrypted ZIP)"
+
+    try:
+        out_dir = cfg["dir"]
+        os.makedirs(out_dir, mode=0o700, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        dest = os.path.join(out_dir, f"{stamp}_{jid[:8]}.zip")
+        _encrypt_zip(result_path, pw, dest)
+        notes.append("💾 encrypted autosave")
+        logging.info("Encrypted auto-save → %s", dest)
+    except Exception as e:
+        logging.warning("Encrypted auto-save failed: %s", e)
+        notes.append("autosave failed")
+        dest = None
+
+    if dest and cfg["hf_upload"] and cfg["hf_repo"]:
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=os.environ.get("HF_TOKEN"))
+            path_in_repo = f"outputs/{time.strftime('%Y/%m')}/{os.path.basename(dest)}"
+            api.upload_file(
+                path_or_fileobj=dest,
+                path_in_repo=path_in_repo,
+                repo_id=cfg["hf_repo"],
+                repo_type="dataset",
+            )
+            notes.append(f"☁ hub:{cfg['hf_repo']}")
+            logging.info("Uploaded encrypted zip to %s/%s", cfg["hf_repo"], path_in_repo)
+        except Exception as e:
+            logging.warning("HF auto-upload failed: %s", e)
+            notes.append("hub upload failed")
+
+    return (" · " + " · ".join(notes)) if notes else ""
+
+
+_fa = _sw = None
+_ov_active = False
+_loaded_device = [None]  # "gpu" | "cpu"
+_device_pref = ["cpu"]   # safe default
+_gpu_try_cached = [None]
+
+try:
+    import spaces as _spaces
+    HAS_SPACES = True
+except Exception:
+    _spaces = None
+    HAS_SPACES = False
+
+
+def _is_zerogpu_space():
+    for key in (
+        "SPACES_ZERO_GPU", "SPACE_ZERO_GPU", "ZERO_GPU",
+        "HF_SPACES_ZERO_GPU", "SPACES_GPU", "SPACE_GPU",
+    ):
+        val = (os.environ.get(key) or "").strip().lower()
+        if val in ("1", "true", "yes", "on"):
+            return True
+    hw = (
+        os.environ.get("SPACE_HARDWARE")
+        or os.environ.get("SPACES_HARDWARE")
+        or os.environ.get("HARDWARE")
+        or os.environ.get("SPACE_HARDWARE_TARGET")
+        or ""
+    ).strip().lower()
+    if any(x in hw for x in ("zerogpu", "zero-gpu", "zero_gpu", "zero gpu")):
+        return True
+    if any(x in hw for x in ("a10g", "a100", "t4", "l4", "zero")):
+        if "cpu" not in hw:
+            return True
+    return False
+
+
+if HAS_SPACES:
+    @_spaces.GPU(duration=60)
+    def _spaces_gpu_ping():
+        return True
+else:
+    def _spaces_gpu_ping():
+        return False
+
+
+def _cuda_available():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _gpu_worth_trying(prefer_gpu=True):
+    if not prefer_gpu:
+        return False
+    if _gpu_try_cached[0] is False:
+        return False
+    if _cuda_available():
+        return True
+    if HAS_SPACES and _is_zerogpu_space():
+        return True
+    return False
+
+
+def _device_status_text():
+    pref = _device_pref[0]
+    cuda = _cuda_available()
+    zg = _is_zerogpu_space()
+    active = _loaded_device[0] or "—"
+    if pref == "cpu":
+        mode = "CPU only (selected)"
+    elif cuda:
+        mode = "GPU active (CUDA attached)"
+    elif zg and pref == "gpu":
+        mode = "ZeroGPU Space — GPU attaches when job runs"
+    elif pref == "gpu":
+        mode = "CPU (no GPU on this Space — select CPU only)"
+    else:
+        mode = "CPU"
+    extra = f" · models={active.upper()}" if _fa is not None else " · models not loaded yet"
+    hw = " · ZeroGPU hw" if zg else " · CPU Space"
+    return f"🖥 Device: {mode}{extra}{hw}"
+
+
+def _get_providers(prefer_gpu=False):
+    try:
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+    except Exception:
+        return ["CPUExecutionProvider"]
+
+    if prefer_gpu and "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    if "OpenVINOExecutionProvider" in available:
+        return [
+            (
+                "OpenVINOExecutionProvider",
+                {
+                    "device_type": "CPU_FP32",
+                    "num_of_threads": int(_native_threads),
+                    "performance_hint": "LATENCY",
+                },
+            ),
+            "CPUExecutionProvider",
+        ]
+    if "CPUExecutionProvider" in available:
+        return ["CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
+from collections import OrderedDict
+import hashlib
+
+_SRC_CACHE_MAX = 128
+_MASK_CACHE_MAX = 512
+
+class _LRUCache:
+    def __init__(self, maxsize=128):
+        self.maxsize = maxsize
+        self._d = OrderedDict()
+        self._lock = threading.Lock()
+    def get(self, key, default=None):
+        with self._lock:
+            if key in self._d:
+                self._d.move_to_end(key)
+                return self._d[key]
+            return default
+    def set(self, key, value):
+        with self._lock:
+            if key in self._d:
+                self._d.move_to_end(key)
+            self._d[key] = value
+            while len(self._d) > self.maxsize:
+                self._d.popitem(last=False)
+    def __len__(self):
+        return len(self._d)
+    def clear(self):
+        with self._lock:
+            self._d.clear()
+
+_src_face_cache = _LRUCache(_SRC_CACHE_MAX)
+_mask_cache = _LRUCache(_MASK_CACHE_MAX)
+
+# ---------------------------------------------------------------------------
+# v11 "Aequus" aligned-space engine
+# ---------------------------------------------------------------------------
+import swap_engine as _E
+
+try:
+    from config import ENGINE_TUNABLES as _CFG_ENGINE
+    _E.configure(**dict(_CFG_ENGINE or {}))
+    logging.info("swap_engine %s configured from config.py", _E.ENGINE_VERSION)
+except Exception as _e:
+    logging.debug("engine tunables not overridden: %s", _e)
+
+_COMPOSITOR = None
+
+
+def _compositor():
+    """Lazy AlignedCompositor bound to the currently loaded swapper."""
+    global _COMPOSITOR
+    if _COMPOSITOR is None or getattr(_COMPOSITOR, "swapper", None) is not _sw:
+        _COMPOSITOR = _E.AlignedCompositor(_sw) if _sw is not None else None
+    return _COMPOSITOR
+
+
+def _img_sha(im):
+    try:
+        small = cv2.resize(im, (64, 64), interpolation=cv2.INTER_AREA)
+        return hashlib.sha256(small.tobytes()).hexdigest()
+    except Exception:
+        return None
+
+def _cached_source_face(im):
+    k = _img_sha(im)
+    if k is not None:
+        hit = _src_face_cache.get(k)
+        if hit is not None:
+            return hit
+    fs = _fa_get(im)
+    f = max(fs, key=_area) if fs else None
+    if k is not None and f is not None:
+        _src_face_cache.set(k, f)
+    return f
+
+RES = {
+    "540p (Fastest)": (960, 540),
+    "640p (Fast)": (1136, 640),
+    "680p": (1208, 680),
+    "720p (HD)": (1280, 720),
+    "900p (HD+)": (1600, 900),
+    "1080p (Full HD)": (1920, 1080),
+}
+
+DET_MAX_W = 720
+# Use the detector at its normal 640x640 preparation size. The video frame is
+# still downscaled for speed, with an adaptive high-resolution probe for small
+# or profile faces. This is materially safer than a permanently tiny 256 detector.
+DET_SIZE = (640, 640)
+try:
+    from config import DET_THRESH as _CFG_DET_THRESH
+    DET_THRESH = float(_CFG_DET_THRESH)
+except Exception:
+    DET_THRESH = 0.32
+
+def _make_det_frame(frm, max_w=DET_MAX_W):
+    h, w = frm.shape[:2]
+    if w <= max_w:
+        return frm, 1.0, 1.0
+    scale = max_w / float(w)
+    nw, nh = max_w, max(2, int(round(h * scale)))
+    det = cv2.resize(frm, (nw, nh), interpolation=cv2.INTER_AREA)
+    return det, w / float(nw), h / float(nh)
+
+def _scale_faces(faces, sx, sy):
+    if sx == 1.0 and sy == 1.0:
+        return faces
+    for f in faces:
+        f.bbox = f.bbox.astype(np.float32) * np.array([sx, sy, sx, sy], dtype=np.float32)
+        if getattr(f, 'kps', None) is not None:
+            f.kps = f.kps.astype(np.float32) * np.array([sx, sy], dtype=np.float32)
+        lmk = getattr(f, 'landmark_2d_106', None)
+        if lmk is not None and len(lmk):
+            f.landmark_2d_106 = lmk.astype(np.float32) * np.array([sx, sy], dtype=np.float32)
+    return faces
+
+
+# Lazy recognition (SDOS-072 D1). Profiled on buffalo_l / 2 threads / a 720p
+# frame holding 6 detectable faces:
+#
+#     detection (SCRFD-10GF @640) ..........  77.4 ms   ONCE per pass
+#     landmark_2d_106 .......................   5.4 ms   PER FACE
+#     genderage .............................   0.6 ms   PER FACE
+#     recognition (w600k_r50) ...............  84.6 ms   PER FACE   <-- 93%
+#
+# FaceAnalysis.get() runs all three auxiliary models on every detection, so a
+# frame with 6 boxes costs ~1083 ms of which ~508 ms is recognition on faces
+# that this pipeline then throws away: _detect_want runs a SECOND blacked-out
+# pass whenever it is short of `want`, the hi-res probe is a third, each zoom
+# crop a fourth, and the results are merged, deduped and kps-gated down to the
+# one or two people actually being swapped. Every discarded face had a 85 ms
+# embedding computed for nothing.
+#
+# So recognition is deferred. The detection-space keypoints and the image the
+# face came from are stashed on the face, and _embed_faces() fills the
+# embedding in later, on the surviving set only, restoring those keypoints for
+# the ArcFace crop. That makes the embedding BIT-IDENTICAL to the eager one
+# (verified: max abs difference 0.000e+00) even though the bbox and kps have
+# since been rescaled and shifted into full-frame coordinates.
+_DEFER_EMB_ATTRS = ("_emb_img", "_emb_kps")
+
+
+try:
+    from config import DET_DEFER_EMBEDDING as _DEFER_EMB_ON
+except Exception:
+    _DEFER_EMB_ON = True
+
+# Where the detector's time actually goes. A single "detector_avg=974ms" line
+# cannot distinguish "one pass over ten faces" from "four passes over two",
+# and those want opposite fixes - so count the three things that multiply.
+_DET_COUNTERS = {"passes": 0, "raw_faces": 0, "embeds": 0}
+
+
+# --------------------------------------------------------------------------
+# Shot-cut detection (SDOS-073)
+# --------------------------------------------------------------------------
+# Nothing in this pipeline knew what a scene change was. At a hard cut the
+# tracker kept predicting the old shot's head for up to trk_max_missed
+# detections, _nearest_aligned kept handing out the old shot's cached aligned
+# crop with no bound on how far away in time it came from, and the geometry
+# timeline happily INTERPOLATED between a detection before the cut and one
+# after it - so the face slid from where the old shot left it to where the new
+# shot found it, over up to max_bracket (~17 frames at 30fps). That is the
+# reported "lag / pasting confusion / the pasted face holds on frame changes",
+# and all three are the same root cause: no barrier at the cut.
+#
+# A cut is now a barrier. Geometry, cached pixels and tracker state all stop
+# at it.
+#
+# PRECISION MATTERS MORE THAN RECALL here. A missed cut leaves exactly the
+# behaviour this build already had. A FALSE cut resets live tracks and can put
+# the original face back for a few frames - the defect family this engine has
+# been fixed for repeatedly. So the test requires two independent signals to
+# agree, and was calibrated to fire on none of: a static shot, a fast pan, a
+# whip pan, a zoom, a flash/explosion, or a slow dissolve.
+#
+#   mad  - mean |difference| of a 64px greyscale, each frame normalised to
+#          zero mean and unit variance first. The normalisation is what makes
+#          a flash or an exposure ramp cancel instead of reading as a cut, and
+#          it makes the threshold scene-independent, so it can be absolute.
+#   corr - correlation of a coarse 8x8x8 BGR histogram between the two frames.
+#          A pan keeps almost all of its content and so keeps corr ~0.99; a
+#          cut to different material collapses it.
+#
+# Measured on synthetic sequences (12/12 correct):
+#   hard cut   mad 1.12-1.16   corr -0.009..0.333   -> CUT
+#   whip pan   mad 1.15-1.16   corr  0.999          -> rejected by corr
+#   flash      mad 0.22        corr -0.008          -> rejected by mad
+#   dissolve   mad 0.18        corr  0.747          -> rejected by mad
+# Note the whip pan sits ABOVE the mad threshold: the AND is load-bearing,
+# neither signal alone is safe.
+#
+# Known limit: a cut between two shots with near-identical colour palettes
+# keeps corr high (measured 0.999) and is MISSED. That is the status quo, not
+# a regression.
+try:
+    from config import (CUT_DETECT as _CUT_ON, CUT_MAD_MIN as _CUT_MAD,
+                        CUT_HIST_CORR_MAX as _CUT_CORR,
+                        ALIGNED_MAX_AGE_FRAMES as _ALIGNED_MAX_AGE)
+except Exception:
+    _CUT_ON, _CUT_MAD, _CUT_CORR, _ALIGNED_MAX_AGE = True, 1.00, 0.70, 48
+
+_CUT_STATS = {"cuts": 0, "frames": 0, "disabled": False}
+
+# A real edit does not cut every few frames. If the detector claims it does,
+# it is misfiring on this material, and every false cut resets the tracker and
+# clips the geometry timeline - which shows up as exactly the intermittent
+# revert this build is fixing. Past this density the barrier switches itself
+# off for the rest of the job and says so, rather than quietly shredding the
+# timeline. 1 cut per 12 frames sustained is already far faster than any real
+# edit; this only trips on a detector that has lost its mind.
+_CUT_MAX_DENSITY = 1.0 / 12.0
+_CUT_DENSITY_MIN_FRAMES = 150
+
+
+def _cut_signature(frm, small=64):
+    """(normalised small greyscale, coarse BGR histogram) for one frame."""
+    try:
+        h, w = frm.shape[:2]
+        sh = max(2, int(round(small * float(h) / max(1.0, float(w)))))
+        s = cv2.resize(frm, (small, sh), interpolation=cv2.INTER_AREA)
+        g = cv2.cvtColor(s, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        g = (g - float(g.mean())) / (float(g.std()) + 1e-3)
+        hist = cv2.calcHist([s], [0, 1, 2], None, [8, 8, 8],
+                            [0, 256, 0, 256, 0, 256])
+        cv2.normalize(hist, hist)
+        return g, hist.flatten()
+    except Exception:
+        return None
+
+
+def _shot_cuts(frames, prev_sig=None):
+    """Per-frame hard-cut flags for one chunk. Returns (flags, last_signature).
+
+    `prev_sig` is the signature of the frame before this chunk, so a cut that
+    lands exactly on a chunk boundary is still seen. Without it every chunk
+    boundary would be a blind spot - and chunk boundaries are frequent.
+    """
+    n = len(frames)
+    flags = [False] * n
+    if not _CUT_ON or n == 0:
+        return flags, prev_sig
+    prev = prev_sig
+    for i, f in enumerate(frames):
+        sig = _cut_signature(f)
+        if sig is None:
+            prev = None
+            continue
+        if prev is not None:
+            try:
+                mad = float(np.abs(sig[0] - prev[0]).mean())
+                corr = float(cv2.compareHist(sig[1], prev[1], cv2.HISTCMP_CORREL))
+                if mad > float(_CUT_MAD) and corr < float(_CUT_CORR):
+                    flags[i] = True
+            except Exception:
+                pass
+        prev = sig
+    return flags, prev
+
+
+def _fa_get(img, max_num=0, defer_embedding=False):
+    """Detect faces. With defer_embedding, skip recognition for now.
+
+    max_num now defaults to 0 (unlimited) rather than 20. SCRFD's own top-N
+    selection scores a face as `area - 2 * offset_from_centre^2`, which does
+    not merely prefer central faces, it overwhelms area: a face 300 px off
+    centre loses 180,000 units against a typical face area of ~10,000. That is
+    precisely the "second character entering from the side is dropped" failure
+    mode, so the cap is removed rather than tuned - the cost of an extra
+    detection is now ~6 ms, not ~91 ms, which is what made the cap worth
+    having in the first place.
+    """
+    if img is None or _fa is None:
+        return []
+    try:
+        det = getattr(_fa, "det_model", None)
+        models = getattr(_fa, "models", None)
+        if det is None or not models:
+            raise AttributeError("no staged models")
+        from insightface.app.common import Face as _IFace
+        bboxes, kpss = det.detect(img, max_num=max_num, metric="default")
+        _DET_COUNTERS["passes"] += 1
+        if bboxes is None or len(bboxes) == 0:
+            return []
+        _DET_COUNTERS["raw_faces"] += int(len(bboxes))
+        out = []
+        for i in range(len(bboxes)):
+            kps = None if kpss is None else kpss[i]
+            f = _IFace(bbox=bboxes[i, 0:4], kps=kps, det_score=bboxes[i, 4])
+            # Everything except recognition: cheap, and the dedupe and
+            # reliability gates downstream are entitled to see it.
+            for _name, _model in models.items():
+                if _name in ("detection", "recognition"):
+                    continue
+                try:
+                    _model.get(img, f)
+                except Exception as e:
+                    logging.debug("aux model %s failed: %s", _name, e)
+            if defer_embedding and _DEFER_EMB_ON:
+                f._emb_img = img
+                f._emb_kps = (None if f.kps is None
+                              else np.array(f.kps, np.float32, copy=True))
+            else:
+                _rec = models.get("recognition")
+                if _rec is not None:
+                    try:
+                        _rec.get(img, f)
+                        _DET_COUNTERS["embeds"] += 1
+                    except Exception as e:
+                        logging.debug("recognition failed: %s", e)
+            out.append(f)
+    except Exception as e:
+        # Any surprise in the staged path falls back to stock FaceAnalysis,
+        # which is slower but is the behaviour this build shipped with.
+        # Said ONCE at warning level, not debug: a silent fall back to the slow
+        # path is a job that takes four times as long for no stated reason,
+        # which is indistinguishable from "the optimisation does not work".
+        if not _DET_COUNTERS.get("fallback_logged"):
+            _DET_COUNTERS["fallback_logged"] = True
+            logging.warning(
+                "staged detect unavailable (%s: %s) - falling back to "
+                "FaceAnalysis.get for the whole job; lazy recognition is OFF",
+                type(e).__name__, e)
+        else:
+            logging.debug("staged detect unavailable (%s) - using FaceAnalysis.get", e)
+        try:
+            out = _fa.get(img, max_num=max_num)
+        except TypeError:
+            try:
+                out = _fa.get(img)
+            except Exception:
+                return []
+        except Exception:
+            return []
+    if out is None:
+        return []
+    try:
+        return _dedupe_faces(list(out))
+    except Exception:
+        try:
+            return list(out)
+        except Exception:
+            return []
+
+
+def _embed_faces(faces):
+    """Fill in any deferred embeddings, then forget the stashed frame.
+
+    Holding `_emb_img` keeps a reference to a whole detection frame alive, so
+    it is cleared as soon as the embedding exists - otherwise a face carried
+    by the tracker for a few dozen frames would pin a megabyte of pixels each.
+    """
+    if not faces or _fa is None:
+        return faces
+    rec = None
+    try:
+        rec = (getattr(_fa, "models", None) or {}).get("recognition")
+    except Exception:
+        rec = None
+    for f in faces:
+        try:
+            if getattr(f, "normed_embedding", None) is not None:
+                continue
+            img = getattr(f, "_emb_img", None)
+            kps = getattr(f, "_emb_kps", None)
+            if img is None or kps is None or rec is None:
+                continue
+            saved = getattr(f, "kps", None)
+            try:
+                # The ArcFace crop is cut from the DETECTION-space keypoints on
+                # the DETECTION-space image. By now f.kps has been rescaled and
+                # shifted into full-frame coordinates, so handing those to the
+                # recogniser would crop the wrong region of the wrong picture.
+                f.kps = kps
+                rec.get(img, f)
+                _DET_COUNTERS["embeds"] += 1
+            finally:
+                f.kps = saved
+                f._emb_img = None
+                f._emb_kps = None
+        except Exception as e:
+            logging.debug("deferred embedding failed: %s", e)
+    return faces
+
+
+_DUP_IOU = 0.55
+_DUP_SIM = 0.55
+
+
+def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM):
+    """One person → one box. Duplicate woman-boxes were occupying the man's slot."""
+    faces = _as_face_list(faces)
+    if len(faces) < 2:
+        return faces
+
+    def _rank(f):
+        try:
+            ok = 1 if _kps_reliable(f) else 0
+        except Exception:
+            ok = 0
+        try:
+            return (ok, float(getattr(f, "det_score", 0.0) or 0.0), float(_area(f)))
+        except Exception:
+            return (ok, 0.0, 0.0)
+
+    def _emb(f):
+        e = getattr(f, "normed_embedding", None)
+        if e is None:
+            e = getattr(f, "embedding", None)
+        if e is None:
+            return None
+        try:
+            v = np.asarray(e, np.float32).reshape(-1)
+            return v if v.size >= 8 else None
+        except Exception:
+            return None
+
+    kept = []
+    dropped = 0
+    for f in sorted(faces, key=_rank, reverse=True):
+        dup = False
+        ef = _emb(f)
+        for g in kept:
+            try:
+                if _bbox_iou(f.bbox, g.bbox) >= iou_thr:
+                    dup = True
+                    break
+            except Exception:
+                pass
+            eg = _emb(g)
+            if ef is not None and eg is not None:
+                try:
+                    k = min(ef.size, eg.size)
+                    if float(np.dot(ef[:k], eg[:k])) >= sim_thr:
+                        dup = True
+                        break
+                except Exception:
+                    pass
+            elif not dup:
+                try:
+                    b1 = np.asarray(f.bbox, np.float32).reshape(-1)[:4]
+                    b2 = np.asarray(g.bbox, np.float32).reshape(-1)[:4]
+                    c1x = 0.5 * (float(b1[0]) + float(b1[2]))
+                    c1y = 0.5 * (float(b1[1]) + float(b1[3]))
+                    c2x = 0.5 * (float(b2[0]) + float(b2[2]))
+                    c2y = 0.5 * (float(b2[1]) + float(b2[3]))
+                    dist = float(np.hypot(c1x - c2x, c1y - c2y))
+                    d1 = float(np.hypot(float(b1[2]) - float(b1[0]), float(b1[3]) - float(b1[1])))
+                    d2 = float(np.hypot(float(b2[2]) - float(b2[0]), float(b2[3]) - float(b2[1])))
+                    if dist < 0.35 * max(d1, d2, 1.0):
+                        dup = True
+                        break
+                except Exception:
+                    pass
+        if dup:
+            dropped += 1
+        else:
+            kept.append(f)
+    if dropped:
+        logging.debug("dedupe: dropped %d duplicate detection(s) of %d",
+                      dropped, len(faces))
+    return kept
+
+
+def _as_face_list(x):
+    if x is None:
+        return []
+    if isinstance(x, np.ndarray):
+        try:
+            return list(x)
+        except Exception:
+            return []
+    try:
+        return list(x)
+    except Exception:
+        return []
+
+
+def _empty(x):
+    if x is None:
+        return True
+    if isinstance(x, np.ndarray):
+        return x.size == 0
+    try:
+        return len(x) == 0
+    except TypeError:
+        return False
+
+
+def _fnum(x, default=0.5):
+    if x is None:
+        return float(default)
+    try:
+        if isinstance(x, np.ndarray):
+            if x.size == 0:
+                return float(default)
+            x = x.reshape(-1)[0]
+        return float(x)
+    except Exception:
+        return float(default)
+
+
+def _detect_want(img, want=2, defer_embedding=True):
+    """Find up to `want` faces. If pass 1 only returns one person, black out
+    that box and detect again so the 2nd character is not dropped by NMS.
+
+    Both passes defer recognition by default. The second pass is the expensive
+    one to get wrong: it exists precisely for the frames where someone is
+    missing, so it runs on exactly the frames that were already slowest, and
+    it used to double the embedding bill for a frame that ends up handing the
+    tracker the same one or two people.
+    """
+    faces = _fa_get(img, defer_embedding=defer_embedding)
+    if want <= 1 or len(faces) >= want:
+        return faces
+    work = img.copy()
+    mean = int(np.clip(np.mean(work), 0, 255))
+    for f in faces:
+        try:
+            x1, y1, x2, y2 = [int(v) for v in f.bbox]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(work.shape[1], x2), min(work.shape[0], y2)
+            if x2 - x1 > 8 and y2 - y1 > 8:
+                work[y1:y2, x1:x2] = mean
+        except Exception:
+            pass
+    for e in _fa_get(work, defer_embedding=defer_embedding):
+        try:
+            if all(_bbox_iou(e.bbox, f.bbox) < 0.35 for f in faces):
+                faces.append(e)
+        except Exception:
+            faces.append(e)
+        if len(faces) >= want + 2:
+            break
+    return faces
+
+
+def _shift_faces(faces, ox, oy):
+    """Move detections from a crop back into the full frame."""
+    if not faces:
+        return []
+    d = np.array([float(ox), float(oy)], np.float32)
+    db = np.array([float(ox), float(oy), float(ox), float(oy)], np.float32)
+    for f in faces:
+        try:
+            f.bbox = np.asarray(f.bbox, np.float32).reshape(4) + db
+            kps = getattr(f, "kps", None)
+            if kps is not None:
+                f.kps = np.asarray(kps, np.float32) + d
+            lmk = getattr(f, "landmark_2d_106", None)
+            if lmk is not None and len(lmk):
+                f.landmark_2d_106 = np.asarray(lmk, np.float32) + d
+        except Exception:
+            pass
+    return faces
+
+
+def _zoom_detect(frm, box, pad=1.15):
+    """Re-detect inside an expanded head box so a small or turned face fills 640."""
+    if frm is None or box is None or _fa is None:
+        return []
+    try:
+        h, w = frm.shape[:2]
+        x1, y1, x2, y2 = [float(v) for v in np.asarray(box, np.float32).reshape(-1)[:4]]
+    except Exception:
+        return []
+    bw, bh = max(12.0, x2 - x1), max(12.0, y2 - y1)
+    if min(bw, bh) > 220:
+        return []
+    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    side = max(96.0, min(max(bw, bh) * (1.0 + float(pad)), float(min(h, w))))
+    rx1 = int(max(0, round(cx - side * 0.5)))
+    ry1 = int(max(0, round(cy - side * 0.55)))
+    rx2 = int(min(w, round(cx + side * 0.5)))
+    ry2 = int(min(h, round(cy + side * 0.45)))
+    if rx2 - rx1 < 48 or ry2 - ry1 < 48:
+        return []
+    crop = frm[ry1:ry2, rx1:rx2]
+    prev = None
+    try:
+        det = getattr(_fa, "det_model", None)
+        if det is not None and hasattr(det, "det_thresh"):
+            prev = float(det.det_thresh)
+            det.det_thresh = min(prev, 0.18)
+        raw = _fa_get(crop, defer_embedding=True)
+    except Exception:
+        raw = []
+    finally:
+        try:
+            if prev is not None:
+                _fa.det_model.det_thresh = prev
+        except Exception:
+            pass
+    return _shift_faces(raw or [], rx1, ry1)
+
+
+def _merge_detected(base, extra, iou_thr=0.25):
+    merged = list(base or [])
+    for f2 in extra or []:
+        overlaps = []
+        for i, f1 in enumerate(merged):
+            try:
+                overlaps.append((_bbox_iou(f2.bbox, f1.bbox), i))
+            except Exception:
+                continue
+        best_iou, best_i = max(overlaps, default=(0.0, -1))
+        if best_i >= 0 and best_iou >= iou_thr:
+            f1 = merged[best_i]
+            score1 = float(getattr(f1, "det_score", 0.0) or 0.0)
+            score2 = float(getattr(f2, "det_score", 0.0) or 0.0)
+            if score2 > score1 + 0.02 or _area(f2) > _area(f1) * 1.08:
+                merged[best_i] = f2
+        else:
+            merged.append(f2)
+    return merged
+
+
+def _bbox_iou(a, b):
+    if a is None or b is None:
+        return 0.0
+    try:
+        aa = np.asarray(a, dtype=np.float32).reshape(-1)
+        bb = np.asarray(b, dtype=np.float32).reshape(-1)
+        if aa.size < 4 or bb.size < 4:
+            return 0.0
+        ax1, ay1, ax2, ay2 = [float(v) for v in aa[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in bb[:4]]
+    except Exception:
+        return 0.0
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _same_extent(cand, anchor, h_lo=0.60, h_hi=2.60, w_lo=0.35, w_hi=2.60):
+    """Is ``cand`` still about the same SIZE as ``anchor``?
+
+    Position overlap alone cannot tell "the same head, talking or motion
+    blurred" from "the same head, but most of it is now behind a hand" -
+    covering the lower face barely moves the box's position while collapsing
+    its extent. v11.2.4 HoldThrough rescued a geometrically-implausible
+    detection on overlap alone, which is why a sustained occlusion went from
+    fully suppressed to painted through on every frame: the swap was being
+    pasted onto the occluder.
+
+    Internal self-consistency cannot substitute for this. Keypoints derived
+    from a collapsed box are still mutually consistent, so landmark_fit_error
+    stays inside its (twice-loosened, 0.15 -> 0.20 -> 0.32) budget and
+    _kps_reliable accepts the read - verified directly: a box cut to 30% of
+    its height still returns True.
+
+    HEIGHT is the discriminator, deliberately, and width is left very
+    permissive. A profile turn narrows the box's width while its height holds
+    (that asymmetry is what made an over-tight fit threshold reject profiles
+    in v11.2.2), whereas occluding the lower face collapses height. Both
+    bounds are ratios against the identity's own last good box rather than
+    tuned pixel sizes, so they travel across resolutions and face sizes.
+    """
+    try:
+        if cand is None or anchor is None:
+            return False
+        cw = max(1.0, float(cand[2]) - float(cand[0]))
+        ch = max(1.0, float(cand[3]) - float(cand[1]))
+        aw = max(1.0, float(anchor[2]) - float(anchor[0]))
+        ah = max(1.0, float(anchor[3]) - float(anchor[1]))
+        rw, rh = cw / aw, ch / ah
+        return (h_lo <= rh <= h_hi) and (w_lo <= rw <= w_hi)
+    except Exception:
+        return False
+
+
+def _box_center_dist_norm(b1, b2):
+    """Normalized distance between two bounding box centers."""
+    if b1 is None or b2 is None: return 999.0
+    c1 = np.array([(float(b1[0])+float(b1[2]))*0.5, (float(b1[1])+float(b1[3]))*0.5])
+    c2 = np.array([(float(b2[0])+float(b2[2]))*0.5, (float(b2[1])+float(b2[3]))*0.5])
+    diag = max(1.0, float((float(b1[2])-float(b1[0]) + float(b1[3])-float(b1[1]))*0.5))
+    return float(np.linalg.norm(c1 - c2) / diag)
+
+
+def _motion_class(motion_val):
+    if motion_val < 2.5: return "STATIC"
+    if motion_val < 6.0: return "LOW"
+    if motion_val < 14.0: return "MEDIUM"
+    return "HIGH"
+
+_FACE_STATIC_THR = 2.5
+_FACE_ROI_PAD = 0.22
+_FACE_FEATHER = 0.32
+_FACE_EMA_ALPHA = 0.40
+
+def _smooth_faces(faces, ema_state):
+    """Deliberately a pass-through in v11.
+
+    The old implementation kept an EMA list keyed by *sorted position*, so when
+    a face entered or left the shot every subsequent face inherited a different
+    face's history. It also never wrote the smoothed value back onto the face
+    object, so the smoothing had no visual effect at all — only the identity
+    cross-contamination was real.
+
+    Geometry smoothing now lives in ``swap_engine.TrackState``, keyed by
+    identity slot rather than by position, which is where it belongs.
+    """
+    if not faces:
+        return faces, []
+    return sorted(_as_face_list(faces), key=lambda f: _xyxy(f)[0]), []
+
+
+def _pad_bbox(bbox, h, w, pad=_FACE_ROI_PAD):
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    bw, bh = x2 - x1, y2 - y1
+    px, py = bw * pad, bh * pad
+    x1 = int(max(0, np.floor(x1 - px)))
+    y1 = int(max(0, np.floor(y1 - py)))
+    x2 = int(min(w, np.ceil(x2 + px)))
+    y2 = int(min(h, np.ceil(y2 + py)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+# ---------------------------------------------------------------------------
+# Per-output-frame geometry.
+#
+# Detection and the swap network run on key frames; the frames in between used
+# to be filled by copying a face ROI out of a NEIGHBOURING frame and stamping
+# it onto the current one. That is the origin of most of the visible defects:
+#
+#   * the stamped ROI carries the neighbour's head position, so during fast
+#     movement the face lags the body and snaps forward on the next key frame;
+#   * it also carries the neighbour's background inside the ellipse, and its
+#     own exposure, so every transition between a real swap frame and a filled
+#     one is a brightness step;
+#   * two of the fill branches cross-faded whole FRAMES, which ghosts the
+#     entire image whenever the camera or the subject moves;
+#   * and several branches simply returned the untouched original frame, which
+#     is the real face appearing for one to four frames.
+#
+# Instead, geometry is interpolated between key frames per identity slot, and
+# every output frame is composited for real from the cached aligned swap - see
+# swap_engine.AlignedCompositor.reuse(). Interpolating five keypoints is
+# essentially free; it is the ONNX forward pass that is expensive, and that is
+# the only thing still restricted to key frames.
+# ---------------------------------------------------------------------------
+def _touches_frame_edge(bbox, shape, margin_frac: float = 0.012) -> bool:
+    """True if the box is in contact with a frame border.
+
+    Containment alone does not catch someone walking out of shot: the detector
+    reports the visible SLIVER of the face, which is a small box sitting
+    entirely inside the frame, so it scores ~1.0 containment right up until the
+    person is gone. Contact with the border is the signal that actually tracks
+    "this face is on its way out".
+    """
+    if bbox is None or shape is None:
+        return False
+    try:
+        H, W = int(shape[0]), int(shape[1])
+        m = max(1.0, margin_frac * min(W, H))
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        return bool(x1 <= m or y1 <= m or x2 >= W - m or y2 >= H - m)
+    except Exception:
+        return False
+
+
+def _frame_containment(bbox, shape) -> float:
+    """Fraction of ``bbox`` that lies inside the frame, 0..1."""
+    if bbox is None or shape is None:
+        return 1.0
+    try:
+        H, W = int(shape[0]), int(shape[1])
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        area = max(1.0, (x2 - x1) * (y2 - y1))
+        ix = max(0.0, min(x2, W) - max(x1, 0.0))
+        iy = max(0.0, min(y2, H) - max(y1, 0.0))
+        return float(max(0.0, min(1.0, (ix * iy) / area)))
+    except Exception:
+        return 1.0
+
+
+def _geom_record(face, track, alpha, guard, src, lmk=None):
+    """Freeze the geometry a face will be RENDERED with, at detection time.
+
+    Reading ``track.bbox`` / ``track.kps`` at swap time instead - which is what
+    the pipeline used to do - reads shared, mutable tracker state that the
+    detection loop has already advanced to the END of the chunk, because the
+    whole chunk is detected before any swap runs. Every swapped frame in a
+    chunk therefore rendered at the last key frame's head position. Snapshotting
+    here binds the geometry to the frame it belongs to.
+    """
+    kps = getattr(track, "kps", None) if track is not None else None
+    if kps is None:
+        kps = getattr(face, "kps", None)
+    bbox = getattr(track, "bbox", None) if track is not None else None
+    if bbox is None:
+        bbox = getattr(face, "bbox", None)
+    if lmk is None:
+        lmk = getattr(track, "lmk", None) if track is not None else None
+        if lmk is None:
+            lmk = getattr(face, "landmark_2d_106", None)
+    if kps is None or bbox is None:
+        return None
+    return {
+        "kps": np.asarray(kps, np.float32).copy(),
+        "bbox": np.asarray(bbox, np.float32).reshape(4).copy(),
+        "lmk": None if lmk is None else np.asarray(lmk, np.float32).copy(),
+        "alpha": float(np.clip(alpha, 0.0, 1.0)),
+        "guard": float(np.clip(guard, 0.0, 1.0)),
+        "src": src,
+        "track": track,
+        # The last box the detector actually reported for this identity. The
+        # smoothed/predicted bbox lags and stalls, so it is useless for asking
+        # "was this face on its way out of frame?" - this is not.
+        "hit_bbox": (None if track is None or getattr(track, "last_hit_bbox", None) is None
+                     else np.asarray(track.last_hit_bbox, np.float32).copy()),
+        # True when this came from a real detection rather than from the
+        # tracker predicting forward. _geom_for_frame() prefers to interpolate
+        # between two real observations: between them, interpolation is exact
+        # for any motion the tracker can model, whereas extrapolation trails
+        # the subject and then snaps at the next detection.
+        "det": not bool(getattr(face, "predicted", False)),
+    }
+
+
+def _geom_lerp(a, b, t):
+    """Blend two geometry records. ``t`` in [0,1], 0 = a, 1 = b."""
+    t = float(np.clip(t, 0.0, 1.0))
+    out = dict(a)
+    out["kps"] = (a["kps"] * (1.0 - t) + b["kps"] * t).astype(np.float32)
+    out["bbox"] = (a["bbox"] * (1.0 - t) + b["bbox"] * t).astype(np.float32)
+    if a["lmk"] is not None and b["lmk"] is not None and a["lmk"].shape == b["lmk"].shape:
+        out["lmk"] = (a["lmk"] * (1.0 - t) + b["lmk"] * t).astype(np.float32)
+    else:
+        out["lmk"] = b["lmk"] if t >= 0.5 else a["lmk"]
+    out["alpha"] = float(a["alpha"] * (1.0 - t) + b["alpha"] * t)
+    out["guard"] = float(a["guard"] * (1.0 - t) + b["guard"] * t)
+    out["src"] = b["src"] if t >= 0.5 else a["src"]
+    out["track"] = b["track"] if t >= 0.5 else a["track"]
+    out["det"] = bool(a.get("det")) and bool(b.get("det"))
+    out["hit_bbox"] = b.get("hit_bbox") if t >= 0.5 else a.get("hit_bbox")
+    return out
+
+
+def _hold_fade(dist, taper):
+    """Opacity for a held face `dist` frames past its last real sighting.
+
+    Plain 1 - (dist/taper)^2, which is what this was before v11.2.7 tried to
+    improve on it. Two alternatives were measured and both were worse, for the
+    same reason, so the reason is recorded here rather than rediscovered:
+
+    alpha modulates how much of the pasted face clears the visibility
+    threshold, so the frame-to-frame AREA change tracks the per-frame SLOPE of
+    this curve, and what matters is that slope's maximum, not its shape. Total
+    travel from 1 to 0 is fixed, so any curve that stays flat somewhere has to
+    be steeper elsewhere. Holding at 1.0 for the first half and then fading
+    over the second took t_rapid_fixed's area step from 0.0%/0.3% (mean/max)
+    to 13.7%/547%; replacing that fade with a smoothstep, which concentrates
+    the change even harder in the middle, made it 41.2%/1624%.
+
+    The quadratic's maximum slope is 2/taper, at the very end where the face
+    is already nearly gone. Linear would be 1/taper but has a corner at each
+    end; a quartic is 4/taper. This is the right curve, and the way to make a
+    gap dim less is to lengthen `taper`, not to reshape it.
+    """
+    t = float(taper)
+    if t <= 0.0:
+        return 1.0
+    return max(0.0, 1.0 - (float(dist) / t) ** 2)
+
+
+def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None,
+                    hold_after=None):
+    """Geometry for output frame ``g`` from a slot's key-frame timeline.
+
+    ``timeline`` is an ordered list of ``(global_frame_index, record)``. A slot
+    that is only anchored on one side (the face has just entered, or has just
+    been lost) holds its last known geometry and fades out over ``taper``
+    frames rather than disappearing between one frame and the next.
+
+    ``end_gap``, when not None, is how many more output frames the ENTIRE
+    job will ever produce after this one (0 == this is the last frame). Pass
+    it only once the source is truly exhausted - no future chunk can ever
+    supply a fresh real detection here. It exists for one narrow case: the
+    one-sided hold below cuts off ``taper`` frames after the last real
+    sighting because a long-silent identity might really have left the shot.
+    At the true end of the clip that ambiguity does not matter - there is no
+    "rest of the video" left for a wrong guess to keep drifting through - so
+    when the entire remaining clip is itself no longer than the normal grace
+    window, the fade is stretched to land exactly on the last frame instead
+    of hard-cutting a few frames early purely because of where the detector
+    cadence happened to place the last real hit. A disappearance with real
+    video left afterward is untouched: end_gap would then exceed taper and
+    this never fires.
+
+    Staleness (how long ago this identity was actually seen, which drives
+    both the ``taper`` cutoff and the fade) is always measured against the
+    last REAL detection, never against however recently the tracker merely
+    EXTRAPOLATED one. That distinction is the fix for a reported "ghost face"
+    defect: while a subject is turned away for longer than a brief occlusion,
+    _carry_pairs() keeps producing a fresh-looking predicted entry on almost
+    every detector call, for as long as its own, much larger miss budget
+    (trk_max_missed) allows. Each of those entries is a NAIVE CONSTANT-
+    VELOCITY extrapolation, which has no way to know it is wrong and simply
+    keeps compounding once the subject's real motion stops being a straight
+    line (a head turn, rolling over). An earlier version of this function
+    measured staleness against the newest entry in the timeline regardless of
+    whether it was real or extrapolated - so every fresh (but by then
+    thoroughly wrong) predicted entry reset the fade to full alpha, and the
+    face was rendered with high confidence at a position that had long since
+    parted ways with the subject: a face floating in empty space, disconnected
+    from any body. Reproduced directly: with that version, a synthetic 100
+    frame "turned away" gap rendered at alpha=1.00 throughout with position
+    error growing UNBOUNDED (350px+ and climbing). Anchoring staleness to the
+    last real sighting instead caps both the exposure time and the drift.
+
+    ``max_bracket`` bounds a DIFFERENT case: two real detections bracketing a
+    gap (obs_lo and obs_hi both present). Interpolating between two real,
+    confirmed points is normally safe regardless of gap length - both ends
+    are true. It stops being safe once the gap is long enough that the
+    subject's real path in between is no longer well approximated by a
+    straight line - a turn, a roll, a round trip back to nearly the starting
+    position. There is no way to detect that from the two endpoints alone: a
+    round trip's average velocity looks identical to "barely moved" (measured
+    directly - a 130-frame turn-and-back scored the same near-zero velocity
+    mismatch as an 18-frame linear dropout). Frame count is therefore the
+    only signal available, but it cannot be a fixed number of frames: under a
+    sparse detection cadence (e.g. the Optimized preset's ~10-frame keyframe
+    spacing) a routine one-second occlusion and a several-second deliberate
+    turn-away can produce the SAME raw span - measured directly, an 18-frame
+    real dropout produced brackets up to 30 frames wide purely from cadence
+    spacing. `max_bracket` is therefore expressed in OUTPUT FRAMES already
+    converted from a fixed TIME budget (seconds) at the call site, so it
+    scales with fps/quality instead of being tuned against one preset's
+    cadence and breaking on another. Beyond it, this falls back to the same
+    near-edge hold and fade as the one-sided case, rather than a confident
+    full-span interpolation.
+    """
+    if not timeline:
+        return None
+
+    def _bracket(entries):
+        lo = hi = None
+        for gi, rec in entries:
+            if gi <= g:
+                lo = (gi, rec)
+            elif hi is None:
+                hi = (gi, rec)
+                break
+        return lo, hi
+
+    # Prefer a bracket made of real detections. A predicted anchor sitting
+    # between two real ones only drags the interpolation toward the tracker's
+    # lag; the real pair on either side describes the motion better.
+    observed = [e for e in timeline if e[1].get("det")]
+    obs_lo, obs_hi = _bracket(observed)
+
+    if obs_lo is not None and obs_hi is not None:
+        span = float(obs_hi[0] - obs_lo[0])
+        # A short dip between two real detections is safe to interpolate
+        # across in full: the two endpoints anchor it, and real motion over a
+        # fraction of a second is well approximated by a straight line - this
+        # is what keeps a brief detector dropout smooth. A LONG dip is not:
+        # nothing constrains the subject's actual path in between, and once a
+        # real detection eventually resumes, this branch previously bridged
+        # however long that gap was with a confident, full-alpha straight
+        # line - which is the reported "ghost" defect from a THIRD angle:
+        # rather than drifting via extrapolation (the one-sided case above)
+        # or lingering past a chunk boundary (the trim above), it glides in a
+        # straight line between two real sightings while the subject's actual
+        # motion in between - a turn, a roll - is anything but straight.
+        #
+        # Bounded the same way the one-sided case is bounded: render only
+        # within `taper` frames of EITHER real endpoint, using a hold near
+        # whichever endpoint is closer (not a blend across the unconstrained
+        # middle) with the same quadratic fade. The deep middle of a long
+        # gap renders nothing - the original frame - rather than a guess.
+        budget = float(max_bracket) if max_bracket else float("inf")
+        if span > budget:
+            dist_lo = g - obs_lo[0]
+            dist_hi = obs_hi[0] - g
+            if dist_lo <= dist_hi:
+                edge, side = dist_lo, obs_lo
+            else:
+                edge, side = dist_hi, obs_hi
+            if taper > 0 and edge > taper:
+                return None
+            rec = dict(side[1])
+            rec["det"] = False
+            if taper > 0:
+                rec["alpha"] = float(rec["alpha"] * _hold_fade(edge, taper))
+            return rec if rec["alpha"] > 0.02 else None
+        t = 0.0 if span <= 0 else (g - obs_lo[0]) / span
+        return _geom_lerp(obs_lo[1], obs_hi[1], t)
+
+    if obs_lo is not None:
+        # obs_hi is None: this identity has not been seen for REAL since
+        # obs_lo, and has not been confirmed again yet (an ongoing gap, not a
+        # bracketed dip). taper/fade are computed from obs_lo - the last real
+        # sighting - not from whatever the tracker most recently guessed.
+        real_dist = g - obs_lo[0]
+        eff_taper = taper
+        if end_gap is not None and taper > 0 and end_gap <= taper:
+            eff_taper = max(taper, real_dist + end_gap)
+        if eff_taper > 0 and real_dist > eff_taper:
+            return None
+        # Still inside the grace window: use the MOST RECENT entry (which may
+        # be an extrapolated one, and is typically a better position estimate
+        # for these few frames than the stale real observation alone) for
+        # placement, but drive alpha from real_dist, not from that entry's own
+        # recency - so a fresh extrapolation cannot look "just seen" and stay
+        # at full opacity indefinitely.
+        #
+        # SDOS-075: bounded. The extrapolation is naive constant velocity, so
+        # it is a good estimate for a few frames and an increasingly wrong one
+        # after that - a face drifting away from the head it belongs to is
+        # exactly the reported ghost. Past `hold_after` frames without a real
+        # sighting, placement falls back to the LAST CONFIRMED position and
+        # stays there while the alpha continues to fade. A face that holds
+        # still in the right place reads as a brief freeze; one that slides
+        # off the head reads as a ghost. This matters more now that a
+        # transient rejection run no longer collapses the grace window
+        # (SDOS-075): the face is held for longer, so how it is PLACED while
+        # held has to be right.
+        lo, _hi_all = _bracket(timeline)
+        side = lo if lo is not None else obs_lo
+        if (hold_after is not None and hold_after > 0
+                and real_dist > float(hold_after)):
+            side = obs_lo
+        rec = dict(side[1])
+        rec["det"] = False
+        rec["alpha"] = float(rec["alpha"] * _hold_fade(real_dist, eff_taper))
+        return rec if rec["alpha"] > 0.02 else None
+
+    # No real detection anywhere in this timeline yet - never established, or
+    # history was trimmed past it. Fall back to whatever is available; this
+    # is the pre-existing cold-start path and is unchanged.
+    lo, hi = _bracket(timeline)
+    if lo is not None and hi is not None:
+        span = float(hi[0] - lo[0])
+        t = 0.0 if span <= 0 else (g - lo[0]) / span
+        return _geom_lerp(lo[1], hi[1], t)
+    side = lo if lo is not None else hi
+    if side is None:
+        return None
+    dist = abs(g - side[0])
+    if taper > 0 and dist > taper:
+        return None
+    rec = dict(side[1])
+    if dist > 0:
+        rec["det"] = False
+        rec["alpha"] = float(rec["alpha"] * _hold_fade(dist, taper))
+    return rec if rec["alpha"] > 0.02 else None
+
+
+def _rival_landmarks(records, slot):
+    """Landmarks of the faces painted AFTER ``slot`` (i.e. nearer the camera).
+
+    During a kiss or a hug the nearer person's cheek lands inside this face's
+    aligned crop. Their chroma is essentially identical, so the skin-confidence
+    guard cannot separate them - but their own landmarks can, and they project
+    into this crop through the same affine.
+    """
+    out = []
+    me = records.get(slot)
+    if me is None:
+        return out
+    my_area = float(max(1.0, (me["bbox"][2] - me["bbox"][0]) * (me["bbox"][3] - me["bbox"][1])))
+    for s2, r2 in records.items():
+        if s2 == slot or r2 is None or r2.get("lmk") is None:
+            continue
+        area2 = float(max(1.0, (r2["bbox"][2] - r2["bbox"][0]) * (r2["bbox"][3] - r2["bbox"][1])))
+        if area2 <= my_area:
+            continue                      # painted before us; not an occluder
+        if _bbox_iou(me["bbox"], r2["bbox"]) < 0.06:
+            continue
+        out.append(r2["lmk"])
+    return out
+
+
+def _session_probe(session):
+    feed = {}
+    for inp in session.get_inputs():
+        shape = [d if isinstance(d, int) and d > 0 else 1 for d in inp.shape]
+        feed[inp.name] = np.zeros(shape, dtype=np.float32)
+    session.run(None, feed)
+
+def _warmup(fa, sw):
+    for _m in fa.models.values():
+        _session_probe(_m.session)
+    _session_probe(sw.session)
+
+def _ort_cpu_load_context():
+    """Temporarily tune ORT session construction for CPU-only loading.
+
+    InsightFace constructs its own InferenceSession objects, so the usual
+    SessionOptions knob is otherwise inaccessible. We deliberately use
+    ORT_ENABLE_EXTENDED during model construction to avoid the very expensive
+    full graph-optimization pass observed on CPU Spaces; inference remains
+    fully CPU-backed. The patch is restored immediately after model loading.
+
+    NEW (opt-in, off by default): if PHOENIX_ORT_OPTIMIZED_CACHE_DIR is set,
+    the graph-optimized model is persisted there on first load, and loaded
+    directly from that cached file on subsequent loads - skipping the
+    EXTENDED-level optimization pass entirely on cache hits.
+
+    CAVEAT - verify this actually helps on your Space before relying on it:
+    a plain HF Space's /tmp (and most of its filesystem) is ephemeral and
+    does NOT survive a full Space restart/rebuild - it only persists for
+    the lifetime of the running container. This caching only pays off if
+    _load() can be triggered more than once within the SAME container
+    lifetime (uncommon here, since _fa/_sw are already cached in-process),
+    or if PHOENIX_ORT_OPTIMIZED_CACHE_DIR points at your Space's Persistent
+    Storage mount (a paid HF feature) rather than /tmp. If neither applies,
+    this will build the cache once and never hit it again before the
+    container recycles - i.e. no measurable benefit. Test with your actual
+    restart pattern before assuming this helps.
+    """
+    try:
+        import onnxruntime as ort
+        original = ort.InferenceSession
+        level = os.environ.get("PHOENIX_ORT_GRAPH_LEVEL", "extended").strip().lower()
+        if level in ("all", "enable_all"):
+            return ort, original, False
+
+        cache_dir = os.environ.get("PHOENIX_ORT_OPTIMIZED_CACHE_DIR", "").strip()
+        if not cache_dir:
+            for _cand in ("/data/phoenix_ort_cache", "/tmp/phoenix_ort_cache"):
+                try:
+                    os.makedirs(_cand, exist_ok=True)
+                    cache_dir = _cand
+                    break
+                except Exception:
+                    continue
+
+        def _make_opts():
+            opts = ort.SessionOptions()
+            opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+            opts.intra_op_num_threads = int(_native_threads)
+            opts.inter_op_num_threads = 1
+            opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            opts.enable_mem_pattern = True
+            opts.enable_cpu_mem_arena = True
+            try:
+                opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            except Exception:
+                pass
+            return opts
+
+        so = _make_opts()
+
+        def _tuned_session(path_or_bytes, sess_options=None, providers=None, provider_options=None, **kwargs):
+            opts = sess_options or so
+            load_path = path_or_bytes
+            cached_path = None
+
+            if cache_dir and isinstance(path_or_bytes, str):
+                os.makedirs(cache_dir, exist_ok=True)
+                base = os.path.basename(path_or_bytes)
+                cached_path = os.path.join(cache_dir, f"optimized_{base}")
+                if os.path.isfile(cached_path):
+                    # Cache hit: load the already-optimized graph directly,
+                    # skip re-running EXTENDED optimization on it.
+                    load_path = cached_path
+                    opts = ort.SessionOptions()
+                    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+                    opts.intra_op_num_threads = int(_native_threads)
+                    opts.inter_op_num_threads = 1
+                    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    opts.enable_mem_pattern = True
+                    opts.enable_cpu_mem_arena = True
+                elif sess_options is None:
+                    # Cache miss: run the normal optimization pass, but also
+                    # write the result out for next time.
+                    opts = _make_opts()
+                    opts.optimized_model_filepath = cached_path
+
+            return original(load_path, opts, providers=providers, provider_options=provider_options, **kwargs)
+
+        ort.InferenceSession = _tuned_session
+        return ort, original, True
+    except Exception as e:
+        logging.debug("ORT CPU session tuning unavailable: %s", e)
+        return None, None, False
+
+def _load(prefer_gpu=None):
+    global _fa, _sw, _ov_active
+    if prefer_gpu is None:
+        prefer_gpu = (_device_pref[0] == "gpu")
+    use_gpu = bool(prefer_gpu) and _cuda_available()
+    target = "gpu" if use_gpu else "cpu"
+    if _fa is not None and _loaded_device[0] == target:
+        return
+
+    from insightface.app import FaceAnalysis
+    import insightface
+    from huggingface_hub import hf_hub_download
+    try:
+        from config import FACE_MODEL_NAME, DET_SIZE, DET_SIZE_BALANCED, DET_SIZE_BEST
+    except Exception:
+        FACE_MODEL_NAME, DET_SIZE, DET_SIZE_BALANCED, DET_SIZE_BEST = "buffalo_l", (640,640), (512,512), (640,640)
+    _ort_mod, _ort_original, _ort_patched = _ort_cpu_load_context() if not use_gpu else (None, None, False)
+    _load_t0 = time.perf_counter()
+
+    _fa = None
+    _sw = None
+    _loaded_device[0] = None
+
+    prov = _get_providers(prefer_gpu=use_gpu)
+    ctx_id = 0 if use_gpu else -1
+
+    def _mk_fa(p, ctx, modules=None):
+        mods = modules or ["detection", "recognition", "landmark_2d_106", "genderage"]
+        fa = FaceAnalysis(
+            name=FACE_MODEL_NAME,
+            providers=p,
+            allowed_modules=mods,
+        )
+        # v11: lower the detector acceptance threshold. Profile and distant
+        # faces routinely score 0.3-0.5 with RetinaFace; at the 0.5 default they
+        # are simply not returned, and "no detection" was the trigger for every
+        # revert-to-original path. Accepting them and letting the tracker's
+        # identity gating decide is strictly better -- a weak detection that the
+        # tracker rejects costs nothing, a missed detection costs a visible
+        # flash of the original face.
+        try:
+            det_size = DET_SIZE
+            try:
+                # CPU speed path: use the configured compact detector input.
+                if not use_gpu and os.environ.get("PHOENIX_DET_SIZE", "").strip():
+                    n = int(os.environ["PHOENIX_DET_SIZE"].split(",")[0])
+                    det_size = (n, n)
+            except Exception:
+                pass
+            fa.prepare(ctx_id=ctx, det_size=det_size, det_thresh=DET_THRESH)
+            # Worth stating in the log: this is the resolution the detector
+            # ACTUALLY sees, and it is the lever that decides whether a small
+            # or distant face is findable at all. PHOENIX_DET_SIZE overrides it.
+            logging.info("detector input %dx%d · det_thresh=%.2f%s",
+                         det_size[0], det_size[1], float(DET_THRESH),
+                         " (PHOENIX_DET_SIZE override)"
+                         if os.environ.get("PHOENIX_DET_SIZE", "").strip() else "")
+        except TypeError:
+            fa.prepare(ctx_id=ctx, det_size=DET_SIZE)
+            try:
+                fa.det_model.det_thresh = float(DET_THRESH)
+            except Exception:
+                pass
+        return fa
+
+    try:
+        _fa = _mk_fa(prov, ctx_id)
+    except Exception as e:
+        logging.warning("FaceAnalysis with genderage failed: %s — retrying without it", e)
+        try:
+            _fa = _mk_fa(prov, ctx_id, ["detection", "recognition", "landmark_2d_106"])
+        except Exception as e2:
+            if FACE_MODEL_NAME != "buffalo_l":
+                logging.warning("%s load failed: %s — retrying buffalo_l", FACE_MODEL_NAME, e2)
+                FACE_MODEL_NAME = "buffalo_l"
+                _fa = _mk_fa(prov, ctx_id)
+            else:
+                logging.warning(f"FaceAnalysis load failed ({prov}): {e2} — falling back to CPU")
+                prov = ["CPUExecutionProvider"]
+                use_gpu = False
+                target = "cpu"
+                _fa = _mk_fa(prov, -1)
+
+    # THE weights are not a pinned dependency. Everything else this build runs
+    # on is frozen in requirements.txt; inswapper_128.onnx is fetched from
+    # community mirrors at RUNTIME, and those get removed, gated or
+    # rate-limited without notice. That makes this the one part of the stack
+    # that can change underneath byte-identical code - which is the exact
+    # shape of "the same version worked last week and returns the original
+    # face today". Treat it accordingly: cache it somewhere that survives, and
+    # never let a failure here pass quietly.
+    _fp32 = [
+        ("deepinsight/inswapper", "inswapper_128.onnx"),
+        ("ezioruan/inswapper_128.onnx", "inswapper_128.onnx"),
+        ("Devia/inswapper_128", "inswapper_128.onnx"),
+        ("hexgrad/inswapper", "inswapper_128.onnx"),
+        ("netrunner-exe/Insight-Swap-models", "inswapper_128.onnx"),
+    ]
+    # /tmp is wiped on every Space restart, so the old cache_dir re-downloaded
+    # the weights on every cold start and re-rolled the dice against whichever
+    # mirrors still exist that morning. /data persists. One successful download
+    # then survives the mirrors themselves disappearing.
+    _cache_dir = "/tmp/models"
+    for _cand in (os.environ.get("PHOENIX_MODEL_CACHE", "").strip(),
+                  "/data/models"):
+        if not _cand:
+            continue
+        try:
+            os.makedirs(_cand, exist_ok=True)
+            if os.access(_cand, os.W_OK):
+                _cache_dir = _cand
+                break
+        except Exception:
+            pass
+    mp_ = None
+    _dl_errors = []
+    for repo, fn in _fp32:
+        try:
+            mp_ = hf_hub_download(repo, fn, cache_dir=_cache_dir)
+            break
+        except Exception as _e:
+            _dl_errors.append(f"{repo}: {type(_e).__name__}: {_e}")
+    if mp_ is None:
+        raise RuntimeError(
+            "Could not download inswapper_128.onnx from any mirror - the face "
+            "swapper cannot run. Tried:\n  " + "\n  ".join(_dl_errors))
+    # A truncated download is worse than a failed one: it leaves a file that
+    # get_model() may accept and then produce nothing from. The real weights
+    # are ~529 MB; anything under 100 MB is not them.
+    try:
+        _sz = os.path.getsize(mp_)
+        if _sz < 100 * 1024 * 1024:
+            raise RuntimeError(
+                f"inswapper_128.onnx at {mp_} is only {_sz/1048576:.1f} MB - "
+                "the download is truncated or the mirror served an error page. "
+                "Delete that cache directory and restart to re-fetch it.")
+    except OSError:
+        pass
+
+    try:
+        _sw = insightface.model_zoo.get_model(mp_, providers=prov)
+        if use_gpu:
+            try:
+                _warmup(_fa, _sw)
+            except Exception:
+                pass
+    except Exception as e:
+        logging.warning(f"Swapper GPU load failed: {e} — CPU fallback")
+        prov = ["CPUExecutionProvider"]
+        use_gpu = False
+        target = "cpu"
+        _fa = _mk_fa(prov, -1)
+        _sw = insightface.model_zoo.get_model(mp_, providers=prov)
+
+    # insightface.model_zoo.get_model() returns None for a file it cannot
+    # route, rather than raising. Without this check that None was carried all
+    # the way to the compositor, which quietly became None too, and every
+    # frame then fell through the swap loop untouched - a whole video of the
+    # original face, reported as "Done". Never again: no swapper, no job.
+    if _sw is None:
+        raise RuntimeError(
+            f"insightface could not load the swapper from {mp_} - get_model() "
+            "returned None. The file is present but is not a usable "
+            "inswapper_128.onnx (wrong file, corrupt download, or an "
+            "insightface version that no longer recognises it).")
+
+    if _ort_patched and _ort_mod is not None:
+        try:
+            _ort_mod.InferenceSession = _ort_original
+        except Exception:
+            pass
+        logging.info("ORT CPU session construction: %.1fs · graph=EXTENDED · intra=%d inter=1", time.perf_counter() - _load_t0, _native_threads)
+    try:
+        _live = _sw.session.get_providers()
+        _ov_active = "OpenVINOExecutionProvider" in str(_live)
+        logging.info(f"Models ready on {target} · providers={_live}")
+    except Exception:
+        _ov_active = False
+
+    _loaded_device[0] = target
+
+# Face Enhancers
+_enhancers = {}
+_enh_failed = set()
+
+def _ensure_tv_shim():
+    import sys
+    if 'torchvision.transforms.functional_tensor' not in sys.modules:
+        try:
+            import torchvision.transforms.functional as _tvf
+            import types
+            _shim = types.ModuleType('torchvision.transforms.functional_tensor')
+            _shim.rgb_to_grayscale = _tvf.rgb_to_grayscale
+            sys.modules['torchvision.transforms.functional_tensor'] = _shim
+        except Exception:
+            pass
+
+
+
+class ModelRegistry:
+    """Thread-safe model holder (audit NSDOS-004)."""
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.face_analysis = None
+        self.swapper = None
+        self.device = None  # "gpu" | "cpu"
+
+    def get(self, prefer_gpu=False):
+        global _fa, _sw, _loaded_device, _ov_active
+        with self._lock:
+            target = "gpu" if (prefer_gpu and _cuda_available()) else "cpu"
+            if (
+                self.face_analysis is not None
+                and self.swapper is not None
+                and self.device == target
+            ):
+                _fa, _sw = self.face_analysis, self.swapper
+                _loaded_device[0] = self.device
+                return self.face_analysis, self.swapper
+            # Load via existing _load path under registry lock
+            _load(prefer_gpu=(target == "gpu"))
+            # Caching a None swapper here is how a single bad load became a
+            # permanent one: the cache test above only asks whether the fields
+            # are set, so a null swapper stored once was handed out for the
+            # life of the container without ever retrying the download.
+            if _fa is None or _sw is None:
+                self.face_analysis = self.swapper = self.device = None
+                raise RuntimeError(
+                    "Face models did not load (analysis=%s, swapper=%s)"
+                    % ("ok" if _fa is not None else "MISSING",
+                       "ok" if _sw is not None else "MISSING"))
+            self.face_analysis, self.swapper = _fa, _sw
+            self.device = _loaded_device[0] or target
+            return self.face_analysis, self.swapper
+
+
+MODELS = ModelRegistry()
+
+
+def _load_gfpgan():
+    if "GFPGAN" in _enhancers: return _enhancers["GFPGAN"]
+    if "GFPGAN" in _enh_failed: return None
+    try:
+        _ensure_tv_shim()
+        from gfpgan import GFPGANer
+        from huggingface_hub import hf_hub_download
+        wp = None
+        for repo, fn in [("leonelhs/gfpgan","GFPGANv1.4.pth"), ("gmk123/GFPGAN","GFPGANv1.4.pth")]:
+            try:
+                wp = hf_hub_download(repo, fn, cache_dir="/tmp/models")
+                break
+            except Exception:
+                pass
+        if not wp:
+            _enh_failed.add("GFPGAN")
+            return None
+        model = GFPGANer(model_path=wp, upscale=1, arch='clean', channel_multiplier=2, bg_upsampler=None)
+        _enhancers["GFPGAN"] = model
+        logging.info("GFPGAN loaded")
+        return model
+    except Exception as e:
+        logging.warning(f"GFPGAN load failed: {e}")
+        _enh_failed.add("GFPGAN")
+        return None
+
+def _load_realesrgan():
+    if "Real-ESRGAN (face)" in _enhancers: return _enhancers["Real-ESRGAN (face)"]
+    if "Real-ESRGAN (face)" in _enh_failed: return None
+    try:
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        from realesrgan import RealESRGANer
+        from huggingface_hub import hf_hub_download
+        wp = None
+        for repo, fn in [
+            ("ai-forever/Real-ESRGAN", "RealESRGAN_x2.pth"),
+            ("ai-forever/Real-ESRGAN", "RealESRGAN_x4.pth"),
+        ]:
+            try:
+                wp = hf_hub_download(repo, fn, cache_dir="/tmp/models")
+                break
+            except Exception:
+                pass
+        if not wp:
+            _enh_failed.add("Real-ESRGAN (face)")
+            return None
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+        upsampler = RealESRGANer(scale=2, model_path=wp, model=model, tile=0, tile_pad=10, pre_pad=0, half=False)
+        _enhancers["Real-ESRGAN (face)"] = upsampler
+        logging.info("Real-ESRGAN loaded")
+        return upsampler
+    except Exception as e:
+        logging.warning(f"Real-ESRGAN load failed: {e}")
+        _enh_failed.add("Real-ESRGAN (face)")
+        return None
+
+def _load_codeformer():
+    if "CodeFormer" in _enhancers: return _enhancers["CodeFormer"]
+    if "CodeFormer" in _enh_failed: return None
+    try:
+        from gfpgan import GFPGANer
+        from huggingface_hub import hf_hub_download
+        wp = None
+        for repo, fn in [
+            ("sczhou/CodeFormer", "codeformer.pth"),
+            ("leonelhs/codeformer", "codeformer.pth"),
+            ("gmk123/CodeFormer", "codeformer.pth"),
+        ]:
+            try:
+                wp = hf_hub_download(repo_id=repo, filename=fn)
+                if wp: break
+            except Exception: continue
+        if not wp:
+            _enh_failed.add("CodeFormer")
+            return None
+        try:
+            model = GFPGANer(model_path=wp, upscale=1, arch="CodeFormer", channel_multiplier=2, bg_upsampler=None)
+        except TypeError:
+            model = GFPGANer(model_path=wp, upscale=1, arch="clean", channel_multiplier=2, bg_upsampler=None)
+        _enhancers["CodeFormer"] = model
+        logging.info("CodeFormer loaded from %s", wp)
+        return model
+    except Exception as e:
+        logging.warning("CodeFormer load failed: %s", e)
+        _enh_failed.add("CodeFormer")
+        return None
+
+
+def _get_enhancer(name):
+    if not name or name == "None": return None
+    if name == "GFPGAN": return _load_gfpgan()
+    if name == "Real-ESRGAN (face)": return _load_realesrgan()
+    if name == "CodeFormer": return _load_codeformer()
+    return None
+
+
+def _is_soft_polish(name):
+    if not name: return False
+    s = str(name).lower()
+    return ("soft polish" in s or "cinematic" in s
+            or s in ("bilateral smooth", "mild sharpen", "detail boost")
+            or s.startswith("soft"))
+
+
+def _unsharp_luma(bgr, amount=0.55, radius=1.4, threshold=2):
+    """Unsharp mask applied to luma only.
+
+    Sharpening all three BGR channels independently amplifies chroma noise and
+    produces coloured fringes on skin. Working in YCrCb and touching only Y
+    keeps edge crispness without shifting skin tone.
+    """
+    ycc = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
+    y = ycc[:, :, 0].astype(np.float32)
+    blur = cv2.GaussianBlur(y, (0, 0), radius)
+    diff = y - blur
+    # Soft noise gate, not a hard cutoff. A binary "abs(diff) < threshold ->
+    # 0" step is discontinuous: a pixel whose true edge strength sits near
+    # that boundary gets fully toggled on/off as ordinary frame-to-frame
+    # compression noise nudges it across the line - each frame independently,
+    # since this runs per-frame with no memory of the previous one. Measured
+    # that toggling amplifying realistic frame-to-frame noise by ~1.6x on real
+    # footage - visible as shimmer on skin texture even with the enhancer
+    # itself fully brightness-neutral. Ramping gain from 0 at `threshold` to 1
+    # at `2*threshold` keeps the same noise-suppression intent (small diffs
+    # still end up near-zero) without a hard edge for noise to straddle.
+    mag = np.abs(diff)
+    gate = np.clip((mag - threshold) / max(threshold, 1e-6), 0.0, 1.0)
+    diff = diff * gate
+    ycc[:, :, 0] = np.clip(y + amount * diff, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
+
+
+def _fixed_contrast_lut(strength=0.07):
+    """Deterministic S-curve LUT for the 'clarity' lift.
+
+    Deliberately not CLAHE: CLAHE rebuilds a histogram per tile per frame, so
+    near-identical consecutive frames get slightly different mappings, which
+    reads as brightness pulsing on video. A fixed LUT always maps a given
+    input value to the same output.
+
+    Strength is kept low on purpose — see _local_contrast for why large
+    luminance shifts are dangerous here.
+    """
+    x = np.arange(256, dtype=np.float32) / 255.0
+    s = x - strength * np.sin(2.0 * np.pi * x)
+    return np.clip(s * 255.0, 0, 255).astype(np.uint8)
+
+
+_CONTRAST_LUT = None
+
+
+def _local_contrast(bgr, clip=None, grid=None):
+    """Brightness-preserving midtone contrast on L only.
+
+    Critical for video: the enhancer runs only on frames where a swap actually
+    happened, so with any frame-skip > 1 enhanced and unenhanced frames
+    alternate. If enhancement changes mean luminance, that alternation shows up
+    as the face pulsing brighter/darker several times a second. Rescaling L
+    back to its original mean makes an enhanced frame photometrically
+    interchangeable with an unenhanced one — contrast is redistributed, overall
+    exposure is not touched.
+
+    `clip`/`grid` are accepted and ignored (retained so existing CLAHE-era call
+    sites keep working).
+    """
+    global _CONTRAST_LUT
+    if _CONTRAST_LUT is None:
+        _CONTRAST_LUT = _fixed_contrast_lut()
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l = lab[:, :, 0]
+    before = float(l.mean())
+    curved = cv2.LUT(l, _CONTRAST_LUT).astype(np.float32)
+    after = float(curved.mean())
+    if after > 1.0:
+        curved *= (before / after)          # restore original mean luminance
+    lab[:, :, 0] = np.clip(curved, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
+def _soft_polish(frame, mode="Soft polish (fast)"):
+    """CPU-local enhancement family.
+
+    Previously this ignored `mode` entirely and always ran the same bilateral
+    filter — meaning 'Mild sharpen' and 'Detail boost' actually SOFTENED the
+    image, and every option in this family looked identical. Each mode now
+    does what its label says.
+    """
+    if frame is None or frame.size < 100: return frame
+    s = str(mode or "").lower()
+    try:
+        h, w = frame.shape[:2]
+        small = min(h, w) < 220
+        d = 5 if small else 7
+
+        if "cinematic" in s:
+            # Smooth → clarity → crispness, in that order: denoise first so the
+            # later two amplify real detail rather than amplifying noise.
+            out = cv2.bilateralFilter(frame, d=d, sigmaColor=20, sigmaSpace=20)
+            out = _local_contrast(out, clip=1.4, grid=8)
+            out = _unsharp_luma(out, amount=0.32 if small else 0.40,
+                                radius=1.2 if small else 1.5, threshold=3)
+            # Hold back slightly from the original so the result reads as
+            # graded rather than processed.
+            return cv2.addWeighted(out, 0.85, frame, 0.15, 0)
+
+        if "mild sharpen" in s:
+            return _unsharp_luma(frame, amount=0.45, radius=1.2, threshold=3)
+
+        if "detail boost" in s:
+            out = _unsharp_luma(frame, amount=0.75, radius=1.6, threshold=2)
+            return _local_contrast(out, clip=1.2, grid=8)
+
+        # "Bilateral smooth" and "Soft polish (fast)" — original behaviour.
+        return cv2.bilateralFilter(frame, d=d, sigmaColor=22, sigmaSpace=22)
+    except Exception:
+        return frame
+
+
+def _enhance(frame, enhancer_name="GFPGAN"):
+    if not enhancer_name or enhancer_name == "None": return frame
+    if _is_soft_polish(enhancer_name): return _soft_polish(frame, enhancer_name)
+    model = _get_enhancer(enhancer_name)
+    if model is None: return _soft_polish(frame, "Soft polish (fast)")
+    try:
+        if enhancer_name in ("GFPGAN", "CodeFormer"):
+            try:
+                _, _, out = model.enhance(frame, has_aligned=False, only_center_face=False, paste_back=True, weight=0.7)
+            except TypeError:
+                _, _, out = model.enhance(frame, has_aligned=False, only_center_face=False, paste_back=True, weight=0.5)
+            return out if out is not None else frame
+        if enhancer_name == "Real-ESRGAN (face)":
+            out, _ = model.enhance(frame, outscale=1)
+            if out is None: return frame
+            if out.shape[:2] != frame.shape[:2]:
+                out = cv2.resize(out, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_AREA)
+            return out
+        return frame
+    except Exception:
+        return _soft_polish(frame, "Soft polish (fast)")
+
+
+def _color_match_fast(swapped, original, bbox):
+    x1,y1,x2,y2 = [max(0,int(v)) for v in bbox]
+    x2,y2 = min(swapped.shape[1],x2), min(swapped.shape[0],y2)
+    if x2<=x1 or y2<=y1: return swapped
+    sw, og = swapped[y1:y2,x1:x2], original[y1:y2,x1:x2]
+    if sw.size < 100 or og.size < 100: return swapped
+    ms, mo = cv2.mean(sw), cv2.mean(og)
+    if max(abs(ms[0]-mo[0]), abs(ms[1]-mo[1]), abs(ms[2]-mo[2])) < 3.0:
+        return swapped
+    s = cv2.cvtColor(sw, cv2.COLOR_BGR2LAB).astype(np.float32)
+    o = cv2.cvtColor(og, cv2.COLOR_BGR2LAB)
+    sm, ss = cv2.meanStdDev(s)
+    om, osd = cv2.meanStdDev(o)
+    # v11 FIX. This line used to read ``* 0.20``, which multiplied every pixel's
+    # DEVIATION FROM THE MEAN by 0.2 — i.e. it crushed face contrast to a fifth
+    # and pulled the whole crop to the bbox mean. On a side turn the bbox mean is
+    # mostly hair/neck/background, so the face collapsed into a flat brown slab.
+    # Measured on a synthetic crop: L std 19.8 -> 8.2, L mean 169 -> 121.
+    # A true Reinhard transfer keeps the ratio; we only clamp it and blend.
+    scale = np.clip((osd / (ss + 1e-6)).reshape(1, 1, 3), 0.72, 1.45).astype(np.float32)
+    matched = (s - sm.reshape(1, 1, 3)) * scale + om.reshape(1, 1, 3)
+    w = 0.55  # lerp toward the match instead of replacing outright
+    s = s * (1.0 - w) + matched * w
+    np.clip(s, 0, 255, out=s)
+    swapped[y1:y2,x1:x2] = cv2.cvtColor(s.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    return swapped
+
+class _CancelledJob(Exception): pass
+
+
+def _profile_safe_composite(res, orig, face, alpha=1.0):
+    """Composite the swap through a face-shaped mask without fading back to original.
+
+    The v10.9.3 mask deliberately reduced alpha to ~0.20 on side poses. That avoided
+    rectangular paste-back artifacts, but it also created the exact symptom users see
+    as "original face returning" or an original/replacement mix. The new compositor
+    keeps replacement opacity high and changes the *mask shape*, not the identity
+    strength, as pose changes. When 106-point landmarks are available, their convex
+    hull follows an asymmetric/profile face much better than a centered ellipse.
+    """
+    if res is None or orig is None or face is None:
+        return res
+    if res.shape[:2] != orig.shape[:2]:
+        return orig.copy()
+    try:
+        H, W = orig.shape[:2]
+        x1, y1, x2, y2 = [int(v) for v in face.bbox]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(W, x2), min(H, y2)
+        bw, bh = x2 - x1, y2 - y1
+        if bw < 12 or bh < 12:
+            return orig.copy()
+
+        # A tight ROI prevents hair/background from being replaced.
+        rx1 = max(0, int(x1 - bw * 0.10))
+        ry1 = max(0, int(y1 - bh * 0.08))
+        rx2 = min(W, int(x2 + bw * 0.10))
+        ry2 = min(H, int(y2 + bh * 0.10))
+        rw, rh = rx2 - rx1, ry2 - ry1
+        if rw < 10 or rh < 10:
+            return orig.copy()
+
+        mask = np.zeros((rh, rw), np.uint8)
+        lmk = getattr(face, "landmark_2d_106", None)
+        used_landmarks = False
+        if lmk is not None:
+            try:
+                pts = np.asarray(lmk, dtype=np.float32).reshape(-1, 2)
+                pts[:, 0] -= rx1
+                pts[:, 1] -= ry1
+                valid = (pts[:, 0] >= -2) & (pts[:, 0] <= rw + 2) & (pts[:, 1] >= -2) & (pts[:, 1] <= rh + 2)
+                pts = pts[valid]
+                if len(pts) >= 8:
+                    hull = cv2.convexHull(np.round(pts).astype(np.int32))
+                    cv2.fillConvexPoly(mask, hull, 255)
+                    used_landmarks = True
+            except Exception:
+                used_landmarks = False
+
+        if not used_landmarks:
+            cx, cy = rw // 2, rh // 2
+            ax = max(5, int(rw * 0.40))
+            ay = max(7, int(rh * 0.45))
+            cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 255, -1)
+
+        # A very small dilation closes tiny gaps around profile contours without
+        # bringing the old rectangular paste-back edge back.
+        dk = max(1, int(min(rw, rh) * 0.018))
+        if dk > 0:
+            kernel = np.ones((dk * 2 + 1, dk * 2 + 1), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=1)
+
+        fk = max(5, (int(min(rw, rh) * 0.07) | 1))
+        if fk % 2 == 0:
+            fk += 1
+        mask = cv2.GaussianBlur(mask, (fk, fk), 0).astype(np.float32) / 255.0
+
+        # v11.2.1 SolidFace: pose changes mask geometry only — replacement stays
+        # fully opaque when gates say YES (no 0.94 soft pose fade).
+        final_alpha = float(np.clip(alpha, 0.0, 1.0))
+        m = (mask * final_alpha)[..., None]
+
+        a = res[ry1:ry2, rx1:rx2].astype(np.float32)
+        b = orig[ry1:ry2, rx1:rx2].astype(np.float32)
+        out = orig.copy()
+        out[ry1:ry2, rx1:rx2] = (a * m + b * (1.0 - m)).astype(np.uint8)
+        return out
+    except Exception:
+        return orig.copy()
+
+_CM_STRENGTH = {"Fast": 0.70, "Balanced": 0.85, "Optimized": 0.90, "Best": 1.00, "Ultra": 1.00}
+
+
+def _swap_one(work, orig, face, src_face, quality, alpha=1.0, *,
+              rivals=None, frame_ord=0, post=None):
+    """Swap and composite in ArcFace-aligned space. Returns (image, cached).
+
+    ``cached`` reports whether the aligned crop was stored on the track, i.e.
+    whether later frames can reuse it instead of falling back to the original.
+
+
+    Everything — the mask, the colour statistics, the temporal EMAs — is built
+    inside the 128x128 aligned crop that inswapper produces internally. That
+    crop is pose-normalised by construction, so the mask has identical geometry
+    whether the head is frontal or rolled 40 degrees, and colour statistics can
+    never see hair, neck or background.
+
+    That single change removes the two defects that image-space compositing
+    kept reintroducing: the brown patch (bbox-wide colour stats contaminated by
+    the background on a profile turn) and the shiny/rectangular patch (an
+    axis-aligned or upright-elliptical mask over a rolled head).
+
+    If the installed inswapper build will not return its affine matrix, we fall
+    back to the legacy image-space path so the app still works.
+    """
+    if face is None or src_face is None:
+        return work, False
+
+    comp = _compositor()
+    track = getattr(face, "_track", None)
+    guard = float(getattr(face, "_occlusion_guard", 0.0) or 0.0)
+    strength = _CM_STRENGTH.get(str(quality), 1.0)
+
+    if comp is not None:
+        try:
+            out, ok = comp.run(
+                work, orig, face, src_face,
+                track=track, alpha=float(alpha),
+                colour_strength=strength, occlusion_guard=guard,
+                rivals=rivals, frame_ord=int(frame_ord), post=post,
+            )
+            if ok:
+                return out, True
+        except Exception as e:
+            logging.debug("aligned compositor failed, falling back: %s", e)
+
+    return _swap_one_legacy(work, orig, face, src_face, quality, alpha=alpha), False
+
+
+def _reuse_one(work, orig, rec, quality, *, rivals=None, cached=None):
+    """Composite an already-computed aligned swap onto THIS frame.
+
+    Called for every output frame the swap network did not run on. Geometry,
+    mask, background and colour match all come from the current frame; only
+    the (expensive) aligned swap texture is reused.
+    """
+    comp = _compositor()
+    if comp is None or rec is None:
+        return work, False
+    track = rec.get("track")
+    if track is None:
+        return work, False
+    if cached is not None:
+        track.fake, track.fake_corr, track.fake_size = cached[0], cached[1], int(cached[0].shape[0])
+    if track.fake is None:
+        return work, False
+    face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], None, 0.5)
+    face._track = track
+    try:
+        return comp.reuse(
+            work, orig, rec["kps"], face,
+            track=track, alpha=float(rec["alpha"]),
+            colour_strength=_CM_STRENGTH.get(str(quality), 1.0),
+            occlusion_guard=float(rec.get("guard", 0.0) or 0.0),
+            rivals=rivals,
+        )
+    except Exception as e:
+        logging.debug("aligned reuse failed: %s", e)
+        return work, False
+
+
+def _swap_one_legacy(work, orig, face, src_face, quality, alpha=1.0):
+    """Image-space fallback for inswapper builds without an exposed affine."""
+    if _sw is None:
+        raise RuntimeError("the swapper model is not loaded")
+    try:
+        raw = _sw.get(work, face, src_face, paste_back=True)
+    except Exception as e:
+        # Returning the untouched frame on a bare except is what let a broken
+        # model look like a working one for a whole video.
+        logging.error("legacy swap failed: %s", e)
+        return work
+    if raw is None:
+        logging.error("legacy swap returned nothing for this face")
+        return work
+
+    res = raw
+    try:
+        x1, y1, x2, y2 = [max(0, int(v)) for v in face.bbox]
+        x2, y2 = min(orig.shape[1], x2), min(orig.shape[0], y2)
+        if x2 > x1 and y2 > y1:
+            roi0 = orig[y1:y2, x1:x2]
+            if float(np.mean(roi0)) >= 55 and float(np.std(roi0)) >= 12:
+                res = _color_match_fast(res, orig, face.bbox)
+    except Exception:
+        pass
+
+    # v11.2.1 SolidFace: full-strength paste for all qualities (was Fast 0.92…).
+    quality_alpha = {
+        "Fast": 1.00, "Balanced": 1.00, "Optimized": 1.00, "Best": 1.00, "Ultra": 1.00,
+    }.get(str(quality), 1.0)
+    return _profile_safe_composite(res, orig, face,
+                                   alpha=quality_alpha * float(alpha))
+
+def _xyxy(face):
+    b = np.asarray(getattr(face, "bbox", [0, 0, 1, 1]), dtype=np.float32).reshape(-1)
+    if b.size < 4:
+        return 0.0, 0.0, 1.0, 1.0
+    return float(b[0]), float(b[1]), float(b[2]), float(b[3])
+
+
+def _to_bgr(img):
+    got = _as_bgr_image(img)
+    if got is not None:
+        return got
+    arr = np.asarray(img)
+    return cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR)
+
+
+def _sort_faces_left(faces):
+    return sorted(_as_face_list(faces), key=lambda f: _xyxy(f)[0])
+
+
+def _keep_n_faces(faces, tracker, n, refs=None):
+    """Keep N faces: picked identities first, then overlap, then area."""
+    faces = _as_face_list(faces)
+    n = int(n or 0)
+    if n <= 0 or len(faces) <= n:
+        return faces
+    tracks = list(getattr(tracker, "tracks", {}).values()) if tracker is not None else []
+    ref_list = []
+    try:
+        for r in (refs.values() if isinstance(refs, dict) else (refs or [])):
+            if r is not None:
+                ref_list.append(np.asarray(r, np.float32).reshape(-1))
+    except Exception:
+        ref_list = []
+    scored = []
+    for f in faces:
+        ov = 0.0
+        for t in tracks:
+            anc = getattr(t, "last_hit_bbox", None)
+            if anc is None:
+                anc = getattr(t, "match_bbox", None)
+            if anc is None:
+                continue
+            try:
+                ov = max(ov, _bbox_iou(f.bbox, anc))
+            except Exception:
+                pass
+        idsim = -1.0
+        emb = getattr(f, "normed_embedding", None)
+        if emb is not None and ref_list:
+            try:
+                ev = np.asarray(emb, np.float32).reshape(-1)
+                for rv in ref_list:
+                    kk = min(ev.size, rv.size)
+                    if kk >= 8:
+                        idsim = max(idsim, float(np.dot(ev[:kk], rv[:kk])))
+            except Exception:
+                idsim = -1.0
+        picked = 1 if idsim >= 0.32 else 0
+        scored.append((picked, idsim, ov, _area(f), f))
+    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
+    return [s[4] for s in scored[:n]]
+
+def _as_bgr_image(im):
+    """Accept numpy RGB, BGR, file path, Gradio FileData, or bytes."""
+    if im is None:
+        return None
+    if isinstance(im, dict):
+        p = im.get("path") or im.get("name") or im.get("orig_name")
+        return _as_bgr_image(p) if p else None
+    if isinstance(im, (list, tuple)):
+        return _as_bgr_image(im[0]) if im else None
+    if hasattr(im, "name") and not isinstance(im, (str, bytes, bytearray, np.ndarray)):
+        return _as_bgr_image(getattr(im, "name", None))
+    if isinstance(im, (bytes, bytearray)):
+        arr = np.frombuffer(im, dtype=np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if isinstance(im, str):
+        return cv2.imread(im) if im and os.path.isfile(im) else None
+    try:
+        arr = np.asarray(im)
+    except Exception:
+        return None
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return None
+    arr = arr[:, :, :3]
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+def _area(f):
+    x1, y1, x2, y2 = _xyxy(f)
+    return max(0.0, (x2 - x1) * (y2 - y1))
+
+def _build_sources(imgs):
+    smap = {}
+    for i,im in enumerate(imgs):
+        if im is None: continue
+        f = _cached_source_face(_to_bgr(im))
+        if f is not None:
+            smap[i] = f
+    return smap
+
+def _parse_face_mode(mode):
+    if mode is None: return 99
+    s = str(mode).lower()
+    if s.startswith("1") or "1 face" in s: return 1
+    if s.startswith("2") or "2 face" in s: return 2
+    return 99
+
+
+def _limit_smap(smap, max_faces):
+    if not smap or max_faces >= 99: return smap
+    out = {}
+    for i in range(4):
+        if i in smap and len(out) < max_faces:
+            out[i] = smap[i]
+    if len(out) < max_faces:
+        for k, v in smap.items():
+            if k not in out and len(out) < max_faces:
+                out[k] = v
+    return out
+
+
+def _frontal_score(face):
+    kps = getattr(face, "kps", None)
+    if kps is None or len(kps) < 5:
+        return 0.5
+    try:
+        le, re, nose = kps[0], kps[1], kps[2]
+        eye_dist = float(np.linalg.norm(le - re)) + 1e-6
+        mid = (le + re) * 0.5
+        offset = abs(float(nose[0] - mid[0])) / eye_dist
+        return float(np.clip(1.0 - offset * 1.8, 0.0, 1.0))
+    except Exception:
+        return 0.5
+
+
+def _pitch_score(face):
+    """0..1. Low when the head is pitched down / away so the detector box
+    is hair or skull, not a paintable face. Horizontal-only frontal_score
+    cannot see this — that was the looking-down failure mode."""
+    kps = getattr(face, "kps", None)
+    if kps is None or len(kps) < 3:
+        return 0.4
+    try:
+        le, re, nose = np.asarray(kps[0], np.float32), np.asarray(kps[1], np.float32), np.asarray(kps[2], np.float32)
+        eye_dist = float(np.linalg.norm(le - re)) + 1e-6
+        mid = (le + re) * 0.5
+        vert = float(nose[1] - mid[1]) / eye_dist
+        # Typical frontal: nose sits ~0.25-0.85 eye-distances below the eyes.
+        # Looking down / back-of-head: nose collapses toward or above the eyes.
+        if vert < 0.10:
+            return 0.08
+        if vert < 0.18:
+            return 0.28
+        if vert > 1.55:
+            return 0.30
+        return 1.0
+    except Exception:
+        return 0.4
+
+
+def _bbox_drift_too_far(curr_bb, anchor_bb, limit=0.58) -> bool:
+    """True when the predicted box has slid off the last real face
+    (shoulder / arm / torso). Lying-down faces that stay on the head
+    keep a small drift and must still swap."""
+    if curr_bb is None or anchor_bb is None:
+        return False
+    try:
+        c = np.asarray(curr_bb, np.float32)
+        a = np.asarray(anchor_bb, np.float32)
+        ch = max(8.0, float(a[3] - a[1]))
+        cw = max(8.0, float(a[2] - a[0]))
+        dx = abs(((c[0] + c[2]) * 0.5) - ((a[0] + a[2]) * 0.5)) / cw
+        dy = abs(((c[1] + c[3]) * 0.5) - ((a[1] + a[3]) * 0.5)) / ch
+        return (dx * dx + dy * dy) ** 0.5 > limit
+    except Exception:
+        return False
+
+
+def _predicted_miss_budget() -> int:
+    """Paste budget for predicted faces.
+
+    v11.1.9 ReentrySafe capped this at a flat 10 frames regardless of
+    detector cadence, reasoning "prefer skip over arm/body paste after
+    exit." Measured against real footage (v11.2.2): that budget is spent
+    in well under one detector cycle on Fast/Optimized cadence (SKIP_N of
+    5-6 frames between detector calls, and ``missed`` advances by the
+    frames actually elapsed, not by calls) - two ordinary, non-exit
+    detector misses in a row exhausts it, dropping the paste to the
+    original face for the rest of the clip until the next clean hit. That
+    is what "arm/body paste after exit" degenerated into: not a rare edge
+    case, ordinary cadence gaps.
+    The genuine "face actually left the frame" case this budget was meant
+    to guard is now caught directly by TrackState._paste_frozen (geometric
+    containment against the real frame bounds, set in predict()) - that
+    check runs BEFORE this budget is ever consulted (_face_swap_allowed
+    returns False immediately while frozen), independent of frame count.
+    So this can trust trk_max_missed again without reopening the arm-paste
+    bug the flat cap was reacting to.
+    """
+    try:
+        return int(_E._P.get("trk_max_missed", 24) or 24)
+    except Exception:
+        try:
+            from config import ENGINE_TUNABLES as _ET
+            return int((_ET or {}).get("trk_max_missed", 24) or 24)
+        except Exception:
+            return 24
+
+
+def _kps_registration(kps, bbox):
+    """Where the eye/nose triangle sits INSIDE its own detection box, in
+    units of that box's own width and height.
+
+    This is the discriminator the motion veto was missing. Everything else
+    the veto has to work with - position, displacement, velocity - moves when
+    the subject moves, so genuine fast motion and a landmark misread look
+    alike to it (recorded at the veto site, and the reason v11.2.4's IoU
+    bypass was reached for instead). Registration does not: translating,
+    tracking or zooming a real head moves the box and the landmarks TOGETHER,
+    leaving this quantity unchanged, while a detector whose landmark
+    regression has locked onto hair, an ear or the skull moves the landmarks
+    WITHIN a box that stays on the head. So a jump here is evidence about the
+    read itself rather than about the motion, and it stays valid at any
+    speed.
+
+    Deliberately relative, never absolute: it is compared against the same
+    track's last accepted detection, not against an anatomical ideal. What
+    counts as centred depends on the head pose (a hard yaw crowds the visible
+    eye and nose toward the front of a box that still contains the back of
+    the head) and on the detector's own box convention, neither of which this
+    module should be asserting. A pose change moves it gradually; a misread
+    jumps it.
+
+    Eyes and nose only, for the same reason the veto's own deviation term
+    uses them - the mouth corners move on every talking frame.
+    """
+    try:
+        k = np.asarray(kps, np.float32)
+        b = np.asarray(bbox, np.float32).reshape(4)
+        if k.shape[0] < 3:
+            return None
+        bw = max(1.0, float(b[2]) - float(b[0]))
+        bh = max(1.0, float(b[3]) - float(b[1]))
+        c = k[:3].mean(axis=0)
+        return np.asarray([
+            (float(c[0]) - 0.5 * (float(b[0]) + float(b[2]))) / bw,
+            (float(c[1]) - 0.5 * (float(b[1]) + float(b[3]))) / bh,
+        ], np.float32)
+    except Exception:
+        return None
+
+
+# How far the registration above may jump between two accepted detections of
+# the same identity before the read is treated as a landmark misread rather
+# than as motion. In box-widths, so it is resolution- and zoom-independent.
+# t_hair_confusion's injected read scores 0.47. A wide-open mouth
+# lengthens the box downward and shifts the eye/nose centre by about
+# 0.25 of the box, which 0.22 was rejecting as "not the same face".
+_REG_JUMP_TOL = 0.34
+
+
+def _face_chroma(frame_bgr, kps, bbox):
+    """Median chroma of the pixels the detector says the FACE is at.
+
+    Samples small patches centred on the five landmarks rather than averaging
+    the whole detection box. The box always contains background, hair and
+    neck, and their proportions swing with pose and framing, so a box-wide
+    average mostly measures the shot. The landmarks are by definition the
+    places the detector believes the eyes, nose and mouth to be - so if a
+    hand, the back of the head or a shoulder is actually there instead, that
+    is precisely what gets sampled. That is the whole point.
+
+    YCrCb, chroma only: luma carries the lighting, which legitimately swings
+    frame to frame; Cr/Cb carry the colour, which does not.
+    """
+    try:
+        if frame_bgr is None or kps is None:
+            return None
+        k = np.asarray(kps, np.float32)
+        if k.ndim != 2 or k.shape[0] < 3:
+            return None
+        b = np.asarray(bbox, np.float32).reshape(4)
+        bw = max(1.0, float(b[2]) - float(b[0]))
+        bh = max(1.0, float(b[3]) - float(b[1]))
+        r = max(1, int(round(0.06 * min(bw, bh))))
+        ycc = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
+        fh, fw = frame_bgr.shape[:2]
+        crs, cbs = [], []
+        for (px, py) in k[:5]:
+            x0, x1 = max(0, int(px) - r), min(fw, int(px) + r + 1)
+            y0, y1 = max(0, int(py) - r), min(fh, int(py) + r + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            patch = ycc[y0:y1, x0:x1]
+            crs.append(float(np.median(patch[:, :, 1])))
+            cbs.append(float(np.median(patch[:, :, 2])))
+        if len(crs) < 3:
+            return None
+        return np.asarray([float(np.median(crs)), float(np.median(cbs))], np.float32)
+    except Exception:
+        return None
+
+
+# How far the sampled chroma may sit from the identity's remembered face
+# chroma before the content is judged to be something other than that face.
+# Measured on t_occlusion, whose occluder separates from the face by 98.4
+# chroma units and holds that separation exactly across the whole occluded
+# window. Ordinary lighting drift on real skin moves Cr/Cb by roughly 10-20,
+# so 30 sits with margin on both sides rather than between two numbers that
+# nearly touch.
+_CHROMA_TOL = 30.0
+# Consecutive rejections tolerated before the gate starts widening, and how
+# fast it widens per rejection after that.
+#
+# Without this the gate is a one-way door. It learns its reference only from
+# frames it ACCEPTED, so once it starts rejecting, the reference freezes while
+# the face keeps moving away from it - and nothing can ever be accepted again.
+# Measured: a step change in lighting at the half-way point (a scene cut, the
+# subject stepping into shadow, auto-exposure re-adjusting) stopped the swap
+# at frame 121 of 240 and it never came back, with the reference frozen and
+# the distance pinned at 79 against a tolerance of 30.
+#
+# Patience is set above the longest run of rejections a genuine misread
+# produces in these fixtures: the hair-confusion window is 60 frames, about 6
+# detector calls at the Optimized cadence, so 8 leaves margin before any
+# widening starts. Beyond that the tolerance grows until the gate can see the
+# face again, because a mismatch that outlasts every plausible misread is a
+# lighting change, not an impostor.
+_CHROMA_PATIENCE = 8
+_CHROMA_RELAX = 1.0
+_CHROMA_TOL_MAX = 6.0
+# Frames of agreeing evidence before the reference is trusted enough to
+# suppress anything. Until then the gate passes everything and only learns.
+_CHROMA_WARMUP = 3
+
+
+def _content_visible(frame_bgr, f, tr):
+    """Is this identity's actual face present where the detector says it is?
+
+    Returns (verdict, distance). The verdict is True whenever the question
+    cannot be answered - no frame, no landmarks, no reference learned yet.
+    That is deliberate and is the opposite of _kps_reliable's fail-closed
+    stance: _kps_reliable is handed everything it needs and a failure there
+    means the read is degenerate, whereas this gate is frequently asked
+    before it has any reference at all, and a missing reference is not
+    evidence of an occluder. Suppressing on absence of evidence would blank
+    the face at the start of every clip.
+
+    This is the check the pipeline has never actually had. Every existing
+    gate - det_score, _kps_reliable, _frontal_score, _pitch_score,
+    _same_extent, _kps_registration, the motion budget - reasons about the
+    detector's OUTPUT: the box, the landmarks, the score, where they sit and
+    how they move. None of them look at the pixels underneath. A detector
+    that reports a confident, well-posed, correctly-sized, correctly-placed,
+    self-consistent box over the back of someone's head passes every one of
+    them, which is exactly what "a face pasted on the hair when the subject's
+    face is not visible" is.
+    """
+    try:
+        if tr is None:
+            return True, 0.0
+        cur = _face_chroma(frame_bgr, getattr(f, "kps", None), f.bbox)
+        if cur is None:
+            return True, 0.0
+        ref = getattr(tr, "skin_ref", None)
+        if ref is None or int(getattr(tr, "skin_hits", 0) or 0) < _CHROMA_WARMUP:
+            return True, 0.0
+        _d = float(np.linalg.norm(cur - np.asarray(ref, np.float32)))
+        # Widen once the gate has been rejecting for longer than any genuine
+        # misread lasts. Uncertainty about our own reference has to relax this
+        # gate, not tighten it - the same lesson as the motion veto's drift
+        # term, arrived at the same way.
+        _m = int(getattr(tr, "skin_miss", 0) or 0)
+        _tol = _CHROMA_TOL * min(_CHROMA_TOL_MAX,
+                                 1.0 + _CHROMA_RELAX * max(0, _m - _CHROMA_PATIENCE))
+        return (_d <= _tol), _d
+    except Exception:
+        return True, 0.0
+
+
+def _learn_face_chroma(frame_bgr, f, tr):
+    """Fold an accepted, visible frame into the identity's chroma reference.
+
+    Only ever called for a detection that passed the gate, so an occluder can
+    never teach the reference to accept itself. The EMA is slow enough that a
+    single wrong frame cannot move it far, and fast enough to follow a real
+    lighting change across a few seconds.
+    """
+    try:
+        if tr is None:
+            return
+        cur = _face_chroma(frame_bgr, getattr(f, "kps", None), f.bbox)
+        if cur is None:
+            return
+        ref = getattr(tr, "skin_ref", None)
+        tr.skin_ref = cur if ref is None else (
+            np.asarray(ref, np.float32) * 0.88 + cur * 0.12).astype(np.float32)
+        tr.skin_hits = int(getattr(tr, "skin_hits", 0) or 0) + 1
+    except Exception:
+        pass
+
+
+# Raised-cosine ramp bounds for the four pose signals, each bracketing the
+# hard threshold it replaces. Calibrated so the graded gate reproduces the
+# hard one EXACTLY at the 0.5 accept level: swept over 5940 poses (vertical
+# pitch -0.20..0.69 x jaw drop 0..0.50 x roll 0/+-30/+-45/+-60/+-90) the two
+# disagree on zero of them. The ramps only change what happens BETWEEN the
+# verdicts, which is the whole point.
+#
+# Each pair is (reject-end, accept-end); when the reject end is the larger
+# number the ramp falls instead of rising, so the same helper serves signals
+# in both directions.
+_POSE_VERT = (0.06, 0.18)   # roll-corrected nose-below-eyes, hard veto at 0.12
+_POSE_EYE = (0.09, 0.15)    # eye spacing vs box, hard veto at 0.12
+_POSE_T = (0.72, 0.58)      # eye line down the box, hard veto at 0.65
+_POSE_FIT = (0.44, 0.20)    # landmark fit error, hard veto at 0.32/0.20
+# Accept a pose at 0.5 - by construction the old boundary. Once a pose HAS
+# been accepted, keep it down to 0.10.
+#
+# 0.10 is not a guess: it is what a head at vert=0.085 scores, and 0.085 is
+# about two standard deviations of ordinary detector landmark noise below the
+# 0.12 veto. The band therefore covers the noise without reaching anywhere
+# near the thing the gate exists to reject - the hair/skull confusion
+# signature scores 0.000, not 0.09, because its nose sits AT or ABOVE the eye
+# line rather than just above the threshold.
+_KPS_ACCEPT = 0.50
+_KPS_KEEP = 0.10
+
+
+def _pose_ramp(x, lo, hi):
+    """Raised cosine from 0 at `lo` to 1 at `hi`, in either direction.
+
+    Continuous in value AND slope at both ends, which a linear ramp is not.
+    That matters here: the slope discontinuity of a linear ramp is a smaller
+    version of the same knife edge this replaces, and it lands at exactly the
+    pose where reads cluster.
+    """
+    if hi > lo:
+        if x <= lo:
+            return 0.0
+        if x >= hi:
+            return 1.0
+        t = (x - lo) / (hi - lo)
+    else:
+        if x >= lo:
+            return 0.0
+        if x <= hi:
+            return 1.0
+        t = (lo - x) / (lo - hi)
+    return 0.5 - 0.5 * float(np.cos(np.pi * t))
+
+
+def _pose_confidence(f) -> float:
+    """How much this read looks like a paintable face, 0..1.
+
+    _kps_reliable's four checks were four independent HARD vetoes, and a head
+    that merely dwells near one of them - a mild chin-down pose, which is
+    common and entirely legitimate - has its verdict decided by detector
+    noise. Measured on a 240-frame clip holding such a pose: the verdict
+    flipped 48 times at 1.2px of landmark noise, and 66 times at 2.5px. A
+    rejected read is DISCARDED rather than downweighted, so the geometry it
+    would have carried is lost with it.
+
+    Be clear about what that is worth today: it is NOT currently visible.
+    Driven through the whole pipeline, every one of those clips still paints
+    240/240 frames with 0 presence transitions and 1.8px of placement error,
+    because the "keep the candidate that still overlaps the live track"
+    fallback downstream already catches every rejection before it reaches the
+    screen. This is a gate that flickers into a net. What changes here is the
+    gate, not the picture.
+
+    Grading the same four signals says the SAME thing about every case that
+    matters - verified, not asserted: over 5940 swept poses (pitch x jaw drop
+    x roll) and over all 1800 live gate calls in the two-face contact
+    fixture, the graded verdict at 0.5 and the four hard vetoes disagree on
+    zero. A legitimate pose scores 1.000, the hair/skull confusion signature
+    scores 0.000, and only the genuinely marginal band gets an answer that
+    moves as the pose moves instead of jumping as the noise jumps.
+
+    Returns 0.0 for a read that cannot be assessed at all: missing landmarks
+    or a fit that could not be attempted. That preserves _kps_reliable's
+    fail-CLOSED stance, which is deliberate and is explained there.
+    """
+    kps = getattr(f, "kps", None)
+    if kps is None or len(kps) < 5:
+        return 0.0
+    try:
+        le, re = np.asarray(kps[0], np.float32), np.asarray(kps[1], np.float32)
+        nose = np.asarray(kps[2], np.float32)
+        eye_vec = re - le
+        eye_dist = float(np.linalg.norm(eye_vec)) + 1e-6
+
+        # Roll-corrected vertical pitch signal. See _kps_reliable's docstring
+        # for why the image y-axis will not do - at a genuine lying-down pose
+        # the face's own vertical axis IS the image's horizontal axis.
+        roll = float(np.arctan2(eye_vec[1], eye_vec[0]))
+        mid = (le + re) * 0.5
+        rel = nose - mid
+        c, sn = float(np.cos(-roll)), float(np.sin(-roll))
+        vert = (rel[0] * sn + rel[1] * c) / eye_dist
+        score = _pose_ramp(vert, *_POSE_VERT)
+        if score <= 0.0:
+            return 0.0
+
+        bb = getattr(f, "bbox", None)
+        if bb is not None:
+            x1, y1, x2, y2 = [float(v) for v in np.asarray(bb, np.float32).reshape(4)]
+            bw = max(1.0, x2 - x1)
+            bh = max(1.0, y2 - y1)
+            # Features tiny vs box -> hair clump / oversized scalp box.
+            score *= _pose_ramp(eye_dist / min(bw, bh), *_POSE_EYE)
+            if score <= 0.0:
+                return 0.0
+            # Face-down unit vector in image coords (nose direction from eyes),
+            # so the eye line's position down the box is measured along the
+            # FACE's axis rather than the image's.
+            down = np.asarray([sn, c], np.float32)
+            down = down / (float(np.linalg.norm(down)) + 1e-6)
+            corners = np.asarray(
+                [[x1, y1], [x2, y1], [x1, y2], [x2, y2]], np.float32
+            )
+            projs = corners @ down
+            p_min, p_max = float(np.min(projs)), float(np.max(projs))
+            # t=0 at face-top (forehead end of box), t=1 at face-bottom (chin).
+            t = (float(np.dot(mid, down)) - p_min) / (p_max - p_min + 1e-6)
+            score *= _pose_ramp(t, *_POSE_T)
+            if score <= 0.0:
+                return 0.0
+
+        fit = _E.landmark_fit_error(kps, 128)
+        # None means the fit could not even be attempted (a degenerate point
+        # set) - itself evidence of an unreliable read, not a reason to pass.
+        if fit is None:
+            return 0.0
+        # Multiplying rather than vetoing separately is what recovers the old
+        # rule's COUPLING between fit error and pitch ("fit above 0.20 needs
+        # vert at least 0.16") without its step: a read that is marginal on
+        # both axes now fails on the product, and one that is marginal on only
+        # one still clears 0.5.
+        return float(score * _pose_ramp(float(fit), *_POSE_FIT))
+    except Exception:
+        return 0.0
+
+
+def _kps_reliable(f, tr=None) -> bool:
+    """False when the 5 landmarks do not describe a paintable face.
+
+    v11.1.10 HairGate: FAIL CLOSED when kps is missing (was fail-open
+    ``return True`` — that let hair/skull detections with no usable landmarks
+    sail into paste). Also rejects classic InsightFace motion-blur hair blobs:
+    eye midline too low in the bbox along the face up-axis, or eye spacing
+    tiny vs the box.
+
+    This is the gate _pitch_score()'s own docstring promises ("not a
+    paintable face") but that was never actually wired into a decision to
+    skip painting - only into the occlusion-guard's mask trimming, which
+    softens edges but cannot stop a misaligned paste. A live detection with
+    det_score above the floor and 5 keypoints present sailed straight through
+    _face_swap_allowed() regardless of what those keypoints described.
+
+    Two independent signals, because either alone can be dodged:
+
+      * _pitch_score()'s lowest bucket (<=0.10) is its own documented
+        "looking down/away, box is hair or skull" case;
+      * landmark_fit_error() is a direct geometric consistency check (do the
+        5 points admit ANY single rigid pose), not a heuristic on where
+        individual points sit, so it also catches configurations that do not
+        trip the pitch/frontal thresholds.
+
+    Thresholds were set with margin below the legitimate ceiling: swept over
+    profile turns to yaw 0.9 and lying-down poses to +-95 degrees roll (every
+    roll tested, since the vertical check below is roll-corrected), the
+    worst legitimate case measured roll-corrected-vert=0.357 and
+    fit_error=0.103. A synthetic "looking down" detector-confusion signature -
+    the nose collapsed to/above the eye line, which is the actual failure
+    reported: a rotated, misplaced patch specifically when the subject looks
+    away - scored roll-corrected-vert<=0 and fit_error 0.47-0.59 at every
+    severity and every roll tested, comfortably on the reject side of both
+    thresholds (0.12 and 0.20 respectively).
+
+    Fails toward REJECT on error, not toward "trust it": unlike most gates in
+    this module (which fail open, because their failure mode is an
+    unnecessary hold), a computation error here has the opposite failure
+    mode - risking the exact visible corruption this function exists to
+    prevent. A spurious hold is the already-accepted, designed-for fallback
+    everywhere else in this engine; a bad paste is not.
+    
+
+    v11.2.10: the four hard vetoes described above are now the 0.5 level of a
+    graded score - see _pose_confidence, which documents why and carries the
+    calibration showing the two agree on every one of 5940 swept poses. What
+    is new is the second threshold. Given a track that was painting a good
+    pose a moment ago, this keeps painting down to 0.10 instead of cutting at
+    0.5, because "is this a face" and "was this a face one frame ago, and has
+    it only drifted a little" are different questions and only the second one
+    has an answer that noise cannot flip. Callers with no track get the plain
+    0.5 test, which is exactly the behaviour above.
+    """
+    conf = _pose_confidence(f)
+    if conf >= _KPS_ACCEPT:
+        return True
+    if tr is not None and bool(getattr(tr, "pose_ok", False)):
+        return conf >= _KPS_KEEP
+    return False
+
+
+def _face_swap_allowed(f) -> bool:
+    """Balanced gate.
+
+    Live detections (including lying-down / 3-quarter) are trusted.
+    Predicted / carried boxes are allowed through the engine miss budget so
+    profile turns do not flash the original face. Prefer alpha fade in work()
+    over hard reject until the miss budget is exhausted or geometry drifts
+    far off the last real face (arm-paste failure).
+    """
+    if f is None or getattr(f, "bbox", None) is None:
+        return False
+    predicted = bool(getattr(f, "predicted", False))
+    tr = getattr(f, "_track", None)
+    missed = int(getattr(tr, "missed", 0) or 0) if tr is not None else (4 if predicted else 0)
+    det = _fnum(getattr(f, "det_score", 0.5), 0.5)
+
+    # v11.1.10 HairGate: while paste-frozen (exit OR reacquire confirmation),
+    # disallow predicted paste. A LIVE detection that still overlaps the last
+    # real head is the face coming back — paint it now, do not wait for a
+    # second confirm hit (that wait is the "original face for a few seconds").
+    if tr is not None and getattr(tr, "_paste_frozen", False):
+        if predicted:
+            return False
+        try:
+            anchor = getattr(tr, "last_hit_bbox", None)
+            if anchor is None:
+                anchor = getattr(tr, "obs_bbox", None)
+            if anchor is not None and _bbox_iou(f.bbox, anchor) >= 0.15:
+                return det >= 0.18
+        except Exception:
+            pass
+        # Came back in a different place. A solid live face is painted.
+        # A predicted box is not.
+        if (not predicted) and det >= 0.32:
+            return True
+        return False
+
+    if not predicted:
+        # Real detector hit. Keep lying-down, talking, and soft-profile faces.
+        if det < 0.18:
+            return False
+        # `tr` here is the bound track, so this site gets the second
+        # threshold too: a head already being painted is not dropped for a
+        # marginal pose.
+        if not _kps_reliable(f, tr):
+            # First lock of a 2nd person (often the man, weaker landmarks):
+            # v11.2.18 painted this instead of waiting for a perfect pose.
+            if tr is not None and not bool(getattr(tr, "established", False)) and det >= 0.22:
+                return True
+            #
+            # Overlap alone is NOT enough to make that call. Covering the
+            # lower face with a hand leaves the box in almost the same place
+            # while collapsing its extent, so an overlap-only rescue paints
+            # the swap straight onto the occluder - measured on this repo's
+            # own t_occlusion fixture, a sustained occlusion went from 90/90
+            # frames correctly suppressed to 0/90. Requiring the candidate to
+            # still be about the same SIZE as the identity's last good box
+            # separates the two: a talking or blurred face keeps its extent,
+            # a mostly-covered one does not.
+            try:
+                anchor = None
+                if tr is not None:
+                    anchor = getattr(tr, "last_hit_bbox", None)
+                    if anchor is None:
+                        anchor = getattr(tr, "obs_bbox", None)
+                if (anchor is not None and _bbox_iou(f.bbox, anchor) >= 0.22
+                        and _same_extent(f.bbox, anchor)):
+                    return True
+            except Exception:
+                pass
+            return False
+        # The read is self-consistent, but self-consistency is not visibility:
+        # keypoints derived from a box collapsed by an occluder are perfectly
+        # consistent with each other and still describe a face that is mostly
+        # not there. If this identity has a healthy anchor and the box has
+        # suddenly lost most of its height against it, hold the last good
+        # geometry instead of painting onto whatever is covering the face.
+        try:
+            _anchor_ok = None
+            if tr is not None:
+                _anchor_ok = getattr(tr, "last_hit_bbox", None)
+                if _anchor_ok is None:
+                    _anchor_ok = getattr(tr, "obs_bbox", None)
+            if _anchor_ok is not None and not _same_extent(f.bbox, _anchor_ok):
+                return False
+        except Exception:
+            pass
+        return True
+
+    # Predicted (v11.1.9 ReentrySafe): hold briefly through a head turn, but
+    # prefer skip over arm/body paste after exit / long miss. Soft alpha fade
+    # in work() still tapers; hard-drop earlier than Continuum 1.1.8.
+    miss_budget = _predicted_miss_budget()  # min(trk_max_missed, 10)
+    if missed > miss_budget:
+        return False
+    anchor = None
+    if tr is not None:
+        anchor = getattr(tr, "last_hit_bbox", None)
+        if anchor is None:
+            anchor = getattr(tr, "obs_bbox", None)
+    # 0.55 (was 0.72): prefer skip over arm-paste; user confirmed only this bug remains.
+    if _bbox_drift_too_far(getattr(f, "bbox", None), anchor, limit=0.55):
+        return False
+    # A predicted box that has largely left the frame is not a face any more.
+    # 0.45 (was 0.70): a fast move used to dip under 0.70 for one or two
+    # frames and the original face flashed. Only a box that is mostly gone
+    # stops the hold.
+    shape = getattr(f, "_frame_shape", None)
+    if shape is None and tr is not None:
+        wh = getattr(tr, "_frame_wh", None)
+        if wh is not None:
+            shape = (int(wh[1]), int(wh[0]))  # (H, W)
+    if shape is not None and _frame_containment(getattr(f, "bbox", None), shape) < 0.45:
+        return False
+    return True
+
+
+def _render_alpha(f, track):
+    """Composite opacity for one face, smoothed on the track.
+
+    v11.2.1 SolidFace policy (binary paste):
+      gates NO  → caller skips / shows original (unchanged HairGate/ReentrySafe)
+      gates YES → composite at full strength (~1.0), never a soft mix with original
+                  during stable tracking.
+    """
+    target = 1.0
+    predicted = bool(getattr(f, "predicted", False))
+    if predicted and track is not None:
+        missed = int(getattr(track, "missed", 0) or 0)
+        budget = max(8, _predicted_miss_budget())
+        # Only fade in the last 2 frames of the miss budget; floor 0.94 (was 0.70).
+        fade_start = max(0, budget - 2)
+        denom = max(1.0, float(budget - fade_start))
+        target = float(np.clip(1.0 - max(0, missed - fade_start) / denom, 0.94, 1.0))
+    else:
+        # Live detection already passed gates (det << 0.20 never reaches here).
+        target = 1.0
+    # v11.2.1: confirm soft ease / _first_confirm_soft caps removed — full strength.
+    if track is not None:
+        return float(track.smooth_alpha(target))
+    return target
+
+
+def _face_looks_marginal(f) -> bool:
+    """True when a freshly detected face is small, low-confidence, or
+    non-frontal enough that its detected region likely includes some
+    non-face content - a hand or object over part of the face, hair at
+    a steep turn-away angle, etc. Reuses the exact thresholds already
+    tuned for the high-resolution detection probe above rather than
+    inventing new ones, so this doesn't add a second, uncoordinated
+    notion of "marginal" to the codebase.
+    """
+    try:
+        return (
+            _area(f) < 4500.0
+            or min(float(f.bbox[2] - f.bbox[0]), float(f.bbox[3] - f.bbox[1])) < 58.0
+            or _fnum(getattr(f, "det_score", 0.5), 0.5) < 0.28
+            # 0.22 (was 0.38): moderate profile / 3-quarter (0.25–0.38) is
+            # legitimate single-face content; treating it as marginal over-trimmed
+            # via occlusion_guard and looked like flicker. Keep this for severe
+            # edge-on / degenerate detections only.
+            or _frontal_score(f) < 0.22
+            or _pitch_score(f) < 0.28
+        )
+    except Exception:
+        return False
+
+
+def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
+                            dt_frames=1.0):
+    """Associate detections to replacement slots via the v11 MultiFaceTracker.
+
+    Replaces the old greedy slot-by-slot loop. Three properties matter here:
+
+    * assignment is globally optimal, so slot #0 can no longer grab slot #1's
+      face merely because it was iterated first;
+    * an established slot keeps its binding unless a rival is better by a real
+      margin for several consecutive frames, so a 1-3 frame embedding wobble on
+      a profile turn cannot cause a label flip;
+    * while two tracks overlap (a hug or a kiss) embeddings are distrusted
+      entirely and motion decides, because ArcFace is least reliable exactly
+      when two faces are cheek to cheek.
+
+    Each returned face carries the ``_track`` that owns its temporal state, so
+    the compositor can apply that identity's mask and colour EMAs.
+    """
+    if not smap:
+        return []
+    if not isinstance(tracker, _E.MultiFaceTracker):
+        return []
+
+    ref_map = {}
+    for j, src in smap.items():
+        r = refs[j] if refs and j < len(refs) and refs[j] is not None else None
+        # Never fall back to the replacement photo embedding. That vector is
+        # not the person in the video; using it as a match key can bind the
+        # man's slot to the woman (and vice versa) on the first frames.
+        ref_map[j] = r
+
+    # Deferred recognition is paid for HERE, once, on the set that survived
+    # every merge, dedupe and reliability gate - and never on the faces those
+    # gates discarded. The tracker therefore receives exactly the faces it
+    # always did, carrying exactly the embeddings it always did.
+    faces = _as_face_list(faces)
+    try:
+        _embed_faces(faces)
+        # _dedupe_faces ran inside _fa_get without embeddings, where it falls
+        # back to IoU plus a centre-distance test (it is written to degrade
+        # that way). Now that the embeddings exist, run it once more so the
+        # one case the fallback cannot see - two boxes barely overlapping that
+        # are the same person - is still caught.
+        faces = _dedupe_faces(faces)
+    except Exception as e:
+        logging.debug("deferred embedding stage skipped: %s", e)
+
+    assigned = tracker.assign(faces, ref_map, dt_frames=dt_frames)
+
+    # v11.1.9: stamp frame size onto every live track so predict() can freeze
+    # once the bbox leaves the shot.
+    if frame_shape is not None:
+        try:
+            _fh, _fw = int(frame_shape[0]), int(frame_shape[1])
+            for _tr in tracker.tracks.values():
+                if _tr is not None:
+                    _tr._frame_wh = (_fw, _fh)
+        except Exception:
+            pass
+
+    pairs = []
+    for slot in sorted(assigned.keys()):
+        if slot not in smap:
+            continue
+        f = assigned[slot]
+        tr = tracker.tracks.get(slot)
+        try:
+            f._track = tr
+            f._slot = slot
+            if frame_shape is not None:
+                f._frame_shape = (int(frame_shape[0]), int(frame_shape[1]))
+            # Phase 1: Add boundary confidence penalty to occlusion guard
+            is_marginal = _face_looks_marginal(f)
+            boundary_conf = 1.0
+            if HAS_PHASE1 and frame_shape is not None:
+                boundary_conf = validate_detection_confidence(
+                    f.bbox, frame_shape,
+                    getattr(f, "landmark_2d_106", None)
+                )
+            # Occlusion guard for multi-face crossings / frame-boundary clips.
+            # Moderate profile alone must NOT trip the guard on single-face
+            # (that over-trimmed and looked like flicker). is_marginal still
+            # applies when tracks are crossing or multiple slots are live.
+            # n_live used to count tracker.tracks entries, which are created
+            # for every slot up front and are never None - so it was a constant
+            # equal to the slot count, and `multi_or_cross` was simply always
+            # True whenever more than one face was configured. Count tracks
+            # that are actually live.
+            n_live = 0
+            try:
+                n_live = sum(1 for _t in tracker.tracks.values()
+                             if _t is not None and _t.established
+                             and int(getattr(_t, "missed", 0) or 0) <= 2)
+            except Exception:
+                n_live = 0
+            multi_or_cross = bool(tr is not None and tr.crossing) or n_live >= 2
+
+            # Continuous, not boolean. A guard that snaps between 0 and 1
+            # changes the mask silhouette - and therefore the colour statistics
+            # weighted by that mask - in a single frame, so each toggle moved
+            # both the outline and the brightness. TrackState.ramp_occlusion()
+            # slews it instead.
+            want = 0.0
+            if tr is not None and tr.crossing:
+                want = max(want, 1.0)
+            if is_marginal and multi_or_cross:
+                want = max(want, 0.75)
+            if boundary_conf < 0.75:
+                want = max(want, float(np.clip((0.75 - boundary_conf) / 0.35, 0.0, 1.0)))
+            f._occlusion_guard = (tr.ramp_occlusion(want) if tr is not None else want)
+        except Exception:
+            pass
+        # v11.1.10: gate live too — frozen reacquire must not paint hair.
+        if not _face_swap_allowed(f):
+            continue
+        pairs.append((f, smap[slot]))
+        if len(pairs) >= max_faces:
+            break
+    return pairs
+
+
+def _carry_pairs(tracker, smap, max_faces, advance=True, dt_frames=1.0):
+    """Swap pairs for slots the detector did not see this frame.
+
+    This is what replaces "fall back to the original frame". A single original
+    frame dropped between swapped frames is the most visible artefact a face
+    swap can produce — it reads as the real face flashing back. A predicted
+    face still carries valid 5-point kps, which is all inswapper needs, so the
+    swap keeps running through detector gaps and short occlusions instead of
+    blinking. Prediction is bounded: once a track has been missing too long,
+    carry stops rather than hallucinating a face indefinitely.
+    """
+    if not smap or not isinstance(tracker, _E.MultiFaceTracker):
+        return []
+    if advance:
+        for tr in tracker.tracks.values():
+            tr.predict(dt_frames)
+    carried = tracker.carry(slots=set(smap.keys()))
+    pairs = []
+    for slot in sorted(carried.keys()):
+        pf = carried[slot]
+        tr = tracker.tracks.get(slot)
+        try:
+            pf._track = tr
+            pf._slot = slot
+            pf._occlusion_guard = tr.ramp_occlusion(0.85) if tr is not None else 0.85
+            # v11.1.9: attach frame shape so containment / drift gates work on
+            # predicted faces (TrackState._frame_wh set on assign/bind).
+            if tr is not None and getattr(tr, "_frame_wh", None) is not None:
+                _W, _H = tr._frame_wh
+                pf._frame_shape = (int(_H), int(_W))
+        except Exception as e:
+            logging.warning("could not tag carried face for slot %s: %s", slot, e)
+        # Predicted geometry is only used for a short detector blink.
+        # Longer gaps / looking-down / out-of-frame must NOT paste a face.
+        if not _face_swap_allowed(pf):
+            continue
+        pairs.append((pf, smap[slot]))
+        if len(pairs) >= max_faces:
+            break
+    return pairs
+
+
+def _pairs_for_frame(
+    faces,
+    smap,
+    refs,
+    max_faces=99,
+    prev_bbox=None,
+    frame_bgr=None,
+    prev_bboxes=None,
+    locked_emb=None,
+):
+    """Assign detected target faces to replacement slots without identity cross-over.
+
+    For 2+ faces, identity similarity is deliberately dominant and ambiguous/low-
+    confidence assignments are rejected rather than guessing. ``prev_bboxes`` is
+    ordered by replacement slot, not by detector/face order.
+    """
+    if _empty(faces) or _empty(smap):
+        return []
+    smap = _limit_smap(smap, max_faces)
+    max_faces = min(int(max_faces), max(1, len(smap)))
+    faces = _sort_faces_left(faces)
+
+    if max_faces == 1:
+        only = smap.get(0) or next(iter(smap.values()))
+        best = None
+        ref0 = locked_emb if locked_emb is not None else (refs[0] if refs and len(refs) > 0 else None)
+        # 0.32 is the floor for a person who has just walked in. 0.40
+        # rejected that entry and the frame went back to the original.
+        _ID_MIN = 0.32
+        _ID_MARGIN = 0.10
+        if ref0 is not None:
+            def _id_sim(f):
+                try:
+                    return float(np.dot(f.normed_embedding, ref0))
+                except Exception:
+                    return -1.0
+            ranked = sorted(faces, key=_id_sim, reverse=True)
+            top = ranked[0]
+            top_sim = _id_sim(top)
+            # The head we were already painting. A turn, an open mouth or
+            # the first frames after a split crush the embedding. Staying
+            # on that box is the swap. Leaving it is the original face.
+            on_head = None
+            if prev_bbox is not None:
+                near = []
+                for f in faces:
+                    try:
+                        if (_bbox_iou(prev_bbox, f.bbox) >= 0.15
+                                or _box_center_dist_norm(prev_bbox, f.bbox) < 0.55):
+                            near.append(f)
+                    except Exception:
+                        pass
+                if near:
+                    on_head = max(near, key=_id_sim)
+            if on_head is not None and _id_sim(on_head) >= 0.20:
+                best = on_head
+            elif top_sim >= 0.32:
+                # Same person, new place. Do not demand the old box.
+                best = top
+            else:
+                return []
+        elif prev_bbox is not None:
+            ranked = sorted(faces, key=lambda f: _box_center_dist_norm(prev_bbox, f.bbox))
+            if _box_center_dist_norm(prev_bbox, ranked[0].bbox) < 0.70:
+                best = ranked[0]
+        if best is None:
+            if ref0 is not None:
+                return []
+            def _open_score(f):
+                area = _area(f)
+                front = _frontal_score(f)
+                det = _fnum(getattr(f, "det_score", 0.5), 0.5)
+                return front * 0.45 + det * 0.30 + min(area / 80000.0, 1.0) * 0.25
+            best = max(faces, key=_open_score)
+        return [(best, only)]
+
+    # Multi-face: slot identity is tied to the target embedding captured in the UI.
+    # Never use detector order as identity. This is the key protection against the
+    # first replacement appearing on the second person when people cross/occlude.
+    src_items = []
+    slot_prev = list(prev_bboxes) if prev_bboxes else []
+    for j, src in smap.items():
+        # Only a captured TARGET embedding is identity. The replacement
+        # photo's ArcFace vector is a different person and must not be used
+        # as a match key (that is how a man/woman pair can cross).
+        ref_e = refs[j] if refs and j < len(refs) and refs[j] is not None else None
+        src_items.append((j, src, ref_e))
+    if not src_items:
+        return []
+
+    n_f, n_s = len(faces), len(src_items)
+    cost = [[1e6] * n_s for _ in range(n_f)]
+    sims = [[-1.0] * n_s for _ in range(n_f)]
+    spatials = [[0.0] * n_s for _ in range(n_f)]
+
+    for fi, f in enumerate(faces):
+        f_emb = getattr(f, "normed_embedding", None)
+        for si, (j, src, ref_e) in enumerate(src_items):
+            sim = float(np.dot(f_emb, ref_e)) if f_emb is not None and ref_e is not None else -1.0
+            sims[fi][si] = sim
+            pb = slot_prev[si] if si < len(slot_prev) else None
+            if pb is None and si == 0 and prev_bbox is not None:
+                pb = prev_bbox
+            if pb is not None:
+                iou = _bbox_iou(pb, f.bbox)
+                cdist = _box_center_dist_norm(pb, f.bbox)
+                spatial = max(iou, max(0.0, 1.0 - cdist * 0.75))
+            else:
+                spatial = 0.0
+            spatials[fi][si] = spatial
+            # A target reference is authoritative. Reject weak identity matches.
+            # The spatial term helps through head turns without being allowed to
+            # override a clearly better identity match.
+            # Profile / partial faces crush ArcFace similarity. If the box
+            # is still on the same head as last frame, keep the assignment.
+            if ref_e is not None and sim < 0.18 and spatial < 0.22:
+                continue
+            cost[fi][si] = 0.50 * (1.0 - max(sim, -1.0)) + 0.44 * (1.0 - spatial) + 0.06 * (1.0 - spatial)
+
+    # Same solver as the video tracker: exhaustive over column choices only,
+    # which visits each distinct assignment once instead of k! times over.
+    assign = sorted(_E.optimal_assignment(cost).items())
+    pairs = []
+    used_src, used_face = set(), set()
+    for fi, si in assign:
+        if fi in used_face or si in used_src:
+            continue
+        if cost[fi][si] >= 1e5:
+            continue
+        j, src, ref_e = src_items[si]
+        sim = sims[fi][si]
+
+        # Ambiguity guard: if another slot has a materially better identity score,
+        # do not let Hungarian's spatial tie-breaker steal this face.
+        if ref_e is not None:
+            other_sims = [sims[fi][sj] for sj in range(n_s) if sj != si and sims[fi][sj] > -1.0]
+            best_other = max(other_sims) if other_sims else -1.0
+            if (sim < 0.16 and spatials[fi][si] < 0.22) or (best_other > -1.0 and sim + 0.050 < best_other and spatials[fi][si] < 0.40):
+                continue
+
+        pairs.append((faces[fi], src))
+        used_src.add(si)
+        used_face.add(fi)
+        if len(pairs) >= max_faces:
+            break
+
+    # IMPORTANT: no area-based fallback in multi-face mode. Guessing here is what
+    # causes one person's replacement to jump onto the other person's face.
+    return pairs[:max_faces]
+
+def _crop_face(img_bgr, face, pad=0.32, size=140):
+    x1, y1, x2, y2 = [int(v) for v in _xyxy(face)]
+    w, h = x2 - x1, y2 - y1
+    px, py = int(w * pad), int(h * pad)
+    cx1, cy1 = max(0, x1 - px), max(0, y1 - py)
+    cx2, cy2 = min(img_bgr.shape[1], x2 + px), min(img_bgr.shape[0], y2 + py)
+    crop = img_bgr[cy1:cy2, cx1:cx2]
+    if crop.size == 0:
+        return None
+    rgb = cv2.cvtColor(cv2.resize(crop, (size, size)), cv2.COLOR_BGR2RGB)
+    return np.ascontiguousarray(rgb, dtype=np.uint8)
+
+def _annotate(img, faces):
+    prev = img.copy()
+    for i, f in enumerate(faces):
+        x1, y1, x2, y2 = [int(v) for v in _xyxy(f)]
+        cv2.rectangle(prev, (x1, y1), (x2, y2), (176, 88, 21), 3)
+        cv2.putText(prev, f"#{i+1}", (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, .9, (176, 88, 21), 2)
+    rgb = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
+    return np.ascontiguousarray(rgb, dtype=np.uint8)
+
+def _detect_return(img_bgr, faces):
+    faces = _sort_faces_left(faces)[:4]
+    refs = [f.normed_embedding for f in faces] + [None]*(4-len(faces))
+    crops = [_crop_face(img_bgr, f) for f in faces] + [None]*(4-len(faces))
+    msg = f"Found {len(faces)} face(s) — each detected face is shown below; upload its replacement in the box beside it."
+    return _annotate(img_bgr, faces), msg, refs, crops[0], crops[1], crops[2], crops[3]
+
+def _grab_frame(video, pos_pct):
+    cap = cv2.VideoCapture(video)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    idx = int(max(0, min(total-1, round((pos_pct/100.0)*(total-1)))))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+    ok, frm = cap.read(); cap.release()
+    return (frm if ok else None), idx, total
+
+def show_frame(video, pos_pct):
+    if video is None: return None, "Upload a target video first"
+    _load()
+    frm, idx, total = _grab_frame(video, pos_pct)
+    if frm is None: return None, "Could not read that frame"
+    try:
+        det_frm, sx, sy = _make_det_frame(frm, min(DET_MAX_W, 640))
+        raw = _fa_get(det_frm)
+        faces = _scale_faces(raw, sx, sy) if raw else []
+    except Exception:
+        faces = _fa_get(frm)
+    return _annotate(frm, _sort_faces_left(faces)), \
+           f"Frame {idx}/{total} · {len(faces)} face(s)"
+
+def capture_face(video, pos_pct, slot_idx, refs_state):
+    refs_state = list(refs_state) if refs_state else [None]*4
+    while len(refs_state) < 4: refs_state.append(None)
+    if video is None: return refs_state, None, "Upload a target video first"
+    _load()
+    frm, idx, total = _grab_frame(video, pos_pct)
+    if frm is None: return refs_state, None, "Could not read that frame"
+    try:
+        det_frm, sx, sy = _make_det_frame(frm, min(DET_MAX_W, 640))
+        raw = _fa_get(det_frm)
+        faces = _scale_faces(raw, sx, sy) if raw else []
+    except Exception:
+        faces = _fa_get(frm)
+    if not faces: return refs_state, None, f"No face found at frame {idx}"
+    face = max(faces, key=_area)
+    refs_state[slot_idx] = face.normed_embedding
+    return refs_state, _crop_face(frm, face), f"✓ Captured face into slot #{slot_idx+1}"
+
+def detect_image(target):
+    if target is None: return None, "Upload a target image first", [], None, None, None, None
+    _load()
+    img = _to_bgr(target)
+    faces = _fa_get(img)
+    if not faces: return None, "No faces detected", [], None, None, None, None
+    return _detect_return(img, faces)
+
+def detect_video(video):
+    if video is None:
+        return None, "Upload a target video first", [], None, None, None, None
+    _load()
+    cap = cv2.VideoCapture(video)
+    if not cap.isOpened():
+        return None, "Could not open video", [], None, None, None, None
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    probes = [0]
+    if total > 5: probes.append(min(total - 1, max(1, int(fps * 1.0))))
+    if total > 20: probes.append(min(total - 1, max(2, int(fps * 3.0))))
+    seen = set()
+    probes = [i for i in probes if not (i in seen or seen.add(i))]
+
+    best, best_faces = None, []
+    for fi in probes:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
+        ok, frm = cap.read()
+        if not ok or frm is None: continue
+        try:
+            det_frm, sx, sy = _make_det_frame(frm, min(DET_MAX_W, 640))
+            raw = _fa_get(det_frm)
+            fs = _scale_faces(raw, sx, sy) if raw else []
+        except Exception:
+            fs = _fa_get(frm)
+        if len(fs) > len(best_faces):
+            best_faces, best = fs, frm
+        if best_faces: break
+    cap.release()
+    if not best_faces:
+        return None, "No faces detected in the first frames", [], None, None, None, None
+    return _detect_return(best, best_faces)
+
+def swap_image(target, s1, s2, s3, s4, quality, refs):
+    try:
+        _load()
+        if target is None: return None, "❌ Upload a target image"
+        smap = _build_sources([s1,s2,s3,s4])
+        if not smap: return None, "❌ Upload at least one replacement face"
+        work = _to_bgr(target)
+        orig = work if quality == "Fast" else work.copy()
+        faces = _fa_get(work)
+        if not faces: return None, "❌ No face detected"
+        # Same reliability gate as the video path: a face whose 5 keypoints do
+        # not describe a paintable pose is left as the original rather than
+        # swapped, since a still image has no "hold the last good frame"
+        # fallback to fall back to. See _kps_reliable() for why this check
+        # exists - it is the case behind the "face pasted at the wrong angle
+        # when looking away" report.
+        faces = [f for f in faces if _kps_reliable(f)]
+        if not faces: return None, "❌ No reliably-aligned face detected"
+        pairs = _pairs_for_frame(faces, smap, refs or [], frame_bgr=work)
+        for f, src in pairs:
+            work, _ = _swap_one(work, orig, f, src, quality)
+        if quality in ("Best", "Ultra"):
+            work = _enhance(work, "Soft polish (fast)")
+        out = f"/tmp/image_swap_{uuid.uuid4().hex[:8]}.jpg"
+        cv2.imwrite(out, work, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        return out, f"✓ Done — {len(faces)} face(s)"
+    except Exception as e:
+        return None, f"❌ {str(e)[:90]}"
+
+# CPU-only speed tiers (base intervals). Prefer config.SKIP_N so UI docs and
+# runtime stay aligned; _adaptive_swap_gap() still stretches/shrinks by motion.
+# Best/Ultra stay at 1 so Stable/HQ never silently skip AI swap frames.
+try:
+    from config import SKIP_N as _CFG_SKIP_N
+    SKIP_N = dict(_CFG_SKIP_N)
+except Exception:
+    SKIP_N = {"Fast": 6, "Balanced": 4, "Optimized": 5, "Best": 1, "Ultra": 1}
+
+try:
+    from config import REACQUIRE_GRACE_SEC as _CFG_REACQUIRE_GRACE_SEC
+    REACQUIRE_GRACE_SEC = float(_CFG_REACQUIRE_GRACE_SEC)
+except Exception:
+    REACQUIRE_GRACE_SEC = 2.0
+
+try:
+    from config import BLIND_AFTER_SEC as _CFG_BLIND_AFTER_SEC
+    BLIND_AFTER_SEC = float(_CFG_BLIND_AFTER_SEC)
+except Exception:
+    BLIND_AFTER_SEC = 0.75
+
+try:
+    from config import REJECT_BLIND_SEC as _CFG_REJECT_BLIND_SEC
+    REJECT_BLIND_SEC = float(_CFG_REJECT_BLIND_SEC)
+except Exception:
+    REJECT_BLIND_SEC = 0.75
+
+try:
+    from config import PASTE_FADE_SEC as _CFG_PASTE_FADE_SEC
+    PASTE_FADE_SEC = float(_CFG_PASTE_FADE_SEC)
+except Exception:
+    PASTE_FADE_SEC = 0.5
+
+def _skip_n(quality): return SKIP_N.get(quality, 5)
+
+def _adaptive_swap_gap(base_gap, motion_class, quality):
+    base = max(1, int(base_gap))
+    # base=1 still means every keyframe. Ultra/Best used to ignore a wider
+    # base and force 1, which made CPU jobs run the ONNX swap on every
+    # output frame. Placement is already recomputed every frame from the
+    # cached crop, so honouring base>=2 is a speed win with no paste change.
+    if base <= 1:
+        return 1
+    # Head turns read as MEDIUM/HIGH motion. Forcing gap >= base made the
+    # swap too sparse and the original face flashed through on profile.
+    #
+    # STATIC and LOW no longer stretch the gap PAST the base. They used to
+    # (x1.6 and x1.2), and that is the one place this trade goes wrong: the
+    # motion estimate is a whole-frame grey difference at 160x90, so a talking
+    # head in front of a locked-off camera reads STATIC while the mouth is
+    # moving. Stretching a 5-frame cadence to 8 there is a third of a second of
+    # stale mouth on exactly the shot where lip movement is most watched.
+    # Shortening on motion is still free, so MEDIUM/HIGH keep their multipliers.
+    # This also makes the "Swap every N" control mean what it says: N is a
+    # ceiling the adaptive logic may tighten, never loosen.
+    mult = {"STATIC": 1.0, "LOW": 1.0, "MEDIUM": 0.75, "HIGH": 0.50}.get(motion_class, 1.0)
+    return max(1, min(10, int(round(base * mult))))
+
+def _fit_box(box_wh, W, H):
+    ow, oh = box_wh
+    ar = W / max(H, 1)
+    if ow / max(oh, 1) > ar: ow = int(oh * ar)
+    else: oh = int(ow / max(ar, .001))
+    return max(2, ow - ow % 2), max(2, oh - oh % 2)
+
+def _run_job(jid, src_paths, vp, cfg):
+    # Phoenix CPU-only production build.  Do not silently enter a ZeroGPU path
+    # or spend time probing for CUDA; the deployment constraint is CPU-only.
+    cfg = dict(cfg)
+    cfg["use_gpu"] = False
+    _device_pref[0] = "cpu"
+    return _run_job_body(jid, src_paths, vp, cfg)
+
+
+def _face_region_ok(img, bbox, min_std=6.0, reference=None):
+    """Reject flat / corrupted / solid patches.
+
+    ``reference`` is the pre-swap frame. Judging the result against an ABSOLUTE
+    std floor punishes legitimately low-detail regions - a motion-blurred face
+    during exactly the rapid movement this build is meant to handle, a soft
+    shallow-depth-of-field shot, a face in deep shadow - and every rejection
+    drops that face back to the original for one frame. Comparing against the
+    source region instead only rejects output that is degenerate RELATIVE to
+    what was there before, which is the actual failure this guards against.
+    """
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(img.shape[1], x2), min(img.shape[0], y2)
+        if x2 - x1 < 8 or y2 - y1 < 8: return False
+        roi = img[y1:y2, x1:x2]
+        std = float(np.std(roi))
+        mean = float(np.mean(roi))
+        if reference is not None and reference.shape[:2] == img.shape[:2]:
+            ref_std = float(np.std(reference[y1:y2, x1:x2]))
+            return std >= max(2.0, min(float(min_std), ref_std * 0.35))
+        if std < min_std: return False
+        # v11: the old "brown patch" heuristic that used to live here (reject any
+        # ROI whose channel means looked warm and flat) was a downstream band-aid
+        # for the colour-match contrast crush. It fired on legitimately warm or
+        # dim faces, and each time it fired the frame reverted to the original
+        # face -- converting a colour defect into a flicker defect. The colour
+        # bug is now fixed at source, so this only guards genuinely degenerate
+        # output (a solid or near-solid patch).
+        if mean < 12 and std < 8: return False
+        return True
+    except Exception:
+        return True
+
+
+def _run_job_body(jid, src_paths, vp, cfg):
+    def u(p, m):
+        with _lock:
+            if jid in jobs: jobs[jid].update(progress=p, message=m)
+        _persist_job(jid)
+    t0 = time.time()
+    ex = None
+    stop_io = threading.Event()
+    result_q = None
+    enc_proc = None
+    try:
+        use_gpu = False
+        # Device locked for this job.  CPU-only is intentional for this build.
+        u(3, "Loading AI models (CPU optimized)…")
+        _model_t0 = time.perf_counter()
+        MODELS.get(prefer_gpu=False)
+        logging.info("CPU model load: %.1fs · ORT providers=%s · native_threads=%d",
+                     time.perf_counter() - _model_t0,
+                     getattr(MODELS.face_analysis, "models", None) and "CPUExecutionProvider",
+                     _native_threads)
+        u(6, "Reading replacement faces…")
+        smap = {}
+        for idx, p in sorted(src_paths.items()):
+            im = cv2.imread(p) if p else None
+            if im is None:
+                logging.warning("replacement %s unreadable: %s", idx + 1, p)
+                continue
+            f = _cached_source_face(im)
+            if f is None:
+                logging.warning("replacement %s: no face in %s %s", idx + 1, p, getattr(im, "shape", None))
+                continue
+            smap[idx] = f
+            logging.info("replacement %s OK · gender=%s · bbox=%s",
+                         idx + 1, _E._det_gender(f), getattr(f, "bbox", None))
+        if not smap:
+            with _lock:
+                if jid in jobs: jobs[jid].update(status='error', message="No valid replacement face", done_at=time.time())
+            return
+
+        # Photos define how many people to swap. The dropdown must NOT drop
+        # slot 2 when two replacements were uploaded (that was "only one face
+        # swapped" / male pasted on the woman — slot 0 only).
+        parsed = _parse_face_mode(cfg.get("face_mode", "2 faces"))
+        max_faces = max(len(smap), parsed if parsed >= 2 else len(smap))
+        smap = _limit_smap(smap, max_faces)
+        max_faces = max(1, len(smap))
+        multi_face_safe = max_faces >= 2
+        refs = cfg.get('refs') or []
+        quality = cfg['quality']
+        logging.info("Face mode dropdown=%s parsed=%s → slots=%d keys=%s",
+                     cfg.get("face_mode"), parsed, max_faces, list(smap.keys()))
+        u(8, f"Face mode: {max_faces} · sources={len(smap)}")
+
+        def _cxl():
+            with _lock: return jobs.get(jid, {}).get('cancel', False)
+
+        fps = cfg['fps']
+        # SKIP_N and the Optimized tier's cadence are tuned as a RAW FRAME
+        # COUNT - e.g. "detect every 5 frames" - with no reference to how
+        # much real time 5 frames actually spans. That is silently wrong the
+        # moment the source isn't the fps the number was tuned against: at
+        # 24fps, 5 frames is 208ms between detector calls; at 30fps it is
+        # 167ms - 25% more real time for the same nominal "Optimized"
+        # quality, and therefore 25% more opportunity for genuine motion to
+        # invalidate the linear interpolation/carry/consistency-veto math in
+        # between two real detections, none of which is itself fps-aware.
+        # taper and max_bracket_frames were already converted to a real-time
+        # budget for exactly this reason (v11.1.3) - this is the same fix
+        # applied one level earlier, to how often the detector is asked to
+        # look at all, not just how long a gap between two of its answers
+        # may be trusted. Rescaled relative to 30fps, the fps this table's
+        # numbers were tuned against (also this project's synthetic test
+        # harness default - every existing regression test up to this point
+        # ran at 30fps and so could not have caught this).  Only the
+        # TABLE-DRIVEN cadence is rescaled; an explicit numeric override
+        # (a user literally typing a frame count) means exactly that number
+        # of frames and is left alone.
+        _REF_FPS = 30.0
+        def _fps_scaled(n):
+            return max(1, int(round(int(n) * float(fps) / _REF_FPS)))
+
+        if quality == "Optimized":
+            # Self-managed CPU tier: ignore literal "1" dropdown defaults so
+            # skip/det actually engage. det_int is in KEYFRAME space.
+            skip_n = _fps_scaled(SKIP_N["Optimized"])
+            base_det_int = 2
+        else:
+            skip_n = _fps_scaled(_skip_n(quality)) if cfg.get('swap_n') == 'Auto' else int(cfg.get('swap_n', 5))
+            if cfg.get('det_n') not in (None, '', 'Auto'):
+                try: base_det_int = max(1, int(cfg.get('det_n', 2)))
+                except Exception: base_det_int = 2
+            elif cfg.get('det_int'):
+                try: base_det_int = max(1, int(cfg['det_int']))
+                except Exception: base_det_int = 2
+            else:
+                # Auto: use DET_SKIP_INTERVAL as the default cadence (now 1).
+                try:
+                    base_det_int = max(1, int(getattr(__import__('config'), 'DET_SKIP_INTERVAL', 1) or 1))
+                except Exception:
+                    base_det_int = 1
+
+        # Two cadences, deliberately separate:
+        #
+        #   skip_n / base_det_int  -> how often DETECTION and tracking run. This
+        #       is the identity-critical one: association, the crossing lock and
+        #       the per-slot embedding all depend on it. Multi-face still runs it
+        #       every single frame, exactly as before.
+        #
+        #   swap_gap_base          -> how often the SWAP NETWORK runs. This one
+        #       is not identity-critical any more. Since v11.1.0 every output
+        #       frame is composited from the cached aligned crop using its own
+        #       interpolated keypoints, mask, background and lighting, so a wider
+        #       swap gap costs expression freshness and nothing else.
+        #
+        # These used to be the same number, which is why a two-face job ran the
+        # ONNX forward pass twice on every frame. The original comment here said
+        # multi-face "requires correctness over temporal shortcuts" because the
+        # old fill path stamped a face ROI copied from a neighbouring frame and
+        # could land it on the other person. That path no longer exists.
+        swap_gap_base = skip_n
+        if multi_face_safe:
+            skip_n = 1
+            base_det_int = 1
+            swap_gap_base = int(SKIP_N.get(quality, 1) or 1)
+
+        # Quality split (1-face). Every output frame is still composited.
+        # Ultra: swap 1, det 1 — professional talking-head (do NOT skip).
+        # Best:  swap 2, det 1 — same tracking, ONNX every 2nd key.
+        # Never let det be sparser than swap (swap on interpolated kps is worse
+        # than reuse of a crop cut on a real detection).
+        # Opt out of Best skip: PHOENIX_SWAP_EVERY_FRAME=1.
+        _force_every = os.environ.get("PHOENIX_SWAP_EVERY_FRAME", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if not multi_face_safe:
+            if quality == "Ultra":
+                skip_n = 1
+                swap_gap_base = 1
+                base_det_int = 1
+            elif quality == "Best" and not _force_every:
+                skip_n = 2
+                swap_gap_base = 2
+                base_det_int = 1
+
+        cpu_n = os.cpu_count() or 4
+        # Detection/tracking run sequentially before workers; ORT+OpenCV+x264
+        # already consume _native_threads. Default VIDEO_WORKERS=1 on HF CPU.
+        # PHOENIX_VIDEO_WORKERS may raise to 2 for A/B — never above 2.
+        try:
+            from config import VIDEO_WORKERS as _CFG_VW
+            _default_workers = max(1, min(2, int(_CFG_VW)))
+        except Exception:
+            _default_workers = 1
+        _worker_override = os.environ.get("PHOENIX_VIDEO_WORKERS", "").strip()
+        if _worker_override.isdigit():
+            workers = max(1, min(2, int(_worker_override)))
+        else:
+            workers = _default_workers
+
+        stats = {
+            "detector_calls": 0, "tracker_hits": 0, "gfpgan_calls": 0,
+            # SDOS-075 attribution. Every past round of the "reverts to the
+            # original" defect was tuned blind. These say WHICH mechanism let
+            # a frame through unpainted, so the next round is measured.
+            "revert_frames": 0,     # emitted with no face painted at all
+            "blind_frames": 0,      # rendered inside a blind span (short taper)
+            "vis_reject_calls": 0,  # detector calls where EVERY candidate was rejected
+            "faint_frames": 0,      # painted, but at < 0.5 opacity (ghost-prone)
+            "occ_frames": 0,        # frames where the occluder gate removed anything
+            "swap_calls": 0, "swap_ok": 0, "swap_skips": 0, "det_empty": 0,
+            "frames_painted": 0,
+            "swap_error": None, "swap_error_logged": False,
+            "frames_in": 0, "frames_out": 0,
+            "det_times": [], "swap_times": [],
+            "frames_filled": 0, "kps_rejected": 0,
+            "encode_seconds": 0.0, "processing_seconds": 0.0,
+        }
+
+        _det_cache, _det_counter = [], [0]
+        _no_face_streak = [0]
+        # (output_frame, was_anything_paintable_found) for every detector call,
+        # in order. The hold budget has to be a statement about the frame being
+        # rendered, and neither _no_face_streak nor a single "lost at" marker
+        # can be one: detection for a chunk completes before ANY of that chunk
+        # is rendered, so both hold their END-OF-CHUNK value by the time the
+        # render loop reads them. Measured both ways round - a clip whose
+        # subject turned away and then came back read "visible" at render time
+        # and got the full three-second grace window across the whole
+        # turn-away (49 of 60 frames painted onto hair), while the reverse
+        # ordering faded frames out five frames before anything was wrong with
+        # them. Recording the verdict against the frame it was made at, and
+        # looking it up per frame, is what makes the budget mean what it says.
+        # True  = something paintable was found.
+        # False = the detector returned a candidate and the content gate
+        #         rejected it, i.e. POSITIVE evidence the face is not there.
+        # None  = the detector returned nothing at all, i.e. NO evidence
+        #         either way.
+        #
+        # The last two must not be conflated, and doing so is what broke the
+        # ride-through: a motion-blur dropout and a subject who has turned
+        # away both return nothing, and the only thing separating them is how
+        # long it lasts - which is exactly what the grace window already
+        # measures. Treating an empty return as proof of absence demoted the
+        # hold budget on every brief blur, and t_modes' 18-frame dropout went
+        # from riding through cleanly to a 91% frame-to-frame area step.
+        # A rejected candidate is different: there the pixels were looked at
+        # and did not match the face, so there is no reason to keep holding.
+        _vis_marks = []
+        _kps_veto_streak = [0]
+        # Companion to _kps_veto_streak, in OUTPUT FRAMES rather than in
+        # detector calls. The streak alone bounds how many consecutive
+        # detector calls the motion veto may override - but a detector call is
+        # not a unit of time. At an Optimized/Fast cadence of 16 frames per
+        # call, five vetoed calls is eighty frames, over three seconds at
+        # 24fps, of the paste sitting at a stale position while the subject is
+        # somewhere else entirely. Every other hold budget in this pipeline is
+        # denominated in frames for exactly this reason; this one was not.
+        _kps_veto_frames = [0.0]
+        # Recent detection centres, accepted or not. A face that is moving
+        # from the first frame, or that walks in and never pauses, never
+        # produces the "slow" detection this veto was willing to trust.
+        # Three centres that keep travelling the same way are that face.
+        _motion_centers = []
+        _last_gray = [None]
+        # Signature of the last frame of the previous chunk, so _shot_cuts can
+        # see a cut that lands exactly on a chunk boundary.
+        _cut_prev_sig = [None]
+        # Global frame index of the most recent hard cut, for the whole job.
+        # Any cached geometry or pixels from before it are void.
+        _last_cut_g = [-10**9]
+        # Every cut seen so far, ascending. Read-time barrier lookups need the
+        # cut nearest BEFORE a given frame and the one nearest after it, not
+        # simply the latest one seen - the detection pass runs a whole chunk
+        # ahead of emission, so "the latest cut" is in the future for most
+        # frames being rendered.
+        _cut_list = []
+
+        def _shot_lo(g):
+            """First frame of the shot containing ``g`` (-inf if none)."""
+            lo = -10**9
+            for c in _cut_list:
+                if c <= g:
+                    lo = c
+                else:
+                    break
+            return lo
+
+        def _shot_hi(g):
+            """First frame of the NEXT shot after ``g`` (+inf if none)."""
+            for c in _cut_list:
+                if c > g:
+                    return c
+            return 10**9
+        _last_gray_full = [None]
+        _flow_src = [None]
+        _last_motion_class = ["MEDIUM"]
+        _face_ema = []
+        _last_swap_bboxes = []
+        # Previous bbox for each replacement slot. Never infer slot identity from
+        # detector ordering because detector order changes during crossings.
+        _slot_prev_bboxes = {j: None for j in smap.keys()}
+        # v11: one tracker owns every slot's identity, geometry, mask EMA and
+        # colour EMA. Predictions ARE rendered now — carrying a swap through a
+        # detector gap looks far better than blinking back to the original face.
+        _src_gender = {}
+        for idx, sf in smap.items():
+            try:
+                _src_gender[idx] = _E._det_gender(sf)
+            except Exception:
+                _src_gender[idx] = None
+        _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_src_gender)
+        logging.info("Face mode: %s · sources=%d · source genders (0=F 1=M): %s",
+                     max_faces if max_faces < 99 else "multi", len(smap), _src_gender)
+        u(8, f"Face mode: {max_faces if max_faces < 99 else 'multi'} · sources={len(smap)} · gender={_src_gender}")
+        # ---- continuous-composite state (persists across chunk boundaries) --
+        # Chunk boundaries used to be visible: everything after a chunk's last
+        # key frame had no following key frame to interpolate toward, so it fell
+        # through every guard and emitted the untouched original frame - four
+        # consecutive real-face frames roughly every five seconds, plus the
+        # same at the head of each chunk. Geometry and aligned-swap history now
+        # span chunks, and any frame that is not yet bracketed is deferred to
+        # the next chunk instead of being emitted unswapped.
+        _geom_hist = {j: [] for j in smap.keys()}      # slot -> [(g, record)]
+        _aligned_hist = {j: [] for j in smap.keys()}   # slot -> [(g, fake, corr)]
+        # Output-stage opacity per slot, and the last record that actually
+        # composited for it. These persist for the whole job (not per chunk)
+        # so a suppression that starts just before a chunk boundary keeps
+        # fading across it instead of snapping at the cut. See
+        # PASTE_FADE_SEC in config.py for why the fade exists at all.
+        _paint_alpha = {j: 0.0 for j in smap.keys()}   # slot -> slewed opacity
+        _held_rec = {j: None for j in smap.keys()}     # slot -> last composited record
+        _pending_tail = []                             # [(g, frame)] not yet emittable
+        _det_dt = [1.0]                                # frames since the last detection
+        _last_det_frame = [-1]
+        # Per identity slot: did the most recent detector probe actually see
+        # this face? Tracked per slot, not per frame - in a two-person shot one
+        # face can be plainly visible while the other is behind a shoulder, and
+        # refreshing the hidden one's crop from a guessed position is exactly
+        # what puts a shoulder into its colour statistics.
+        _seen_ok = {j: True for j in smap.keys()}
+        _legacy_mode = [False]   # inswapper build exposes no affine
+
+        # v11.2.2: how far back a reacquire event is allowed to scrub. The
+        # detection pass runs a whole CHUNK ahead of rendering (see
+        # _record_geometry's own docstring) - wiping a slot's ENTIRE
+        # timeline on reacquire, as v11.2.0 CinemaQA did, does not just drop
+        # the few pre-exit entries close enough to the gap to bracket-
+        # interpolate a ghost glide across it; it also erases every already-
+        # recorded, already-valid entry for every EARLIER frame in the same
+        # chunk that has not been rendered yet. Measured directly: a single
+        # reacquire at output frame ~108 (recovering from an 18-frame
+        # dropout) wiped frames 0-89's perfectly good records, and the
+        # renderer - which reads this same list afterward - had nothing to
+        # composite from until the timeline rebuilt past frame 114, showing
+        # the original face for the first 115 frames of a 240-frame clip.
+        #
+        # What actually needs protecting is only the handful of entries
+        # close enough to the gap to bracket across it - the same
+        # max_bracket_frames the renderer itself uses (out_fps * 0.55,
+        # taper+1 floor). taper is not available this early (computed per-
+        # chunk, after this nested def already exists), but out_fps is
+        # (assigned once, above, before any call to this function) and
+        # dominates the real formula at every fps this project exposes
+        # (taper caps at 12, so taper+1 <= 13 <= round(24*0.55) - the
+        # lowest fps offered). A flat +5 frames covers that fixed-floor
+        # case at low fps without depending on taper's exact value.
+        # A first attempt used a flat 120-frame constant, reasoning
+        # "generous but still much smaller than a whole clip" - measured
+        # directly and found USELESS for exactly the case above: a wipe at
+        # frame 108 with a 120-frame window keeps nothing back to frame 0
+        # either (108 - 0 = 108 < 120), degenerating to the same full wipe.
+        #
+        # A function, not a value computed here: `out_fps` (referenced
+        # below) is assigned later in this same enclosing function's own
+        # execution, so a plain assignment at this point - before that line
+        # has run - would raise UnboundLocalError. Deferring the read into
+        # a nested function is safe because Python closures resolve names
+        # at CALL time, by which point out_fps already holds its value
+        # (every call site is well after that assignment).
+        def _reacquire_scrub_window():
+            return int(round(out_fps * 0.55)) + 5
+
+        def _scrub_reacquire_timelines(g=None):
+            """v11.2.0: wipe RECENT geom timeline entries for tracks that
+            just reacquired (see _reacquire_scrub_window() above for why not
+            the whole timeline).
+
+            Must run even when pairs are empty (HairGate still paste-frozen),
+            otherwise sticky `_reacquired` is cleared on the confirming update
+            before any record runs and pre-exit anchors survive into emission.
+            """
+            try:
+                tracks = getattr(_tracker, "tracks", None) or {}
+            except Exception:
+                tracks = {}
+            for slot, tr in list(tracks.items()):
+                if slot not in _geom_hist or tr is None:
+                    continue
+                if not getattr(tr, "_reacquired", False):
+                    continue
+                if g is None:
+                    _geom_hist[slot] = []
+                else:
+                    _geom_hist[slot] = [
+                        (gg, rr) for (gg, rr) in _geom_hist[slot]
+                        if (g - gg) > _reacquire_scrub_window()
+                    ]
+                try:
+                    tr._reacquired = False
+                except Exception:
+                    pass
+
+        def _record_geometry(pairs, g):
+            """Snapshot, per identity slot, the geometry key frame ``g`` will
+            be rendered with. Bound to the frame here rather than read off the
+            shared tracker at swap time - by then the detection pass has
+            already advanced every track to the end of the chunk."""
+            for f, src in (pairs or []):
+                slot = getattr(f, "_slot", None)
+                if slot is None or slot not in _geom_hist:
+                    continue
+                tr = getattr(f, "_track", None)
+                # v11.2.0 CinemaQA wiped the WHOLE slot timeline here on
+                # reacquire. v11.2.2: only scrub entries within
+                # _reacquire_scrub_window() of this frame - see that
+                # function's comment above _scrub_reacquire_timelines for
+                # why a full wipe was destroying already-rendered-worthy
+                # history from earlier in the same detection chunk, not
+                # just the few entries that could actually bracket a ghost
+                # glide across this gap.
+                if (tr is not None
+                        and getattr(tr, "_reacquired", False)
+                        and not bool(getattr(f, "predicted", False))):
+                    _geom_hist[slot] = [
+                        (gg, rr) for (gg, rr) in _geom_hist[slot]
+                        if (g - gg) > _reacquire_scrub_window()
+                    ]
+                    try:
+                        tr._reacquired = False
+                    except Exception:
+                        pass
+                rec = _geom_record(
+                    f, tr,
+                    _render_alpha(f, tr),
+                    float(getattr(f, "_occlusion_guard", 0.0) or 0.0),
+                    src,
+                )
+                if rec is not None:
+                    # Predicted entries must not look "just seen": force det=False
+                    # already set; additionally clamp alpha via _render_alpha.
+                    _geom_hist[slot].append((int(g), rec))
+
+        _startup_emb_buf = []
+        _locked_emb = [None]
+        _startup_confirm = [0]
+        if refs and len(refs) > 0 and refs[0] is not None:
+            _locked_emb[0] = refs[0]
+            _startup_confirm[0] = 3
+        # Couple: keep per-slot ref embeddings for Hungarian (already passed via refs)
+
+        cap = cv2.VideoCapture(vp)
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        total_src_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        W, H = int(cap.get(3)), int(cap.get(4))
+
+        # Display rotation. A phone shot in portrait is almost always STORED
+        # landscape with a 90/270 rotation flag in the container; players and
+        # ffmpeg honour that flag, and OpenCV - depending on build and backend
+        # - may not. When it does not, every frame reaches the detector on its
+        # side, and RetinaFace has very little rotation tolerance: it finds
+        # essentially nothing, the hi-res rescue probe then runs on every frame
+        # too (which is why a failing job also runs ~10x slower than a working
+        # one), no identity is ever confirmed, and the job finishes having
+        # swapped nothing. The user gets their original video back, upright,
+        # because the ROTATION was never the broken part - the detection was.
+        #
+        # This is the one failure mode that depends on WHICH video is uploaded
+        # rather than on the code, so the same build genuinely can work on one
+        # clip and do nothing on the next.
+        _rot_meta = 0
+        try:
+            _rot_meta = int(cap.get(cv2.CAP_PROP_ORIENTATION_META) or 0) % 360
+        except Exception:
+            _rot_meta = 0
+        # Escape hatch for containers whose OpenCV build cannot read the flag
+        # at all (it returns 0 and there is nothing to compare against).
+        try:
+            _rot_env = os.environ.get("PHOENIX_FORCE_ROTATION", "").strip()
+            if _rot_env:
+                _rot_meta = int(_rot_env) % 360
+        except Exception:
+            pass
+        # Only rotate if OpenCV did NOT already do it. For a 90/270 flag the
+        # upright frame is taller than it is wide relative to the reported
+        # dimensions, so comparing the first decoded frame against W/H says
+        # which of the two happened - no guessing, and no double rotation on
+        # builds that handle it for us.
+        _rot_apply = 0
+        if _rot_meta in (90, 180, 270):
+            _ok0, _frm0 = cap.read()
+            if _ok0 and _frm0 is not None:
+                _dh, _dw = _frm0.shape[:2]
+                _already = (_rot_meta in (90, 270) and _dw == H and _dh == W)
+                if not _already:
+                    _rot_apply = _rot_meta
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            except Exception:
+                cap.release()
+                cap = cv2.VideoCapture(vp)
+        if _rot_apply in (90, 270):
+            W, H = H, W
+        if _rot_apply:
+            logging.info("video carries a %d° rotation flag that the decoder did "
+                         "not apply - rotating every frame before detection "
+                         "(source %dx%d -> upright %dx%d)",
+                         _rot_apply, H if _rot_apply in (90, 270) else W,
+                         W if _rot_apply in (90, 270) else H, W, H)
+        _ROT_CODE = {90: cv2.ROTATE_90_CLOCKWISE,
+                     180: cv2.ROTATE_180,
+                     270: cv2.ROTATE_90_COUNTERCLOCKWISE}.get(_rot_apply)
+
+        def _upright(_f):
+            """Apply the container's rotation flag when the decoder did not."""
+            if _ROT_CODE is None or _f is None:
+                return _f
+            return cv2.rotate(_f, _ROT_CODE)
+        ow, oh = _fit_box(RES.get(cfg['resolution'], (1280, 720)), W, H)
+        # Requested FPS should match output when possible (audit NSDOS-006)
+        requested_fps = float(fps) if fps else float(src_fps)
+        effective_fps = min(max(1.0, requested_fps), float(src_fps) if src_fps > 0 else requested_fps)
+        step = max(1, int(round(float(src_fps) / max(effective_fps, 1.0))))
+        out_fps = float(effective_fps)
+
+        trim_start = float(cfg.get('trim_start', 0) or 0)
+        trim_end = float(cfg.get('trim_end', 100) or 100)
+        trim_start = min(100.0, max(0.0, trim_start))
+        trim_end = min(100.0, max(0.0, trim_end))
+        if trim_end <= trim_start:
+            raise ValueError(f"Invalid trim range: start={trim_start:.1f}% end={trim_end:.1f}%")
+        start_frame = int((trim_start / 100.0) * (total_src_frames - 1))
+        end_frame = int((trim_end / 100.0) * (total_src_frames - 1))
+        usable = max(1, end_frame - start_frame + 1)
+        available_output_frames = max(1, (usable + step - 1) // step)
+        lim = min(int(max(1.0, float(out_fps) * float(cfg['max_seconds']))), available_output_frames)
+        if start_frame > 0: cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        src_fi = start_frame
+
+        chunk_n = max(120, min(600, int(400_000_000 / max(ow * oh * 3, 1))))
+        interp = cv2.INTER_AREA if ow < W else cv2.INTER_LINEAR
+
+        # Stream processed frames directly into the final encoder. The old path
+        # encoded MP4V with OpenCV, wrote it to disk, then FFmpeg decoded and
+        # re-encoded the same frames as H.264. Eliminating that intermediate
+        # encode/decode pass is one of the largest CPU-side optimizations.
+        final = f"/tmp/result_{jid}.mp4"
+        # Encoder probe is process-global — avoid spawning ffmpeg every job.
+        global _FFMPEG_ENCODER
+        if _FFMPEG_ENCODER is None:
+            _enc = "libx264"
+            try:
+                _enc_probe = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-encoders"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    timeout=8, check=False,
+                ).stdout or ""
+                if "h264_nvenc" in _enc_probe and os.path.exists("/dev/nvidia0"):
+                    _enc = "h264_nvenc"
+            except Exception:
+                pass
+            _FFMPEG_ENCODER = _enc
+        _video_encoder = _FFMPEG_ENCODER
+        if _video_encoder == "libx264":
+            # FastSafe: Ultra/Best keep the same CRF (same quantiser). Only the
+            # x264 preset moves medium→faster. Visual difference is in bitrate
+            # efficiency, not paste quality. Encoder threads stay at 2 so they
+            # do not starve ORT on the same CPU.
+            _encoder_args = ["-c:v", "libx264", "-crf",
+                             {"Fast":"28","Balanced":"24","Optimized":"23",
+                              "Best":"20","Ultra":"18"}.get(quality, "20"),
+                             # "Optimized" sat at CRF 23 with the ULTRAFAST
+                             # preset - a lower quantiser than Balanced paired
+                             # with a worse preset than Balanced, so it spent
+                             # more bits for less quality than the tier below
+                             # it. veryfast makes the ladder monotonic.
+                             "-preset", {"Fast":"ultrafast","Balanced":"veryfast",
+                                          "Optimized":"veryfast","Best":"faster",
+                                          "Ultra":"faster"}.get(quality, "faster"),
+                             "-threads", str(max(1, min(2, int(_native_threads))))]
+        else:
+            _cq = {"Fast":"30","Balanced":"25","Optimized":"23",
+                   "Best":"21","Ultra":"19"}.get(quality, "21")
+            _encoder_args = ["-c:v", "h264_nvenc", "-cq", _cq, "-preset", "p4"]
+
+        _src_fps = float(src_fps) if src_fps else 30.0
+        trim_start_sec = (trim_start / 100.0) * (total_src_frames / max(_src_fps, 0.001))
+        trim_duration_sec = ((trim_end - trim_start) / 100.0) * (total_src_frames / max(_src_fps, 0.001))
+        trim_duration_sec = max(0.1, float(trim_duration_sec))
+        # --- Rec.709 colour, converted AND tagged (SDOS-071 F4) -----------
+        # The pipe carries full-range BGR. ffmpeg's default rawvideo->yuv420p
+        # conversion uses the BT.601 matrix and writes NO colour tags, while
+        # every player treats untagged HD as BT.709 - so the whole film was
+        # decoded with the wrong matrix. Measured at 1080p on saturated
+        # patches: up to 41 levels of channel error, a visible cast across the
+        # entire output, independent of anything the face pipeline does.
+        #
+        # Tagging alone is NOT the fix and makes it worse (measured: error
+        # rises from 5 to 41) because the pixels are still converted with 601
+        # and would then be labelled 709. The scale filter is what changes the
+        # conversion; the tags are what stop a player guessing. Both, or
+        # neither. With both, the round-trip error drops to 4 - the codec
+        # noise floor.
+        _colour_args = [
+            "-vf", "scale=out_color_matrix=bt709:out_range=tv",
+            "-colorspace", "bt709", "-color_primaries", "bt709",
+            "-color_trc", "bt709", "-color_range", "tv",
+        ]
+        # 192k AAC is transparent for dialogue but audible on music beds at the
+        # top tiers, and those are the tiers someone picks when the result is
+        # meant to be graded or projected.
+        _abr = {"Best": "256k", "Ultra": "320k"}.get(quality, "192k")
+        enc_cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{ow}x{oh}",
+            "-r", f"{out_fps:.6f}", "-i", "pipe:0",
+            "-ss", f"{trim_start_sec:.3f}", "-t", f"{trim_duration_sec:.3f}", "-i", vp,
+            "-map", "0:v:0", "-map", "1:a:0?",
+            *_encoder_args, *_colour_args, "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", _abr,
+            "-shortest", final,
+        ]
+        _enc_log_path = f"/tmp/ffmpeg_{jid}.log"
+        _enc_log = None
+        try:
+            _enc_log = open(_enc_log_path, "wb")
+            enc_proc = subprocess.Popen(
+                enc_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=_enc_log
+            )
+        except Exception as e:
+            try:
+                if _enc_log is not None:
+                    _enc_log.close()
+            except Exception:
+                pass
+            try: cap.release()
+            except Exception: pass
+            raise RuntimeError(f"Could not start FFmpeg encoder: {e}")
+        wr = None
+
+        fi = produced = keys_done = 0
+        _adaptive_last_swap_g = [-10**9]
+        _adaptive_last_det_frame = [-10**9]
+        # Release-audited progress model:
+        #   0-12  startup / model loading
+        #  12-30  face analysis
+        #  30-84  actual frame processing
+        #  84-99  ffmpeg encoding
+        # 100     completed output
+        #
+        # ETA is derived only from completed measurable work. A slow first frame
+        # therefore does not make ETA grow indefinitely, and the estimate is
+        # exponentially smoothed to avoid large jumps between updates.
+        eof = False
+        progress_last_emit = [0.0]
+        eta_ema_rate = [None]
+        eta_last_done = [0.0]
+        eta_last_ts = [t0]
+        last_progress = [12]
+
+        def _format_eta(seconds):
+            if seconds is None or seconds < 0:
+                return "ETA calculating…"
+            sec = int(max(0, seconds))
+            m, s = divmod(sec, 60)
+            if m >= 60:
+                h, m = divmod(m, 60)
+                return f"ETA {h}h {m}m"
+            if m:
+                return f"ETA {m}m {s}s"
+            return f"ETA {s}s"
+
+        def _set_phase_progress(base, span, msg, completed=None, total=None, phase="processing"):
+            now = time.time()
+            eta_seconds = None
+            p = int(base)
+            if completed is not None and total:
+                total_i = max(1, int(total))
+                completed_i = max(0, min(total_i, int(completed)))
+                frac = completed_i / total_i
+                p = int(base + frac * span)
+                # Only advance the ETA clock when measurable work completed.
+                # Waiting on a long-running inference therefore cannot make ETA
+                # increase merely because wall-clock time passed.
+                prev_done, prev_ts = eta_last_done[0], eta_last_ts[0]
+                dt = now - prev_ts
+                dd = completed_i - prev_done
+                if dd > 0 and dt >= 0.25:
+                    inst_rate = dd / dt
+                    if eta_ema_rate[0] is None:
+                        eta_ema_rate[0] = inst_rate
+                    else:
+                        eta_ema_rate[0] = 0.20 * inst_rate + 0.80 * eta_ema_rate[0]
+                    eta_last_done[0], eta_last_ts[0] = completed_i, now
+                rate = eta_ema_rate[0]
+                if rate and rate > 0.01 and completed_i < total_i:
+                    eta_seconds = (total_i - completed_i) / rate
+                    msg = f"{completed_i}/{total_i} frames · {_format_eta(eta_seconds)}"
+                else:
+                    msg = f"{completed_i}/{total_i} frames · ETA calculating…"
+            # Never allow a displayed percentage to regress.
+            p = max(last_progress[0], min(99, p))
+            if p > last_progress[0]:
+                last_progress[0] = p
+            if now - progress_last_emit[0] >= 0.20 or p >= 99:
+                progress_last_emit[0] = now
+                with _lock:
+                    if jid in jobs:
+                        jobs[jid]["eta_seconds"] = eta_seconds
+                        _persist_job(jid)
+                u(p, msg)
+
+        u(12, f"Processing {ow}×{oh} · det={skip_n} · swap≈{swap_gap_base} · det≤{DET_MAX_W}px · Phoenix CPU Speed V3 · adaptive AI cadence · CPU-only · profiled ETA…")
+
+        FRAME_Q_MAX = max(48, min(chunk_n * 2, 240))
+        RESULT_Q_MAX = max(48, min(chunk_n * 2, 240))
+        frame_q = queue.Queue(maxsize=FRAME_Q_MAX)
+        result_q = queue.Queue(maxsize=RESULT_Q_MAX)
+        stop_io = threading.Event()
+
+        def _reader_thread():
+            local_fi = 0
+            local_src = start_frame
+            local_produced = 0
+            # Single resize to output size. An INPUT_MAX_W pre-downscale before
+            # ow×oh caused crush→upscale (e.g. 1080p→720w→1280w) on CPU.
+            try:
+                while local_produced < lim and not stop_io.is_set():
+                    if _cxl() or local_src > end_frame: break
+                    # Skip frames at the decoder level when possible. read()
+                    # fully decodes a frame that may immediately be discarded;
+                    # grab() advances the decoder without materialising pixels.
+                    if local_fi % step != 0:
+                        if not cap.grab():
+                            break
+                        local_fi += 1
+                        local_src += 1
+                        continue
+
+                    ok, frm = cap.read()
+                    if not ok or frm is None: break
+                    # Upright BEFORE anything measures or detects on it, so
+                    # every downstream size, box and landmark is in the same
+                    # frame of reference as the output.
+                    frm = _upright(frm)
+                    if frm.shape[1] == ow and frm.shape[0] == oh:
+                        resized = frm
+                    else:
+                        resized = cv2.resize(frm, (ow, oh), interpolation=interp)
+                    while not stop_io.is_set():
+                        try:
+                            frame_q.put((local_produced, resized), timeout=0.4)
+                            break
+                        except queue.Full:
+                            if _cxl(): break
+                    local_produced += 1
+                    local_fi += 1
+                    local_src += 1
+            except Exception as e:
+                logging.warning(f"reader thread: {e}")
+            finally:
+                try: frame_q.put(None, timeout=2)
+                except Exception: pass
+
+        def _writer_thread():
+            try:
+                while True:
+                    item = result_q.get()
+                    if item is None:
+                        result_q.task_done()
+                        break
+                    try:
+                        if enc_proc.stdin is None:
+                            raise RuntimeError("FFmpeg encoder stdin is unavailable")
+                        # Prefer buffer view over bytes() alloc every frame.
+                        if not item.flags['C_CONTIGUOUS']:
+                            item = np.ascontiguousarray(item)
+                        enc_proc.stdin.write(item.data)
+                    except Exception as e:
+                        logging.error(f"writer fatal: {e}")
+                        result_q.task_done()
+                        break
+                    else: result_q.task_done()
+            except Exception as e:
+                logging.warning(f"writer thread: {e}")
+
+        reader_t = threading.Thread(target=_reader_thread, name=f"reader-{jid}", daemon=True)
+        writer_t = threading.Thread(target=_writer_thread, name=f"writer-{jid}", daemon=True)
+        reader_t.start()
+        writer_t.start()
+
+        ex = ThreadPoolExecutor(max_workers=workers)
+
+        # `or _pending_tail`: frames deferred from the previous chunk were
+        # already counted in `produced`, so once `produced` reaches `lim` the
+        # loop would otherwise exit with them still unemitted - silently
+        # truncating the output by up to skip_n-1 frames.
+        while (produced < lim or _pending_tail) and not eof:
+            cframes = [f for _g, f in _pending_tail]
+            gidx = [_g for _g, _f in _pending_tail]
+            _pending_tail = []
+            while len(cframes) < chunk_n and produced < lim:
+                if _cxl(): raise _CancelledJob()
+                try: item = frame_q.get(timeout=8.0)
+                except queue.Empty:
+                    if not reader_t.is_alive(): eof = True; break
+                    continue
+                if item is None: eof = True; break
+                idx, frm = item
+                cframes.append(frm)
+                gidx.append(idx)
+                produced += 1
+            if not cframes: break
+
+            n = len(cframes)
+            stats["frames_in"] += n
+            keyf = [(gidx[k] % skip_n == 0) for k in range(n)]
+            results = {}
+
+            # Hard cuts in this chunk. `_cut_prev_sig` carries the previous
+            # chunk's last frame so a cut on the boundary is not a blind spot.
+            try:
+                _cut_flags, _cut_prev_sig[0] = _shot_cuts(cframes, _cut_prev_sig[0])
+            except Exception as e:
+                logging.debug("cut detection skipped: %s", e)
+                _cut_flags = [False] * n
+            _cut_gs = {int(gidx[k]) for k in range(n) if _cut_flags[k]}
+            if _CUT_STATS["disabled"]:
+                _cut_gs = set()
+            _CUT_STATS["frames"] += n
+            if _cut_gs:
+                _CUT_STATS["cuts"] += len(_cut_gs)
+                for _cg in sorted(_cut_gs):
+                    if _cg not in _cut_list:
+                        _cut_list.append(int(_cg))
+                _cut_list.sort()
+                if (_CUT_STATS["frames"] >= _CUT_DENSITY_MIN_FRAMES
+                        and _CUT_STATS["cuts"] >
+                        _CUT_MAX_DENSITY * _CUT_STATS["frames"]):
+                    _CUT_STATS["disabled"] = True
+                    logging.warning(
+                        "shot-cut detector claimed %d cuts in %d frames "
+                        "(1 per %.1f) - implausible for a real edit, so the "
+                        "cut barrier is being DISABLED for the rest of this "
+                        "job. Raise PHOENIX_CUT_MAD / lower PHOENIX_CUT_CORR "
+                        "if this recurs.",
+                        _CUT_STATS["cuts"], _CUT_STATS["frames"],
+                        _CUT_STATS["frames"] / max(1, _CUT_STATS["cuts"]))
+                    _cut_list.clear()
+                    _cut_gs = set()
+                # A cut MUST be a detector key frame. Detection otherwise runs
+                # on the skip_n grid and the first frames of the new shot would
+                # be painted from the old shot's geometry before anything
+                # looked at them.
+                for k in range(n):
+                    if _cut_flags[k]:
+                        keyf[k] = True
+                logging.info("shot cuts in this chunk at frames %s",
+                             sorted(_cut_gs))
+
+            key_indices = [k for k in range(n) if keyf[k]]
+            key_motion_map = {}
+            # Whether the detector can currently SEE this face. Only then may
+            # the cached aligned crop be refreshed: during a genuine occlusion
+            # the tracker still supplies plausible geometry, but a crop cut
+            # there is a crop of whatever is covering the face, and the colour
+            # match then locks onto that. Re-projecting the last crop taken
+            # while the face was visible is the right thing to keep doing.
+            key_swap_ok = {}
+            # No separate per-chunk "last position" state here on purpose.
+            # _tracker (a single MultiFaceTracker created once for the whole
+            # job, not per chunk) already IS the one place this identity's
+            # last-seen geometry lives - _tracker.tracks[0].obs_bbox is the
+            # last RAW real detection, correctly available or correctly
+            # absent across a chunk boundary with no extra bookkeeping. A
+            # second, separately-maintained "previous bbox" here was a stale
+            # copy of the same fact, on its own reseeding schedule, and had
+            # to be independently re-invalidated at both a chunk boundary
+            # and a detector gap (see the removed history below). One source
+            # of truth instead of two that can silently disagree.
+
+            def _tick():
+                # Each completed key frame represents skip_n output frames of
+                # measurable AI work. This gives useful movement while workers
+                # complete out of order without pretending an in-flight frame is
+                # finished.
+                completed_est = min(lim, keys_done * skip_n)
+                _set_phase_progress(30, 54, "Processing video…", completed_est, lim, phase="processing")
+
+            # v11.0.1 FIX: honour user/preset det_n exactly. The old
+            # `det_n_val = max(det_n_val, DET_SKIP_INTERVAL)` floor forced
+            # re-detect every ≥3 keyframes even when Stable set det_n=1 —
+            # a primary cause of flicker / original-face fallback.
+            # DET_SKIP_INTERVAL remains a documented Auto default in config.py;
+            # it must never raise an explicit cadence.
+            det_n_val = max(1, int(base_det_int) if base_det_int else 1)
+            initial_force_until = max(3, int(round(out_fps * 1.5)))
+            last_pairs_ref = [None]
+            last_bboxes_ref = [list(_last_swap_bboxes) if _last_swap_bboxes else []]
+            last_det_g = _adaptive_last_det_frame
+            last_swap_g = _adaptive_last_swap_g
+
+            for key_ord, k in enumerate(key_indices):
+                if _cxl(): raise _CancelledJob()
+                frm = cframes[k]
+                g = gidx[k]
+
+                # ---- the cut barrier -------------------------------------
+                # Everything cached describes the previous shot. Drop it HERE,
+                # before this frame is detected on, so the new shot is read
+                # with no inherited geometry and nothing to interpolate back
+                # toward. Identity survives (see TrackState.reset_for_cut).
+                if int(g) in _cut_gs:
+                    _last_cut_g[0] = int(g)
+                    try:
+                        _tracker.mark_cut()
+                    except Exception as e:
+                        logging.debug("tracker cut reset failed: %s", e)
+                    # NOTE: _geom_hist and _aligned_hist are deliberately NOT
+                    # cleared here. The detection pass runs ahead of emission
+                    # over the whole chunk, so destroying pre-cut history at
+                    # this point would strip the geometry and the crops that
+                    # the frames BEFORE this cut still have to be rendered
+                    # with - they would emit the original face. The barrier is
+                    # applied where the history is READ instead, by _shot_lo /
+                    # _shot_hi, which is correct for every frame regardless of
+                    # which side of the cut it sits on.
+                    # Optical flow across a cut is meaningless.
+                    _flow_src[0] = None
+                    _last_gray[0] = None
+                    _no_face_streak[0] = 0
+
+                prev_flow = _flow_src[0]
+                _flow_src[0] = frm
+                # v11.1.9: keep TrackState._frame_wh current so predict() can
+                # freeze when the face leaves the shot (even on miss/carry).
+                try:
+                    _fw = (int(frm.shape[1]), int(frm.shape[0]))
+                    for _tr in _tracker.tracks.values():
+                        if _tr is not None:
+                            _tr._frame_wh = _fw
+                except Exception:
+                    pass
+                gray_s = cv2.resize(cv2.cvtColor(frm, cv2.COLOR_BGR2GRAY), (160, 90))
+                motion = float(np.mean(cv2.absdiff(gray_s, _last_gray[0]))) if _last_gray[0] is not None else 999.0
+                _last_gray[0] = gray_s
+                mclass = _motion_class(motion)
+                key_motion_map[k] = mclass
+
+                force_initial = (g < initial_force_until)
+                # Schedule detection in KEY-FRAME space (not output-frame index).
+                # Static scenes may hold longer; motion keeps det_mult=1.
+                #
+                # Tightening this on MEDIUM/HIGH motion (0.75/0.50, mirroring
+                # _adaptive_swap_gap) was tried and measured: it did NOT help.
+                # On a rapid-motion clip the share of frames falling into
+                # _geom_for_frame's frozen "span exceeded max_bracket" branch
+                # stayed at 61% and placement error did not improve, because
+                # the anchors are not sparse from being scheduled too rarely -
+                # they are sparse because the detections that DO happen are
+                # being rejected downstream while the subject is moving (see
+                # the veto note in _pairs_for_frame). Reverted rather than left
+                # in: it costs real detector calls on a CPU-bound Space and
+                # bought nothing measurable. Noted here so a later round does
+                # not re-attempt it and re-measure the same null result.
+                det_mult = {"STATIC": 2, "LOW": 1, "MEDIUM": 1, "HIGH": 1}.get(mclass, 1)
+                # Scheduled in OUTPUT-FRAME space. It used to compare `key_ord`,
+                # which is an index within the current chunk and restarts at 0
+                # at every chunk boundary, so the cadence silently reset there.
+                det_due = (g - last_det_g[0]) >= det_n_val * det_mult * max(1, skip_n)
+                need_det = force_initial or det_due or (last_pairs_ref[0] is None)
+
+                if need_det:
+                    _set_phase_progress(12, 18, "Analysing faces…", min(lim, max(0, g)), lim, phase="detection")
+                    t_det0 = time.perf_counter()
+                    # Main detector pass. Multi-face scenes get a little more
+                    # source resolution because profile/small faces are the hard case.
+                    primary_det_w = 840 if multi_face_safe else (560 if quality == "Optimized" else DET_MAX_W)
+                    det_frm, sx, sy = _make_det_frame(frm, min(frm.shape[1], primary_det_w))
+                    raw_faces = _detect_want(det_frm, want=2 if multi_face_safe else 1)
+                    faces = _scale_faces(raw_faces, sx, sy) if raw_faces else []
+                    faces = _sort_faces_left(faces)
+                    stats["det_faces_sum"] = stats.get("det_faces_sum", 0) + len(faces)
+                    stats["det_faces_max"] = max(stats.get("det_faces_max", 0), len(faces))
+                    if multi_face_safe and len(faces) > max_faces:
+                        faces = _keep_n_faces(faces, _tracker, max_faces, refs=refs)
+                    # Frames elapsed since the previous detection. Velocity and
+                    # the One-Euro filter are both expressed per OUTPUT frame,
+                    # so they need the real interval, not an assumed 1.
+                    _det_dt[0] = float(max(1, g - _last_det_frame[0])) if _last_det_frame[0] >= 0 else 1.0
+                    _last_det_frame[0] = g
+
+                    # Adaptive high-resolution probe. Do NOT wait for total face
+                    # loss: small or low-confidence faces are exactly the cases where
+                    # the old implementation reverted to the original. The second
+                    # pass is only invoked when needed, so normal frontal processing
+                    # keeps the fast path.
+                    # Default OFF (config ENABLE_HI_DET_PROBE). Total miss still
+                    # probes via needs_hi = not faces below.
+                    try:
+                        from config import ENABLE_HI_DET_PROBE as _hi_probe_enabled
+                    except Exception:
+                        _hi_probe_enabled = os.environ.get("PHOENIX_HI_DET_PROBE", "0").strip().lower() in ("1", "true", "yes", "on")
+                    needs_hi = not faces
+                    if faces:
+                        missing_slot = bool(multi_face_safe and len(faces) < max_faces)
+                        needs_hi = missing_slot or (
+                            any(
+                                _area(f) < 4500.0
+                                or min(float(f.bbox[2]-f.bbox[0]), float(f.bbox[3]-f.bbox[1])) < 58.0
+                                or _fnum(getattr(f, "det_score", 0.5), 0.5) < 0.28
+                                or _frontal_score(f) < 0.50
+                                for f in faces
+                            ) and _hi_probe_enabled
+                        )
+                    if needs_hi or (not faces and _no_face_streak[0] > 0):
+                        try:
+                            # NOTE (v11.2.12): raising this ceiling toward the
+                            # native width was tried and reverted. RetinaFace
+                            # resizes whatever it is handed down to det_size
+                            # (640x640) internally, so a wider probe frame does
+                            # not give it more face to work with - it only costs
+                            # a larger resize. The lever for a face that is too
+                            # small to detect is DET_SIZE, not this width.
+                            hi_w = min(frm.shape[1], 1280 if multi_face_safe else 1024)
+                            det2, sx2, sy2 = _make_det_frame(frm, hi_w)
+                            raw2 = _fa_get(det2, defer_embedding=True)
+                            faces2 = _scale_faces(raw2, sx2, sy2) if raw2 else []
+                            if faces2:
+                                # Merge the high-resolution result, preferring it
+                                # for overlapping detections and adding genuinely new
+                                # small faces.
+                                merged = list(faces)
+                                for f2 in faces2:
+                                    overlaps = [(_bbox_iou(f2.bbox, f1.bbox), i) for i, f1 in enumerate(merged)]
+                                    best_iou, best_i = max(overlaps, default=(0.0, -1))
+                                    if best_i >= 0 and best_iou >= 0.20:
+                                        f1 = merged[best_i]
+                                        score1 = float(getattr(f1, "det_score", 0.0) or 0.0)
+                                        score2 = float(getattr(f2, "det_score", 0.0) or 0.0)
+                                        area1, area2 = _area(f1), _area(f2)
+                                        if score2 > score1 + 0.03 or area2 > area1 * 1.05:
+                                            merged[best_i] = f2
+                                    else:
+                                        merged.append(f2)
+                                faces = merged
+                            stats["detector_calls"] += 1
+                        except Exception as e:
+                            logging.debug("high-resolution detector probe skipped: %s", e)
+                    # Zoom crops. A second full-frame pass still feeds RetinaFace
+                    # 640px, so a small or side face stays small. Cropping the last
+                    # known head (or a missed slot) is what actually raises recall.
+                    # Only when someone is still missing — both faces already found
+                    # stays on the fast path. Swap compositing is unchanged.
+                    _short = (not faces) or (multi_face_safe and len(faces) < max_faces)
+                    _rois = []
+                    try:
+                        if hasattr(_tracker, "tracks"):
+                            for _t in _tracker.tracks.values():
+                                _bb = getattr(_t, "last_hit_bbox", None)
+                                if _bb is None:
+                                    _bb = getattr(_t, "bbox", None)
+                                if _bb is None:
+                                    continue
+                                if faces and any(_bbox_iou(_bb, getattr(_f, "bbox", None)) >= 0.20 for _f in faces):
+                                    continue
+                                _rois.append(_bb)
+                                _short = True
+                    except Exception:
+                        _rois = []
+                    if _short and not _rois:
+                        _hh, _ww = frm.shape[:2]
+                        _rois.append([_ww * 0.12, _hh * 0.02, _ww * 0.88, _hh * 0.72])
+                    if _short and _rois:
+                        try:
+                            for _bb in _rois[:2]:
+                                _extra = _zoom_detect(frm, _bb)
+                                if _extra:
+                                    faces = _merge_detected(faces, _extra)
+                                    stats["zoom_hits"] = stats.get("zoom_hits", 0) + len(_extra)
+                                stats["detector_calls"] += 1
+                                if multi_face_safe and len(faces) >= max_faces:
+                                    break
+                            faces = _sort_faces_left(faces)
+                            if multi_face_safe and len(faces) > max_faces:
+                                faces = _keep_n_faces(faces, _tracker, max_faces, refs=refs)
+                        except Exception as e:
+                            logging.debug("zoom detect skipped: %s", e)
+                    faces, _face_ema = _smooth_faces(faces, _face_ema)
+
+                    # Reject detections whose own 5 keypoints do not describe a
+                    # paintable face (see _kps_reliable). This runs AFTER the
+                    # hi-res probe rescue above, so a real face that is merely
+                    # small or partly turned still gets its second chance
+                    # first; only genuinely inconsistent reads are dropped
+                    # here. A rejected identity falls straight into the
+                    # existing "no detection this frame" path below, which
+                    # already holds the last good geometry through a bounded
+                    # gap instead of painting - exactly the behaviour wanted
+                    # here, reused rather than reinvented.
+                    _n_before_kps_gate = len(faces)
+                    _reliable = []
+                    _weak = []
+                    for f in faces:
+                        tr_guess = None
+                        if hasattr(_tracker, "tracks"):
+                            best_iou, best_tr = 0.12, None
+                            for t in _tracker.tracks.values():
+                                anc = getattr(t, "last_hit_bbox", None)
+                                if anc is None:
+                                    anc = getattr(t, "match_bbox", None)
+                                if anc is None:
+                                    continue
+                                try:
+                                    iou = _bbox_iou(f.bbox, anc)
+                                except Exception:
+                                    iou = 0.0
+                                if iou > best_iou:
+                                    best_iou, best_tr = iou, t
+                            tr_guess = best_tr
+                        if _kps_reliable(f, tr_guess):
+                            _reliable.append(f)
+                        else:
+                            _weak.append(f)
+                    if _reliable:
+                        if multi_face_safe:
+                            # KEEP a weak second person. Old code used slot 0's
+                            # box / faces[:1] and deleted the man every frame.
+                            keep = list(_reliable)
+                            for w in _weak:
+                                try:
+                                    if all(_bbox_iou(w.bbox, r.bbox) < 0.35 for r in keep):
+                                        keep.append(w)
+                                except Exception:
+                                    keep.append(w)
+                            faces = keep
+                        else:
+                            # 1 face: a clean bystander must not replace the
+                            # person we are already on, and a wobbly entry
+                            # must not be deleted just because the landmarks
+                            # moved. There is only one slot.
+                            keep = list(_reliable)
+                            _anc_one = None
+                            _tr_one = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                            if _tr_one is not None:
+                                _anc_one = getattr(_tr_one, "last_hit_bbox", None)
+                            if _anc_one is not None:
+                                for w in _weak:
+                                    try:
+                                        if _bbox_iou(w.bbox, _anc_one) >= 0.15:
+                                            keep.append(w)
+                                    except Exception:
+                                        pass
+                            if not keep and _weak:
+                                keep = [max(_weak, key=lambda f: float(getattr(f, "det_score", 0.0) or 0.0))]
+                            faces = keep
+                    elif faces and not multi_face_safe:
+                        _tr_pre = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                        _anc_pre = getattr(_tr_pre, "last_hit_bbox", None) if _tr_pre is not None else None
+                        if _anc_pre is not None:
+                            _ov = []
+                            for _fpre in faces:
+                                try:
+                                    if _bbox_iou(_fpre.bbox, _anc_pre) >= 0.22:
+                                        _ov.append(_fpre)
+                                except Exception:
+                                    pass
+                            faces = _ov or faces[:1]
+                    if len(_reliable) < _n_before_kps_gate:
+                        stats["kps_rejected"] = stats.get("kps_rejected", 0) + (_n_before_kps_gate - len(_reliable))
+
+                    stats["detector_calls"] += 1
+                    stats["det_times"].append((time.perf_counter() - t_det0) * 1000)
+                    last_det_g[0] = g
+
+                    if not faces:
+                        stats["det_empty"] = stats.get("det_empty", 0) + 1
+                        _no_face_streak[0] += 1
+                        # None, not False: nothing was looked at, so nothing
+                        # was disproved. The grace window bounds this case.
+                        _vis_marks.append((g, None))
+                        # v11: a detector miss is not a reason to show the real
+                        # face again. Carry the tracked geometry for a bounded
+                        # number of frames so the swap rides through the gap.
+                        # Advance every track by the frames actually elapsed.
+                        _tracker.assign([], {}, dt_frames=_det_dt[0])
+                        carried = _carry_pairs(_tracker, smap, max_faces,
+                                               advance=False)
+                        _record_geometry(carried, g)
+                        for _j in _seen_ok:
+                            _seen_ok[_j] = False
+                        key_swap_ok[k] = dict(_seen_ok)
+                        if carried:
+                            last_pairs_ref[0] = carried
+                        # Detection itself is visible as a heartbeat, so a slow
+                        # first chunk does not look frozen.
+                        det_done = min(lim, max(0, g + 1))
+                        _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
+                        continue
+                    _after_real_gap = _no_face_streak[0] > 0
+                    # v11.2.7: the reset moved to AFTER the gates, keyed on a
+                    # candidate actually surviving them. Resetting here - on
+                    # the mere fact that the detector returned a box - is what
+                    # kept the streak pinned at 0/1 through a sustained
+                    # occlusion: the content gate below would raise it to 1,
+                    # this line would zero it on the next call, and the
+                    # >= _ACTIVE_REJECT_STREAK demotion to the short taper
+                    # could never be reached. "The detector returned
+                    # something" and "something paintable is on screen" are
+                    # different facts, and only the second one ends a gap.
+
+                    # v11.1.10 HairGate: after a real gap, still skip the
+                    # motion-veto vs pre-gap position (below), but refuse to
+                    # bind a weak / unreliable first return (hair/skull/neck
+                    # under motion blur). Prefer original this frame.
+                    if _after_real_gap:
+                        _n_gap = len(faces)
+                        _tr_gap = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                        _anchor_gap = None
+                        if _tr_gap is not None:
+                            _anchor_gap = getattr(_tr_gap, "last_hit_bbox", None)
+                        _kept = []
+                        for f in faces:
+                            det_f = float(getattr(f, "det_score", 0.0) or 0.0)
+                            overlaps = False
+                            if _anchor_gap is not None:
+                                try:
+                                    overlaps = _bbox_iou(f.bbox, _anchor_gap) >= 0.20
+                                except Exception:
+                                    overlaps = False
+                            reliable = _kps_reliable(f, _tr_gap if overlaps else None)
+                            # Same head, even with a wobbly mouth.
+                            if overlaps and (reliable or det_f >= 0.18):
+                                _kept.append(f)
+                                continue
+                            # Not on the old box. This is someone walking in,
+                            # or the first frames of a split. Do not delete
+                            # them for failing to overlap a box that is gone.
+                            # 2-face assignment decides who they are. 1-face
+                            # has nobody else, so a solid detection is the job.
+                            if not overlaps and (reliable or det_f >= (0.22 if not multi_face_safe else 0.28)):
+                                _kept.append(f)
+                        faces = _kept
+                        if len(faces) < _n_gap:
+                            stats["hair_gate_gap"] = stats.get("hair_gate_gap", 0) + (
+                                _n_gap - len(faces)
+                            )
+                        if not faces:
+                            _tracker.assign([], {}, dt_frames=_det_dt[0])
+                            carried = _carry_pairs(_tracker, smap, max_faces,
+                                                   advance=False)
+                            _record_geometry(carried, g)
+                            for _j in _seen_ok:
+                                _seen_ok[_j] = False
+                            key_swap_ok[k] = dict(_seen_ok)
+                            if carried:
+                                last_pairs_ref[0] = carried
+                            det_done = min(lim, max(0, g + 1))
+                            _set_phase_progress(12, 18, "Analysing faces…",
+                                                det_done, lim, phase="detection")
+                            continue
+
+                    if multi_face_safe:
+                        pairs = _persistent_track_pairs(
+                            faces, smap, refs, _tracker, max_faces,
+                            frame_shape=frm.shape if frm is not None else None,
+                            dt_frames=_det_dt[0],
+                        )
+                    else:
+                        # prev_bbox is used only to help pick the right
+                        # candidate when the detector reports more than one
+                        # face-like region this frame - NOT to smooth or
+                        # blend the geometry that gets painted (see the
+                        # single source of truth note at this chunk's start).
+                        # tr.obs_bbox is the track's own last RAW real
+                        # detection, correctly present or correctly None
+                        # across any gap with nothing extra to invalidate.
+                        _tr0_ = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                        pairs = _pairs_for_frame(
+                            faces, smap, refs,
+                            max_faces=max_faces,
+                            prev_bbox=_tr0_.obs_bbox if _tr0_ is not None else None,
+                            frame_bgr=frm,
+                            prev_bboxes=[_slot_prev_bboxes.get(j) for j in sorted(smap.keys())],
+                            locked_emb=_locked_emb[0],
+                        )
+                        # Motion-consistency veto: reject a live detection
+                        # whose 5 keypoints land far from where THIS
+                        # identity's own tracked motion says they should be,
+                        # before it reaches tracker.bind() and poisons that
+                        # history. _kps_reliable() upstream already rejects
+                        # keypoints that are not mutually consistent with ANY
+                        # rigid pose - a degenerate/impossible read. It
+                        # cannot catch a read that fits a pose fine but is
+                        # the WRONG pose for this identity right now: hair
+                        # sweeping across the face mid-turn can pull the
+                        # landmark regression onto a plausible-looking
+                        # configuration that is not where the eyes and mouth
+                        # actually are, for as long as the hair keeps
+                        # confusing the same few reads in a similar way.
+                        #
+                        # This reads and writes ONLY TrackState fields
+                        # (tr.kps/.vel_kps/.last_hit_kps/.missed) - the same,
+                        # single state _tracker.bind() below updates and
+                        # _pairs_for_frame's selection above already reads
+                        # (tr.obs_bbox). Earlier attempts at this check
+                        # instead compared against _stabilize_face_geometry's
+                        # OWN, separately-blended "previous position" - a
+                        # second smoothing pass downstream of this one, fed
+                        # different inputs on a different schedule, that
+                        # could itself go stale and disagree with whatever
+                        # this check had just approved. That divergence, not
+                        # any single threshold, was the root of the hard-
+                        # edged/frozen/duplicate-looking paste reports; that
+                        # second pass is gone now (a real detection is
+                        # painted with its own raw geometry once accepted,
+                        # exactly like the multi-face path already does), so
+                        # there is only one position for this check, the
+                        # bind() call right after it, and the compositor to
+                        # ever agree or disagree about.
+                        #
+                        # Two failure modes were measured directly while
+                        # building this and are guarded against explicitly:
+                        # (1) comparing against tr.kps advanced by
+                        # TrackState.predict()'s deliberately damped,
+                        # under-committing extrapolation - correct for a
+                        # cautious carry-forward guess, wrong for judging a
+                        # NEW detection, since real constant-velocity motion
+                        # then falls further behind every veto cycle and the
+                        # measured deviation grows unbounded even though
+                        # nothing is wrong. Fixed by projecting from
+                        # last_hit_kps (the actual last real detection) over
+                        # the full elapsed time, undamped, and by advancing
+                        # the track's own prediction on every veto so it
+                        # keeps pace. (2) comparing a detection right after a
+                        # GENUINE gap against the pre-gap position, which
+                        # carries no information about where the subject is
+                        # after a real absence - skipped outright below.
+                        # Bounding how many consecutive detector calls the
+                        # veto may override before conceding reuses
+                        # `trk_flip_frames`, the same constant the multi-face
+                        # tracker already uses for "how long may a competing
+                        # signal override the established one before
+                        # conceding" - the same hysteresis idiom, not a new
+                        # tuned number.
+                        if _after_real_gap:
+                            _kps_veto_streak[0] = 0
+                            _kps_veto_frames[0] = 0.0
+                        if pairs and len(pairs) == 1 and not _after_real_gap:
+                            _pf0, _psrc0 = pairs[0]
+                            _tr0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                            _new_kps = getattr(_pf0, "kps", None)
+                            # v11.2.3: a track that just reacquired (see
+                            # TrackState.update()'s "ReentrySafe snap") has
+                            # vel_kps deliberately zeroed - "we don't yet
+                            # know this identity's motion, don't extrapolate
+                            # a guess" is correct for THAT frame's own
+                            # predict(), but here it means the very next
+                            # frame's expected position is the frozen snap
+                            # point itself, with no velocity credit at all.
+                            # During sustained rapid motion (the case this
+                            # veto exists to protect, not reject) the
+                            # subject has plainly kept moving since the
+                            # snap, so a real, correct detection reads as a
+                            # huge "deviation" against a zero-velocity
+                            # expectation and gets vetoed - which never lets
+                            # update() run to record real velocity or clear
+                            # HairGate's confirm_hits, so the SAME zero-
+                            # velocity state persists and the very next
+                            # candidate gets vetoed too. Measured directly:
+                            # a face oscillating at up to ~55px/frame
+                            # deadlocked in exactly this cycle and never
+                            # painted again for the rest of a 200-frame
+                            # clip. No reliable velocity yet is the same
+                            # "nothing to compare against" case
+                            # _after_real_gap already skips this veto for -
+                            # reused here rather than reinvented.
+                            _no_vel_basis = (
+                                _tr0 is not None
+                                and (_tr0.vel_kps is None
+                                     or not bool(np.any(np.abs(_tr0.vel_kps) > 1e-6)))
+                            )
+                            if (_tr0 is not None and _tr0.established and not _no_vel_basis and
+                                    _tr0.hits >= 3 and
+                                    _tr0.kps is not None and _new_kps is not None and
+                                    _tr0.kps.shape == np.asarray(_new_kps).shape and
+                                    _kps_veto_streak[0] < int(_E._P.get("trk_flip_frames", 5)) and
+                                    _kps_veto_frames[0] < float(_predicted_miss_budget())):
+                                # Same physical head (bbox overlap) → expression,
+                                # open mouth, or a rapid yaw. Never veto that;
+                                # vetoing is what flashes the original face.
+                                _same_head_now = False
+                                try:
+                                    _anc = getattr(_tr0, "last_hit_bbox", None)
+                                    if _anc is None:
+                                        _anc = getattr(_tr0, "bbox", None)
+                                    if _anc is not None:
+                                        _same_head_now = _bbox_iou(_anc, _pf0.bbox) >= 0.28
+                                except Exception:
+                                    _same_head_now = False
+                                # v11.2.6: bbox overlap alone is not "the same
+                                # head", it is "a box in the same place". The
+                                # v11.1.4 hair-confusion signature is precisely
+                                # a box in the same place whose LANDMARKS have
+                                # moved off the face, so the overlap bypass
+                                # above waved through the exact read the veto
+                                # exists to catch - measured directly, 1.7px /
+                                # 10.5px placement error on v11.2.3 became
+                                # 14.7px / 151.8px once the bypass landed.
+                                #
+                                # Checking that the landmarks still sit in the
+                                # same place INSIDE their own box closes it
+                                # without giving back what the bypass was for.
+                                # The bypass exists because a turn, a talk or
+                                # an open mouth moves the landmarks a long way
+                                # in image space while the head stays put, and
+                                # vetoing those is what flashes the original
+                                # face; none of them move the landmarks
+                                # relative to the box that is drawn around
+                                # them, so all of them still pass here.
+                                #
+                                # It is a veto in its OWN right, not merely a
+                                # condition on the bypass: registration is
+                                # motion-invariant, so unlike the displacement
+                                # test below it stays meaningful no matter how
+                                # fast the subject is moving, and letting the
+                                # motion budget overrule it would just re-open
+                                # the same defect through the other branch.
+                                _reg_bad = False
+                                try:
+                                    _reg_new = _kps_registration(_new_kps, _pf0.bbox)
+                                    _reg_old = _kps_registration(_tr0.last_hit_kps,
+                                                                 _tr0.last_hit_bbox)
+                                    if _reg_new is not None and _reg_old is not None:
+                                        _reg_bad = float(np.linalg.norm(
+                                            _reg_new - _reg_old)) > _REG_JUMP_TOL
+                                except Exception:
+                                    _reg_bad = False
+                                if _reg_bad:
+                                    _tr0.predict(float(_det_dt[0]))
+                                    _kps_veto_streak[0] += 1
+                                    _kps_veto_frames[0] += float(_det_dt[0])
+                                    pairs = []
+                                elif not _same_head_now:
+                                    _elapsed = float(_tr0.missed) + float(_det_dt[0])
+                                    _expected = _tr0.kps
+                                    _est_speed = 0.0
+                                    if _tr0.vel_kps is not None and _tr0.last_hit_kps is not None:
+                                        _expected = _tr0.last_hit_kps + _tr0.vel_kps * _elapsed
+                                        _est_speed = float(np.mean(np.linalg.norm(_tr0.vel_kps, axis=1))) * _elapsed
+                                    _face_w = max(1.0, float(_pf0.bbox[2] - _pf0.bbox[0]))
+                                    # Eyes + nose only. Mouth corners jump on
+                                    # every open-mouth / talk frame and were
+                                    # inflating mean deviation enough to veto
+                                    # a perfectly good head.
+                                    _new_a = np.asarray(_new_kps, np.float32)
+                                    _exp_a = np.asarray(_expected, np.float32)
+                                    _nuse = min(3, _new_a.shape[0], _exp_a.shape[0])
+                                    _dev = float(np.mean(np.linalg.norm(
+                                        _new_a[:_nuse] - _exp_a[:_nuse], axis=1)))
+                                    # v11.2.6: the third term is the fix for
+                                    # the inversion documented below. The first
+                                    # two terms are both anchored to what the
+                                    # track BELIEVES: a static tolerance, plus
+                                    # credit for motion it has already measured.
+                                    # Neither says anything about how much that
+                                    # belief is worth, and the belief decays
+                                    # with age - after `_elapsed` frames with no
+                                    # real detection the subject could be
+                                    # anywhere a head can plausibly have
+                                    # travelled in that time, whatever the last
+                                    # velocity estimate happened to say. Scaling
+                                    # that plausible travel by the face's own
+                                    # width keeps it resolution- and zoom-
+                                    # independent, which is the property the
+                                    # zoomed/cropped regime needs (the same head
+                                    # turn covers far more pixels there, and a
+                                    # pixel-denominated budget silently gets
+                                    # stricter as you zoom in). 0.06 face-widths
+                                    # per frame is roughly a head crossing its
+                                    # own width in two thirds of a second - fast
+                                    # for a real head, so it bounds the term
+                                    # rather than opening the gate.
+                                    #
+                                    # The term is ~0 at _elapsed = 1, so a FRESH
+                                    # prediction is judged exactly as strictly as
+                                    # before: the veto keeps its full strength
+                                    # in the case it was written for (v11.1.4's
+                                    # hair/skull misread, which arrives while the
+                                    # track is being detected every frame) and
+                                    # relaxes only as the prediction it is
+                                    # judging against goes stale.
+                                    # Elapsed time this veto did not itself
+                                    # create. Each veto calls _tr0.predict(),
+                                    # which advances `missed`, which is what
+                                    # `_elapsed` counts - so scoring drift off
+                                    # raw _elapsed made the veto inflate the
+                                    # very budget that decides it. Traced
+                                    # directly on t_confused_kps: an unchanging
+                                    # ~515px deviation was rejected against a
+                                    # 192px budget, then 292, then 392, then
+                                    # ADMITTED at 691 four calls later, purely
+                                    # because the drift term had been fed 30
+                                    # frames of elapsed time that the detector
+                                    # never asked for - it had been reporting a
+                                    # face every 5 frames throughout. Placement
+                                    # error went from 3.4px mean to 143.3px.
+                                    #
+                                    # Detector silence and our own refusal to
+                                    # accept are not the same uncertainty. Only
+                                    # the first is a reason to widen the gate;
+                                    # the second already has its own explicit
+                                    # bound (_kps_veto_frames), and letting it
+                                    # widen the budget too both double-counts
+                                    # it and moves the concession from that
+                                    # stated bound to an unpredictable point.
+                                    _quiet = max(0.0, _elapsed - _kps_veto_frames[0])
+                                    _drift = _face_w * 0.06 * max(0.0, _quiet - 1.0)
+                                    _budget = _face_w * 0.35 + 0.80 * _est_speed + _drift
+                                    # ORIGINAL MEASUREMENT that motivated the
+                                    # `_drift` term above, kept because it is the
+                                    # number any future change here has to beat.
+                                    #
+                                    # On a sustained rapid-motion clip (sine,
+                                    # 40-frame period, ~55px/frame peak, harness
+                                    # resolution mismatch corrected) the pipeline
+                                    # made 42 detector calls but only 11 of them
+                                    # ever became REAL anchors, and those 11 land
+                                    # in tight clusters around the sine's turning
+                                    # points: [4,8,12, 44,48, 84,88, 124,128,
+                                    # 164,168]. Detections are accepted only
+                                    # where the subject is momentarily slow and
+                                    # rejected while it is actually moving, which
+                                    # leaves real anchors ~36 frames apart, forces
+                                    # 61% of rendered frames into _geom_for_frame's
+                                    # frozen "span exceeded max_bracket" branch,
+                                    # and lands the paste a mean 283px (max 681px)
+                                    # from the head - present on every frame, but
+                                    # far enough off it that the real face shows.
+                                    #
+                                    # The mechanism is a logic inversion here:
+                                    # `_est_speed` comes from the track's own
+                                    # velocity estimate, so when that estimate is
+                                    # stale or points the wrong way (which is
+                                    # exactly what a direction reversal produces,
+                                    # twice per oscillation) the budget collapses
+                                    # to the static floor - i.e. UNCERTAINTY ABOUT
+                                    # VELOCITY MAKES THIS VETO STRICTER, when it
+                                    # should make it more permissive. Each veto
+                                    # then skips the update that would have
+                                    # corrected the velocity, so the next call is
+                                    # judged against the same bad estimate.
+                                    # v11.2.3 fixed the all-zero case; v11.2.6's
+                                    # `_drift` term above fixes the stale and
+                                    # wrong-direction cases, by making the budget
+                                    # depend on the AGE of the estimate rather
+                                    # than only on its value.
+                                    #
+                                    # Not changed blind here: the veto exists to
+                                    # catch a hair/occlusion read that is
+                                    # self-consistent but wrong (v11.1.4), and
+                                    # that case also passes _kps_reliable, so it
+                                    # cannot be told from genuine fast motion by
+                                    # any single-frame test. Distinguishing them
+                                    # needs coherence across consecutive rejected
+                                    # reads (real motion keeps travelling; a hair
+                                    # confusion clusters at one spot), which is a
+                                    # real design change and wants validation
+                                    # against footage this sandbox does not have.
+                                    if _dev > _budget and str(cfg.get("smooth_motion") or "").strip().lower() not in ("off", "none", "0"):
+                                        # A hair misread sits still. A head
+                                        # that never pauses keeps travelling
+                                        # in one direction. Admit that, so
+                                        # the tracker can learn the real
+                                        # speed instead of rejecting every
+                                        # frame of the movement.
+                                        _travelling = False
+                                        try:
+                                            _mc = np.array([
+                                                0.5 * (float(_pf0.bbox[0]) + float(_pf0.bbox[2])),
+                                                0.5 * (float(_pf0.bbox[1]) + float(_pf0.bbox[3])),
+                                            ], np.float32)
+                                            _motion_centers.append(_mc)
+                                            if len(_motion_centers) > 5:
+                                                del _motion_centers[:-5]
+                                            if len(_motion_centers) >= 3:
+                                                _d1 = _motion_centers[-1] - _motion_centers[-2]
+                                                _d2 = _motion_centers[-2] - _motion_centers[-3]
+                                                _n1 = float(np.linalg.norm(_d1))
+                                                _n2 = float(np.linalg.norm(_d2))
+                                                if (_n1 > 0.05 * _face_w and _n2 > 0.05 * _face_w):
+                                                    _cos = float(np.dot(_d1, _d2) / (_n1 * _n2 + 1e-6))
+                                                    _travelling = _cos > 0.4
+                                        except Exception:
+                                            _travelling = False
+                                        # A cut or a reframe puts the SAME
+                                        # person in a new place. Registration
+                                        # already passed (eyes still sit in
+                                        # the box). Identity says it is still
+                                        # them. Dropping the pair here is what
+                                        # left the original face up for the
+                                        # next several detector calls.
+                                        _same_person = False
+                                        try:
+                                            _emb = getattr(_pf0, "normed_embedding", None)
+                                            _id_lock = getattr(_tr0, "id_lock", None)
+                                            if _id_lock is None:
+                                                _id_lock = getattr(_tr0, "emb", None)
+                                            if _emb is not None and _id_lock is not None:
+                                                _va = np.asarray(_emb, np.float32).reshape(-1)
+                                                _vb = np.asarray(_id_lock, np.float32).reshape(-1)
+                                                _kk = min(int(_va.size), int(_vb.size))
+                                                if _kk >= 8:
+                                                    _same_person = float(np.dot(_va[:_kk], _vb[:_kk])) >= 0.40
+                                        except Exception:
+                                            _same_person = False
+                                        if _same_person:
+                                            _kps_veto_streak[0] = 0
+                                            _kps_veto_frames[0] = 0.0
+                                        elif not _travelling:
+                                            _tr0.predict(float(_det_dt[0]))
+                                            _kps_veto_streak[0] += 1
+                                            _kps_veto_frames[0] += float(_det_dt[0])
+                                            pairs = []
+                        if pairs:
+                            _kps_veto_streak[0] = 0
+                            _kps_veto_frames[0] = 0.0
+                        # If the veto emptied the pair but the detector still
+                        # sees a face overlapping the last head, keep it.
+                        if (not pairs) and faces and max_faces == 1:
+                            _tr_keep = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                            _anc_k = None
+                            if _tr_keep is not None:
+                                _anc_k = getattr(_tr_keep, "last_hit_bbox", None)
+                                if _anc_k is None:
+                                    _anc_k = getattr(_tr_keep, "bbox", None)
+                            if _anc_k is not None:
+                                # v11.2.6: this rescue judges on OVERLAP, which
+                                # is a statement about where the box is, and it
+                                # was undoing the landmark-quality veto above -
+                                # traced directly: the registration veto fired
+                                # on the hair-confused read and this branch put
+                                # the identical face straight back at IoU 0.96,
+                                # which is why closing the bypass alone changed
+                                # nothing. A read whose landmarks are not on the
+                                # face is not "the same head seen slightly
+                                # differently", and no amount of box overlap
+                                # makes it paintable, so a candidate has to
+                                # clear the same registration check to be
+                                # rescued. Position-based rejections - the
+                                # motion budget - are exactly what this branch
+                                # is still for.
+                                _reg_anchor = None
+                                try:
+                                    _tk = _tr_keep
+                                    if _tk is not None:
+                                        _reg_anchor = _kps_registration(
+                                            _tk.last_hit_kps, _tk.last_hit_bbox)
+                                except Exception:
+                                    _reg_anchor = None
+                                _best_keep = None
+                                _best_iou = 0.0
+                                for _fk in faces:
+                                    if _reg_anchor is not None:
+                                        _rk = _kps_registration(
+                                            getattr(_fk, "kps", None), _fk.bbox)
+                                        if _rk is not None and float(np.linalg.norm(
+                                                _rk - _reg_anchor)) > _REG_JUMP_TOL:
+                                            continue
+                                    try:
+                                        _iu = _bbox_iou(_fk.bbox, _anc_k)
+                                    except Exception:
+                                        _iu = 0.0
+                                    if _iu > _best_iou:
+                                        _best_iou, _best_keep = _iu, _fk
+                                if _best_keep is not None and _best_iou >= 0.22:
+                                    _only = smap.get(0) or next(iter(smap.values()))
+                                    pairs = [(_best_keep, _only)]
+                                    _kps_veto_streak[0] = 0
+                                    _kps_veto_frames[0] = 0.0
+                        # v11.2.7 CONTENT GATE. Every gate above this line
+                        # reasons about the detector's OUTPUT - the box, the
+                        # landmarks, the score, where they sit, how they move.
+                        # None of them look at the pixels underneath, so a
+                        # confident, well-posed, correctly-sized, correctly-
+                        # placed, self-consistent detection over the back of
+                        # someone's head passes all of them. That is the
+                        # reported "face pasted on the hair when the subject's
+                        # face is not visible", and it is why t_occlusion has
+                        # been reporting 0/90 frames suppressed through every
+                        # round of geometric fixes: the swap was not being
+                        # HELD onto the occluder by a stale anchor, it was
+                        # being freshly re-detected and re-bound on every
+                        # single detector call, 20 of 20.
+                        if frm is not None and pairs:
+                            _kept = []
+                            for _cf, _csrc in pairs:
+                                _ctr = None
+                                for _cj, _csf in smap.items():
+                                    if _csf is _csrc:
+                                        _ctr = (_tracker.tracks.get(_cj)
+                                                if hasattr(_tracker, "tracks") else None)
+                                        break
+                                _anc_e = None
+                                if _ctr is not None:
+                                    _anc_e = getattr(_ctr, "last_hit_bbox", None)
+                                    if _anc_e is None:
+                                        _anc_e = getattr(_ctr, "obs_bbox", None)
+                                _ext_ok = True
+                                if _anc_e is not None:
+                                    _ext_ok = _same_extent(_cf.bbox, _anc_e)
+                                _vis, _dd = _content_visible(frm, _cf, _ctr)
+                                _vis = bool(_vis and _ext_ok)
+                                # Lighting drift must not blank the swap. A
+                                # high-confidence LIVE detection whose box is
+                                # still the same size as the last good face is
+                                # the subject, even if Cr/Cb moved. Chroma
+                                # remains the occluder test for collapsed /
+                                # predicted boxes.
+                                _is_live = not bool(getattr(_cf, "predicted", False))
+                                _det_live = float(getattr(_cf, "det_score", 0.0) or 0.0)
+                                if (not _vis) and _is_live and _ext_ok and _det_live >= 0.32:
+                                    _vis = True
+                                # The miss counter only advances while the
+                                # EXTENT still looks right. An occluder
+                                # collapses the box as well as changing its
+                                # colour, and that case must never be widened
+                                # into acceptance - only a full-size box whose
+                                # colour has moved gets the benefit of the
+                                # doubt, which is what a lighting change looks
+                                # like and what an occlusion does not.
+                                #
+                                # The counter clears only when the distance is
+                                # back inside the BASE tolerance. A frame that
+                                # passed only because the gate had already
+                                # widened HOLDS the counter where it is: the
+                                # widening has to outlast the reference's climb
+                                # across to the new lighting, or the tolerance
+                                # snaps back to 30 on the first acceptance, the
+                                # very next frame is rejected again, and the
+                                # gate oscillates - one lighting change turning
+                                # into a run of visible on/off transitions
+                                # instead of a single one.
+                                if _ctr is not None:
+                                    if _vis and _dd <= _CHROMA_TOL:
+                                        _ctr.skin_miss = 0
+                                    elif not _vis and _ext_ok:
+                                        _ctr.skin_miss = int(
+                                            getattr(_ctr, "skin_miss", 0) or 0) + 1
+                                if _vis:
+                                    _kept.append((_cf, _csrc))
+                            # "The detector returned a box" and "something
+                            # paintable is on screen" are different facts, and
+                            # only the second one ends a gap. _no_face_streak's
+                            # own comment at the taper site already claims to
+                            # count the second - "found nothing paintable at
+                            # all (genuinely empty, OR EVERY CANDIDATE
+                            # REJECTED)" - but the code only ever incremented
+                            # it on an empty detector return, so a
+                            # rejected-but-present candidate left the long
+                            # REACQUIRE_GRACE_SEC window in force and the
+                            # stale face kept painting for three seconds.
+                            if _kept:
+                                _no_face_streak[0] = 0
+                            else:
+                                _no_face_streak[0] += 1
+                                stats["vis_reject_calls"] += 1
+                            _vis_marks.append((g, bool(_kept)))
+                            pairs = _kept
+                        if pairs and frm is None:
+                            _no_face_streak[0] = 0
+                            _vis_marks.append((g, True))
+                        # The single-face path keeps its own well-tested pairing
+                        # (startup identity lock, reference embeddings), but it
+                        # still gets the track's temporal memory so its mask and
+                        # colour correction are EMA-stabilised the same way.
+                        for _pf, _psrc in pairs:
+                            for _sj, _sface in smap.items():
+                                if _psrc is _sface:
+                                    # Schmitt trigger: decide with the
+                                    # PREVIOUS verdict in hand, then record
+                                    # this one as the next frame's memory.
+                                    _tr_prev = (_tracker.tracks.get(_sj)
+                                                if hasattr(_tracker, "tracks")
+                                                else None)
+                                    _kok = _kps_reliable(_pf, _tr_prev)
+                                    _tr = _tracker.bind(
+                                        _sj, _pf, dt_frames=_det_dt[0],
+                                        kps_ok=_kok,
+                                    )
+                                    if _tr is not None:
+                                        _tr.pose_ok = bool(_kok)
+                                    # Learn only from what was accepted, so an
+                                    # occluder can never teach the reference to
+                                    # accept itself.
+                                    if frm is not None:
+                                        _learn_face_chroma(frm, _pf, _tr)
+                                    try:
+                                        _pf._track = _tr
+                                        _pf._slot = _sj
+                                        if frm is not None:
+                                            _pf._frame_shape = frm.shape
+                                            if _tr is not None:
+                                                _tr._frame_wh = (int(frm.shape[1]), int(frm.shape[0]))
+                                        # FIX (debug session): single-face path previously
+                                        # hardcoded _occlusion_guard=False unconditionally,
+                                        # which meant a face partially outside the frame
+                                        # (or otherwise low boundary confidence) still got
+                                        # pasted with a full, untrimmed mask. Multi-face
+                                        # already computes this; single-face never did.
+                                        # Gate ONLY on frame-boundary confidence here (not
+                                        # is_marginal / profile score) so ordinary profile
+                                        # turns are NOT affected — that was the specific
+                                        # regression the previous hardcoded False avoided.
+                                        _boundary_conf = 1.0
+                                        if HAS_PHASE1:
+                                            try:
+                                                _boundary_conf = validate_detection_confidence(
+                                                    _pf.bbox,
+                                                    frm.shape if frm is not None else None,
+                                                    getattr(_pf, "landmark_2d_106", None),
+                                                )
+                                            except Exception:
+                                                _boundary_conf = 1.0
+                                        _want = float(np.clip((0.75 - _boundary_conf) / 0.35, 0.0, 1.0))
+                                        # v11.2.0: light occlusion trim on marginal
+                                        # single-face (hair/hand in box) — was
+                                        # multi-only; full mask covered ears/hair.
+                                        try:
+                                            if _face_looks_marginal(_pf):
+                                                _want = max(_want, 0.40)
+                                        except Exception:
+                                            pass
+                                        _pf._occlusion_guard = (
+                                            _tr.ramp_occlusion(_want) if _tr is not None else _want
+                                        )
+                                    except Exception:
+                                        pass
+                                    break
+
+                    # v11.1.10: drop live pairs still paste-frozen (reacquire
+                    # confirmation). Multi-face already gates inside
+                    # _persistent_track_pairs; single-face bind can leave a
+                    # frozen track attached — do not record/paint it.
+                    if pairs:
+                        pairs = [(f, s) for f, s in pairs if _face_swap_allowed(f)]
+
+                    if pairs and max_faces == 1 and _locked_emb[0] is None:
+                        cand_emb = pairs[0][0].normed_embedding
+                        if _startup_emb_buf:
+                            sim = float(np.dot(_startup_emb_buf[-1], cand_emb))
+                            if sim >= 0.45:
+                                _startup_confirm[0] += 1
+                                _startup_emb_buf.append(cand_emb)
+                            else:
+                                _startup_confirm[0] = 1
+                                _startup_emb_buf = [cand_emb]
+                        else:
+                            _startup_confirm[0] = 1
+                            _startup_emb_buf = [cand_emb]
+
+                        if _startup_confirm[0] >= 3:
+                            _locked_emb[0] = np.mean(np.stack(_startup_emb_buf[-3:], axis=0), axis=0)
+                            nrm = float(np.linalg.norm(_locked_emb[0])) + 1e-6
+                            _locked_emb[0] = _locked_emb[0] / nrm
+                            logging.info("Startup identity locked after %d consistent frames", _startup_confirm[0])
+                        # Do NOT clear pairs while locking. That flashed the
+                        # original face on every profile/partial frame until
+                        # three high-sim embeddings arrived — they never do
+                        # on a side view.
+
+                    # A real, accepted detection is painted with its own RAW
+                    # geometry - no extra blend-toward-history step here.
+                    # That step (_stabilize_face_geometry, since removed) was
+                    # a second, independently-maintained "smoothed position"
+                    # alongside TrackState's own (tr.bbox/tr.kps, EMA and
+                    # One-Euro-filtered in swap_engine.py), fed slightly
+                    # different inputs in a different order, with no
+                    # synchronization between the two. That divergence - not
+                    # any single threshold in either one - was the root of
+                    # the hard-edged/frozen/duplicate-looking paste reports:
+                    # whichever of the two happened to still hold stale data
+                    # could silently outvote the other. Trusting the raw,
+                    # gated detection directly matches how the multi-face
+                    # path already works, which has not needed a second
+                    # smoothing layer.
+                    if pairs:
+                        # Update the slot that actually received the source face.
+                        # This prevents bbox history from swapping when detector
+                        # ordering changes.
+                        for pf, psrc in pairs:
+                            for sj, sface in smap.items():
+                                if psrc is sface:
+                                    _slot_prev_bboxes[sj] = pf.bbox.astype(np.float32).copy()
+                                    break
+                        _last_swap_bboxes.clear()
+                        for sj in sorted(smap.keys()):
+                            bb = _slot_prev_bboxes.get(sj)
+                            if bb is not None:
+                                _last_swap_bboxes.append(bb.copy())
+                        last_bboxes_ref[0] = list(_last_swap_bboxes)
+
+                    # Carry forward any slot that pairing did NOT cover this
+                    # frame - not only when EVERY slot failed to pair.
+                    #
+                    # The previous check ("if not pairs") only carried when the
+                    # WHOLE list came back empty, so a slot that fails to pair
+                    # while a DIFFERENT slot in the same frame succeeds got
+                    # nothing at all: no real pair, no carried one either - a
+                    # silent hole in the one guarantee this engine is built
+                    # around ("a slot always gets carried through a miss").
+                    # Measured directly: a heavily-occluded identity in a
+                    # two-face scene (a near-total overlap, its own visible
+                    # sliver too narrow for a reliable landmark read) went 82
+                    # CONSECUTIVE frames with NOTHING recorded for it, purely
+                    # because the OTHER identity kept pairing successfully
+                    # every single frame and so the all-or-nothing check never
+                    # tripped. That is what a downstream fix (bounding how long
+                    # a gap may be bridged) surfaced as a visible defect - the
+                    # gap this closes was always there, just never this long
+                    # before a slot's own kps could get rejected outright.
+                    pairs = list(pairs or [])
+                    covered = {sj for _pf, psrc in pairs
+                              for sj, sface in smap.items() if psrc is sface}
+                    missing = set(smap.keys()) - covered
+                    if missing:
+                        have_srcs = {id(psrc) for _pf, psrc in pairs}
+                        for pf, psrc in _carry_pairs(_tracker, smap, max_faces, advance=False):
+                            if getattr(pf, "_slot", None) in missing and id(psrc) not in have_srcs:
+                                pairs.append((pf, psrc))
+                    # Wipe exit-era timeline even while confirm-frozen (no pairs).
+                    _scrub_reacquire_timelines(g)
+                    _record_geometry(pairs or [], g)
+                    # A pair that comes back predicted means the detector ran
+                    # and this identity was not among what it found.
+                    for _j in _seen_ok:
+                        _seen_ok[_j] = False
+                    for _f, _ in (pairs or []):
+                        _j = getattr(_f, "_slot", None)
+                        if _j in _seen_ok and not bool(getattr(_f, "predicted", False)):
+                            _seen_ok[_j] = True
+                    key_swap_ok[k] = dict(_seen_ok)
+                    if pairs:
+                        last_pairs_ref[0] = pairs
+                    det_done = min(lim, max(0, g + 1))
+                    _set_phase_progress(12, 18, "Analysing faces…", det_done, lim, phase="detection")
+                else:
+                    stats["tracker_hits"] += 1
+                    # Between detections, follow the face pixels instead of a
+                    # damped velocity guess. That guess is what trails a quick
+                    # nod or turn. Lucas-Kanade on the five landmarks is the
+                    # same trick live swap tools use; a failed track falls
+                    # back to the velocity coast.
+                    _dt_skip = float(max(1, skip_n))
+                    if prev_flow is not None:
+                        for _tr in _tracker.tracks.values():
+                            if _tr is None:
+                                continue
+                            if not _tr.flow_correct(prev_flow, frm):
+                                _tr.predict(_dt_skip)
+                        carried = _carry_pairs(_tracker, smap, max_faces, advance=False)
+                    else:
+                        carried = _carry_pairs(_tracker, smap, max_faces, dt_frames=_dt_skip)
+                    _record_geometry(carried, g)
+                    # Detector deliberately skipped: its most recent verdict on
+                    # whether each face is visible still stands.
+                    key_swap_ok[k] = dict(_seen_ok)
+
+            # One-sided hold: how long a lost identity may be held/faded
+            # before the render loop gives up and reverts to the original
+            # frame. This used to be capped at ~12 output frames (well under
+            # 0.5s at most fps/preset combinations), which was short enough
+            # that an ordinary detection gap - a fast pan, a genuine
+            # multi-frame detector miss - could exceed it and revert to the
+            # original face for a few frames even though the subject never
+            # left the shot. This is a DIFFERENT failure mode than what the
+            # HoldThrough bbox-overlap rescues above address: those rescue a
+            # frame where the detector still reports SOMETHING but an
+            # earlier gate was wrongly distrusting it; this covers a
+            # genuine detector miss with nothing at all to rescue. The
+            # frame-edge/containment checks in _run_job_body's render loop
+            # are what actually catch a genuine departure (subject walks out
+            # of frame) regardless of this value, so lengthening it mainly
+            # trades a longer worst-case hold on a stale position - for a
+            # non-edge-touching failure like a hard scene cut - against far
+            # fewer needless reverts during ordinary gaps. Never shorter than
+            # the previous cadence-derived floor.
+            _cadence_taper = int(max(3, min(2 * max(1, skip_n, swap_gap_base), 12)))
+            taper = max(_cadence_taper, int(round(out_fps * REACQUIRE_GRACE_SEC)))
+            # How long a gap BETWEEN TWO REAL DETECTIONS is still safe to
+            # bridge with a full, confident interpolation - expressed as a
+            # TIME budget (see _geom_for_frame's docstring for why a fixed
+            # frame count cannot work here) and converted to output frames at
+            # the actual output fps, so it does not have to be re-tuned
+            # whenever fps or the detection cadence preset changes.
+            # v11.2.0 CinemaQA: 0.55s (was 0.7s ReentrySafe / 1.5s Continuum).
+            # Reacquire wipes timelines; this bounds any residual real–real gap.
+            #
+            # Deliberately floored on _cadence_taper, NOT the (now much
+            # larger) one-sided-hold `taper` above: this bounds a DIFFERENT
+            # risk - confidently straight-line-bridging a gap between two
+            # real detections when the subject's actual path in between was
+            # not straight (a turn, a roll, a round trip). A longer
+            # one-sided hold grace period has nothing to do with that and
+            # must not loosen it.
+            max_bracket_frames = max(_cadence_taper + 1, int(round(out_fps * 0.55)))
+
+            # Measured directly in an earlier round: applying the long grace
+            # window unconditionally let a sustained hand/object occlusion
+            # paste the swap on top of the occluder for far longer than
+            # before. _no_face_streak already counts consecutive KEY-FRAME
+            # DETECTOR CALLS that found nothing paintable at all (genuinely
+            # empty, or every candidate rejected) - it does NOT increment for
+            # a cadence-skipped key frame the detector was never asked to
+            # look at. A streak past a couple of calls means the content
+            # itself is actively failing the visibility check right now
+            # (occlusion, looking away, a degenerate read), which is exactly
+            # the case the short, original taper was already tuned to bound;
+            # a single blip (typical of ordinary motion blur during a brief
+            # camera move) is not enough to demote, so genuine tracking gaps
+            # still get the long grace window.
+            # SDOS-075. This used to be a count of DETECTOR CALLS, set to 2,
+            # and it is the direct cause of the intermittent revert to the
+            # original face.
+            #
+            # The evidence was weighed backwards. Two different things set a
+            # mark here:
+            #   * the detector returned NOTHING - weak evidence the face may
+            #     have gone - which needed BLIND_AFTER_SEC (0.75 s, ~22 frames)
+            #     before it demoted anything;
+            #   * the detector returned a face and every candidate was
+            #     REJECTED downstream - which is positive evidence the face IS
+            #     there, only that this read was not trusted - and that
+            #     demoted after 2 calls, as little as 2 OUTPUT FRAMES at
+            #     det_n=1 and 10 at the default cadence.
+            #
+            # So the reading that proves the subject is present collapsed the
+            # grace window up to ten times faster than the reading that
+            # suggests they are absent. Once demoted, eff_taper drops from
+            # REACQUIRE_GRACE_SEC (60 frames) to _cadence_taper (3-12), the
+            # held face fades within a few frames, and the original shows -
+            # until the next accepted detection brings it back. That is the
+            # reported intermittent revert, and the fading extrapolated face
+            # on the way down is the reported ghost.
+            #
+            # It is now a DURATION, in output frames, and no quicker than the
+            # absence path. A rejected run still demotes - a face that can
+            # never be confirmed must not be painted forever - but only after
+            # it has persisted as long as an empty detector would have to.
+            _reject_blind = max(2.0, float(out_fps) * REJECT_BLIND_SEC)
+
+            def _run_is_blind(run):
+                """Has this rejected run lasted long enough to count as blind?"""
+                if len(run) < 2:
+                    return False
+                return (float(run[-1]) - float(run[0])) >= _reject_blind
+            # How long "the detector returned nothing" may run before it stops
+            # being a gap to ride through and becomes evidence of absence.
+            # Deliberately independent of `taper`: taper is how fast a held
+            # face DIMS, this is how long it may be held at all when nothing
+            # has been seen. Tying them together forced a single number to
+            # answer both, and every value was wrong for one of them - a long
+            # one carried a ghost 411 frames past a subject's exit, a short
+            # one made every motion-blur dropout dim and pop.
+            _blind_after = max(1.0, float(out_fps) * BLIND_AFTER_SEC)
+
+            def _blind_spans():
+                """Frame ranges over which nothing paintable was ever found.
+
+                Built from the recorded per-call verdicts, so it describes
+                where the subject actually was invisible rather than what the
+                last detector call happened to say. A run must reach
+                _ACTIVE_REJECT_STREAK calls to count - one rejected call is
+                the ordinary motion-blur blip the long grace window exists
+                for, and demoting on it is what used to make brief wobbles
+                look like the face dropping out. Once a run does qualify, the
+                demotion applies from its FIRST call, not from the call that
+                completed it: by render time the whole run is known, and the
+                frames at the start of it were just as blind as the ones at
+                the end.
+                """
+                spans, run, quiet = [], [], []
+                # Did this run reach blindness through ABSENCE (an empty
+                # detector for longer than BLIND_AFTER_SEC) rather than
+                # through rejection? That path has already applied its own
+                # threshold, and it pushes a single CONSTANT marker, so the
+                # duration test below would measure zero on it forever and the
+                # span would never form - which is the "ghost carried 411
+                # frames past her exit" defect. Absence qualifies on its own.
+                run_absent = False
+                for mg, ok in _vis_marks:
+                    if ok is False:
+                        run.append(mg)
+                        quiet = []
+                        continue
+                    if ok is None:
+                        # No evidence either way. Held through on the grace
+                        # window - but a run of these that OUTLASTS that
+                        # window is evidence: a face the detector has not
+                        # seen for longer than any plausible dropout is a
+                        # face that is gone. Without this, a subject who
+                        # leaves and never returns produced only None marks,
+                        # no span ever formed, and _geom_for_frame's
+                        # end-of-clip tail softening carried a ghost face
+                        # 411 frames past her exit.
+                        quiet.append(mg)
+                        if quiet[-1] - quiet[0] > _blind_after:
+                            run.append(quiet[0] + int(_blind_after))
+                            run_absent = True
+                        continue
+                    if run and (run_absent or _run_is_blind(run)):
+                        spans.append((run[0], mg))
+                    run, quiet, run_absent = [], [], False
+                if run and (run_absent or _run_is_blind(run)):
+                    spans.append((run[0], float("inf")))
+                return spans
+
+            def _in_blind_span(g):
+                for a, b in _blind_spans():
+                    if a <= g < b:
+                        return True
+                return False
+
+            def _records_at(g):
+                """Every slot's geometry for output frame ``g``."""
+                # Only once no future chunk can ever supply another real
+                # detection (source exhausted or the requested duration is
+                # already met) is it safe to tell _geom_for_frame how close
+                # ``g`` is to the clip's actual last frame - see its
+                # end_gap docstring for why that only softens the true-EOF
+                # tail and never a genuine mid-video disappearance.
+                end_gap = (lim - 1 - g) if (eof or produced >= lim) else None
+                _blind = _in_blind_span(g)
+                eff_taper = _cadence_taper if _blind else taper
+                # Confine the timeline to the shot this frame belongs to. A
+                # detection from before the cut and one from after it are not
+                # two samples of the same motion, and _geom_for_frame would
+                # bracket them and lerp - which is the face sliding from where
+                # the old shot left it to where the new shot found it, over up
+                # to max_bracket frames. Clipping the timeline instead makes
+                # the first frames of a new shot one-sided, so they hold and
+                # fade like any other entry with no anchor behind it.
+                _lo, _hi = _shot_lo(g), _shot_hi(g)
+                out = {}
+                for slot in sorted(smap.keys()):
+                    _tl = _geom_hist.get(slot) or []
+                    if _cut_list:
+                        _tl = [(gg, rr) for (gg, rr) in _tl if _lo <= gg < _hi]
+                    rec = _geom_for_frame(_tl, g, eff_taper,
+                                          max_bracket=max_bracket_frames,
+                                          end_gap=end_gap,
+                                          hold_after=_cadence_taper)
+                    if rec is not None:
+                        out[slot] = rec
+                return out
+
+            # Phase 2 — swap-network scheduling. Detection and tracking can run
+            # on sparse key frames; the ONNX forward pass is far more expensive
+            # still, so it gets its own, motion-adaptive interval on top.
+            selected = []
+            for k in key_indices:
+                visible = key_swap_ok.get(k) or {}
+                recs = _records_at(gidx[k])
+                if not recs:
+                    continue
+                # Do not skip a key just because the occlusion flag is False.
+                # That left `_aligned_hist` empty and the renderer painted
+                # the original clip.
+                mclass = key_motion_map.get(k, "MEDIUM")
+                gap = _adaptive_swap_gap(swap_gap_base, mclass, quality)
+                g = gidx[k]
+                if g < initial_force_until or last_swap_g[0] <= -10**8 or (g - last_swap_g[0]) >= gap:
+                    selected.append(k)
+                    last_swap_g[0] = g
+            key_indices_for_swap = selected
+
+            # ---------------------------------------------------------------
+            # Phase 2a (parallel) — run ONLY the swap network on the selected
+            # key frames and keep each identity's 128x128 aligned result.
+            #
+            # Compositing is deliberately NOT done here. The aligned crop is the
+            # expensive part; placement, masking, background and colour match
+            # are cheap, frame-specific, and must happen in strict frame order
+            # so the mask and colour EMAs advance monotonically in time. Doing
+            # them inside out-of-order workers is what let a frame be toned by
+            # statistics belonging to a frame several tenths of a second away.
+            # ---------------------------------------------------------------
+            enh = cfg.get("enhancer") or "None"
+            enh_scope = (cfg.get("enhance_scope") or "primary").lower()
+            enh_all = enh_scope.startswith("all")
+
+            def _aligned_post(is_primary):
+                """Enhancer applied ONCE, to the aligned crop.
+
+                Running an enhancer on the output frame meant only frames the
+                swapper ran on were enhanced, so enhanced and unenhanced frames
+                alternated at the swap cadence - the face pulsing in texture and
+                tone several times a second. Enhancing the cached aligned crop
+                means every frame that reuses it is enhanced identically, at a
+                fraction of the cost (128x128 instead of a padded face ROI).
+                """
+                if not enh or enh == "None":
+                    return None
+                if not (enh_all or is_primary):
+                    return None
+
+                def _post(crop):
+                    try:
+                        if _is_soft_polish(enh):
+                            return _soft_polish(crop, enh)
+                        big = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_CUBIC)
+                        out = _enhance(big, enh)
+                        if out is None:
+                            return None
+                        stats["gfpgan_calls"] += 1
+                        # Return the restored crop AT ITS OWN RESOLUTION.
+                        # This used to resize straight back down to the
+                        # swapper's 128, which threw away everything the
+                        # restorer had just produced: measured on pore-level
+                        # content, 85% of the restored detail was destroyed
+                        # for a 400px on-screen face, and the paste then
+                        # UP-sampled the 128 result back to ~400 - so the
+                        # enhancer was paying full price for a result that
+                        # was deleted before anyone saw it. The caller picks
+                        # the size it actually needs (see choose_crop_size)
+                        # and scales the affine to match.
+                        return out
+                    except Exception as e:
+                        logging.debug("aligned enhancer skipped: %s", e)
+                        return None
+                return _post
+
+            def swap_frame(k):
+                """Produce the aligned swap crop for every slot on key frame k.
+
+                Geometry comes from the SAME interpolated timeline the emission
+                pass will use, not from whatever the tracker happened to be
+                holding. Two reasons that matters:
+
+                  * between two real detections, interpolation is exact for any
+                    motion the tracker can model, while the tracker's own
+                    forward prediction trails the subject - so a crop cut at
+                    predicted keypoints is cut slightly off the face, and that
+                    offset is then baked into every frame that reuses it;
+                  * the crop and the composite that re-projects it are then
+                    described by one and the same geometry, so the hand-over
+                    between a freshly swapped frame and a reused one is exact.
+                """
+                frm = cframes[k]
+                records = _records_at(gidx[k])
+                if not records:
+                    return k, []
+                t_swap0 = time.perf_counter()
+
+                # Largest face is the "primary" for enhancer scope.
+                def _area_of(rec):
+                    b = rec["bbox"]
+                    return float(max(1.0, (b[2] - b[0]) * (b[3] - b[1])))
+                primary_slot = max(records, key=lambda sl: _area_of(records[sl]))
+
+                comp = _compositor()
+                visible = key_swap_ok.get(k) or {}
+                produced_crops = []
+                seen_src = set()
+                for slot, rec in records.items():
+                    src = rec.get("src")
+                    if src is None or id(src) in seen_src:
+                        continue
+                    seen_src.add(id(src))
+                    _emb = getattr(src, "normed_embedding", None)
+                    if _emb is None:
+                        _emb = getattr(src, "embedding", None)
+                    face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], _emb, 0.5)
+                    face.predicted = not bool(rec.get("det", True))
+                    # Cut a crop even when the visibility flag is stale. The
+                    # flag is used for occlusion fade at composite time; it
+                    # must not prevent the swap network from ever running.
+                    try:
+                        if comp is None:
+                            raise RuntimeError(
+                                "no compositor: the swapper model is not loaded")
+                        fake, M = comp._raw_swap(frm, face, src)
+                    except Exception as e:
+                        # debug level hid this completely at the default INFO
+                        # setting, so a job that swapped NOTHING looked exactly
+                        # like a job that worked. Say it once, loudly, then go
+                        # back to debug so a genuine per-frame miss does not
+                        # flood the log.
+                        if not stats.get("swap_error_logged"):
+                            stats["swap_error_logged"] = True
+                            stats["swap_error"] = f"{type(e).__name__}: {e}"
+                            logging.error("SWAP FAILED on slot %s: %s", slot, e)
+                        else:
+                            logging.debug("swap failed on slot %s: %s", slot, e)
+                        fake, M = None, None
+                    stats["swap_calls"] += 1
+                    if fake is None or M is None:
+                        if M is None:
+                            _legacy_mode[0] = True
+                        continue
+                    # swap_calls counts ATTEMPTS, so it reads the same whether
+                    # every swap worked or every one failed. This counts the
+                    # ones that actually produced a face.
+                    stats["swap_ok"] += 1
+                    # Degenerate output (a solid or near-solid patch) is a
+                    # property of the CROP, so test it once here rather than
+                    # re-testing the composited frame every time the crop is
+                    # reused - and judge it against the region it replaces, not
+                    # an absolute floor. An absolute floor rejected legitimately
+                    # low-detail faces: motion blur during exactly the fast
+                    # movement this build has to handle, shallow depth of field,
+                    # deep shadow. Every rejection put the real face back for a
+                    # frame, converting a non-problem into a visible flick.
+                    try:
+                        tgt = cv2.warpAffine(frm, M, (fake.shape[1], fake.shape[0]),
+                                             borderMode=cv2.BORDER_REPLICATE)
+                        if not _face_region_ok(fake, (0, 0, fake.shape[1], fake.shape[0]),
+                                               reference=tgt):
+                            stats["swap_skips"] += 1
+                            continue
+                    except Exception:
+                        pass
+                    post = _aligned_post(slot == primary_slot)
+                    if post is not None:
+                        try:
+                            pf = post(fake)
+                            # Keep a LARGER restored crop instead of rejecting
+                            # it. The old guard demanded an identical shape, so
+                            # a 512 restoration was silently discarded and the
+                            # 128 swapper output used in its place. Size the
+                            # kept crop to the face's real on-screen span, and
+                            # tell the affine the crop grew - every consumer
+                            # downstream (aligned_correction, the mask, the
+                            # colour match, paste_back, and the reuse path)
+                            # is already size-parameterised, but they all
+                            # resolve the size THROUGH this affine.
+                            if pf is not None and getattr(pf, "ndim", 0) == 3 \
+                                    and pf.shape[0] == pf.shape[1] \
+                                    and pf.shape[0] >= fake.shape[0]:
+                                base = int(fake.shape[0])
+                                want = _E.choose_crop_size(M, base, int(pf.shape[0]))
+                                if want != int(pf.shape[0]):
+                                    pf = cv2.resize(pf, (want, want),
+                                                    interpolation=cv2.INTER_AREA)
+                                if want != base:
+                                    M = _E.scale_affine(M, float(want) / float(base))
+                                fake = pf
+                            elif pf is not None and pf.shape == fake.shape:
+                                fake = pf
+                        except Exception:
+                            pass
+                    corr = _E.aligned_correction(rec["kps"], M, int(fake.shape[0]))
+                    produced_crops.append((slot, fake, corr))
+
+                stats["swap_times"].append((time.perf_counter() - t_swap0) * 1000)
+                return k, produced_crops
+
+            todo = list(key_indices_for_swap)
+            if not todo:
+                # Guarantee at least one neural swap on any clip that has
+                # geometry. Zero swap keys was the "Done · original face"
+                # job: detection ran, paint never did.
+                for k in key_indices:
+                    if _records_at(gidx[k]):
+                        todo.append(k)
+                        if len(todo) >= 3:
+                            break
+            keys_done += max(0, len(key_indices) - len(todo))
+            _tick()
+
+            pending = {ex.submit(swap_frame, k) for k in todo}
+            while pending:
+                if _cxl():
+                    for fut in pending:
+                        fut.cancel()
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    raise _CancelledJob()
+                done_futs, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                if not done_futs:
+                    _tick()
+                    continue
+                for fut in done_futs:
+                    try:
+                        k, crops = fut.result()
+                        for slot, fake, corr in crops:
+                            if slot in _aligned_hist:
+                                _aligned_hist[slot].append((int(gidx[k]), fake, corr))
+                    except Exception as e:
+                        logging.warning("swap worker failed: %s", e)
+                    keys_done += 1
+                    _tick()
+            for slot in _aligned_hist:
+                _aligned_hist[slot].sort(key=lambda t: t[0])
+
+            def _safe_result_put(item):
+                while True:
+                    if _cxl(): raise _CancelledJob()
+                    try:
+                        result_q.put(item, timeout=8.0)
+                        return True
+                    except queue.Full:
+                        if not writer_t.is_alive():
+                            logging.error("Writer thread died — aborting result_q puts")
+                            return False
+                        continue
+
+            # ---------------------------------------------------------------
+            # Phase 2b (sequential, strict frame order) — composite every
+            # output frame.
+            #
+            # This is the change that removes the flicker family. Previously
+            # only key frames were composited and the frames between them were
+            # filled by copying a face ROI out of a neighbouring frame, cross-
+            # fading two whole frames, or - in several branches - emitting the
+            # untouched original. Now every frame gets a real composite: the
+            # aligned swap texture is reused, but the placement, the mask, the
+            # background and the colour match are this frame's own. The face
+            # therefore tracks the head continuously through fast movement,
+            # never carries a neighbouring frame's exposure, and the original
+            # face is never re-exposed mid-shot.
+            # ---------------------------------------------------------------
+            emit_upto = n - 1
+            # No more input can arrive, so nothing is left to bracket toward:
+            # emit everything now instead of deferring it forever.
+            if not (eof or produced >= lim):
+                last_key_g = max((gidx[k] for k in key_indices), default=None)
+                if last_key_g is not None:
+                    # Frames past the last key frame have nothing to interpolate
+                    # toward yet. Hand them to the next chunk rather than
+                    # guessing - guessing here is what produced the periodic
+                    # original-face flash at every chunk boundary.
+                    emit_upto = max(-1, max((k for k in range(n) if gidx[k] <= last_key_g),
+                                            default=-1))
+                    _pending_tail = [(gidx[k], cframes[k]) for k in range(emit_upto + 1, n)]
+
+            def _nearest_aligned(slot, g):
+                """Nearest cached aligned crop - bounded in time, and never
+                from before the last cut.
+
+                This used to return the temporally nearest entry however far
+                away it was. Combined with the chunk-boundary trim (which
+                keeps a single entry), one crop could be stamped onto a second
+                or more of output, and - before the barrier above - onto a
+                different shot entirely. Both are the reported "the pasted
+                face holds".
+                """
+                hist = _aligned_hist.get(slot) or []
+                if not hist:
+                    return None
+                lo, hi = _shot_lo(g), _shot_hi(g)
+                best, bd = None, None
+                for gi, fake, corr in hist:
+                    if _cut_list and not (lo <= gi < hi):
+                        continue          # a crop from a different shot
+                    d = abs(gi - g)
+                    if d > _ALIGNED_MAX_AGE:
+                        continue          # too stale to still be this face
+                    if bd is None or d < bd:
+                        best, bd = (fake, corr), d
+                return best
+
+            swap_keys = set(key_indices_for_swap)
+            writer_ok = True
+            for k in range(emit_upto + 1):
+                if not writer_ok: break
+                if _cxl(): raise _CancelledJob()
+                g = gidx[k]
+                frm = cframes[k]
+
+                # Emission crosses the cut here. _nearest_aligned already
+                # refuses a crop from the other side of it, but _reuse_one
+                # falls back to whatever track.fake still holds when there is
+                # no cached crop - and emission walks forward, so on the first
+                # frame of the new shot that fallback is the LAST frame of the
+                # old one. Null it, and null the fade with it: an opacity
+                # slewing down from the previous shot has nothing to do with
+                # this one.
+                if int(g) in _cut_gs:
+                    for _tr in _tracker.tracks.values():
+                        if _tr is None:
+                            continue
+                        _tr.fake = None
+                        _tr.fake_corr = None
+                        _tr.fake_size = 0
+                    try:
+                        for _sl in list(_paint_alpha.keys()):
+                            _paint_alpha[_sl] = 0.0
+                    except Exception:
+                        pass
+
+                records = _records_at(g)
+                if _in_blind_span(g):
+                    stats["blind_frames"] += 1
+                _active_fade = any(a > 0.02 for a in _paint_alpha.values())
+                if not records and not _active_fade:
+                    stats["revert_frames"] += 1
+                    # Genuinely nothing tracked here (before the first face
+                    # appears, or long after the last one left), and nothing
+                    # still fading out either.
+                    writer_ok = _safe_result_put(frm)
+                    if writer_ok: stats["frames_out"] += 1
+                    continue
+
+                orig = frm
+                out = frm.copy()
+                # Painter's order: furthest (smallest) first, nearest last, so
+                # the nearer person wins the contested pixels where two faces
+                # touch.
+                # ------------------------------------------------------------
+                # Decide what each slot WANTS to paint this frame, then slew
+                # the opacity toward it. Every "do not paint" decision below
+                # used to cut straight to the untouched original in a single
+                # frame - that hard step is what a brief gate flip showed as a
+                # flash of the real face, and a sustained one as a revert.
+                # Suppression is continuous here instead: a one-frame flip now
+                # costs a few percent of opacity, while a sustained one still
+                # reaches zero, just smoothly. See PASTE_FADE_SEC in config.py.
+                #
+                # `hard` marks the paths that are positive evidence the subject
+                # has LEFT the frame rather than merely evidence that this
+                # frame's read is unreliable. Those keep the original instant
+                # behaviour: fading a face out over half a second onto the
+                # background someone has already walked off is the v11.1.1
+                # defect, not a smoothing improvement.
+                # ------------------------------------------------------------
+                _want = {}
+                for slot in set(records.keys()) | {s for s, a in _paint_alpha.items() if a > 0.02}:
+                    _r = records.get(slot)
+                    if _r is None:
+                        _want[slot] = (None, 0.0, False)
+                        continue
+                    if not _r.get("det"):
+                        _keep = _frame_containment(_r["bbox"], frm.shape)
+                        _edge = (_touches_frame_edge(_r.get("hit_bbox"), frm.shape)
+                                 or _touches_frame_edge(_r["bbox"], frm.shape))
+                        # Hard cut only when the face has actually left.
+                        # A one-frame edge touch during a fast move was
+                        # zeroing the paste and showing the original face.
+                        if _keep < 0.35 or (_edge and _keep < 0.45):
+                            _want[slot] = (None, 0.0, True)
+                            continue
+                        if _keep < 0.85:
+                            _r = dict(_r)
+                            # Stay mostly painted. A dip to a low alpha here
+                            # is the original face showing through for a frame.
+                            _r["alpha"] *= max(0.82, (_keep - 0.35) / 0.50)
+                    _want[slot] = (_r, float(_r.get("alpha", 1.0) or 0.0), False)
+
+                _fade_step = 1.0 / max(1.0, float(out_fps) * max(0.05, PASTE_FADE_SEC))
+                _paint = {}
+                for slot, (_r, _target, _hard) in _want.items():
+                    _prev = float(_paint_alpha.get(slot, 0.0) or 0.0)
+                    if _hard:
+                        _a = 0.0
+                    elif _target >= _prev:
+                        # Upward is instant, per v11.2.1 SolidFace: a face
+                        # appearing is never itself a flash of the original.
+                        _a = _target
+                    else:
+                        _a = max(_target, _prev - _fade_step)
+                    _paint_alpha[slot] = _a
+                    if _a <= 0.02:
+                        _held_rec[slot] = None
+                        continue
+                    # During a fade the current record may be gone entirely
+                    # (taper expired). Fall back to the last record that
+                    # actually composited, frozen - never extrapolated, so a
+                    # fading face cannot drift away from where it really was.
+                    _use = _r if _r is not None else _held_rec.get(slot)
+                    if _use is None:
+                        continue
+                    _use = dict(_use)
+                    _use["alpha"] = _a
+                    if _r is None:
+                        _use["det"] = False
+                    _paint[slot] = _use
+
+                order = sorted(_paint.keys(),
+                               key=lambda sl: float((_paint[sl]["bbox"][2] - _paint[sl]["bbox"][0]) *
+                                                    (_paint[sl]["bbox"][3] - _paint[sl]["bbox"][1])))
+                any_ok = False
+                for slot in order:
+                    # Whether this face is SEEN or merely held, and whether a
+                    # held one is still substantially inside the frame, was
+                    # already decided when `_want` was built above - along with
+                    # the containment opacity ramp. All that survives here is
+                    # the compositing itself.
+                    rec = _paint[slot]
+                    rivals = _rival_landmarks(records, slot)
+                    cached = _nearest_aligned(slot, g)
+                    if cached is not None:
+                        trial, ok = _reuse_one(out, orig, rec, quality,
+                                               rivals=rivals, cached=cached)
+                    else:
+                        # Cache miss: _swap_one tries aligned crop, then the
+                        # existing legacy paste-back. Do not call legacy twice.
+                        _src = rec.get("src")
+                        _emb = None
+                        if _src is not None:
+                            _emb = getattr(_src, "normed_embedding", None)
+                            if _emb is None:
+                                _emb = getattr(_src, "embedding", None)
+                        face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], _emb, 0.5)
+                        face.predicted = not bool(rec.get("det", True))
+                        trial, ok = _swap_one(out, orig, face, _src, quality,
+                                              alpha=rec["alpha"], rivals=rivals)
+                    if not ok or trial is None:
+                        # A compositing failure is evidence about THIS frame,
+                        # not about whether the subject is still there, so it
+                        # decays like any other soft suppression rather than
+                        # holding the opacity where it was and re-trying at
+                        # full strength next frame.
+                        _paint_alpha[slot] = max(0.0, float(_paint_alpha.get(slot, 0.0)) - _fade_step)
+                        continue
+                    out = trial
+                    any_ok = True
+                    # Remember the geometry that actually composited, so if this
+                    # slot is suppressed later there is something frozen to fade
+                    # out from.
+                    _held_rec[slot] = rec
+
+                if not any_ok:
+                    stats["swap_skips"] += 1
+                    out = frm
+                elif k not in swap_keys:
+                    stats["frames_filled"] += 1
+                # The number that actually answers "did it work": how many
+                # OUTPUT frames carry a swapped face. Everything else in this
+                # stats block counts work ATTEMPTED - detector probes, swap
+                # calls, reuses - and a job can rack up hundreds of those while
+                # painting almost nothing, which is exactly the case that kept
+                # being reported as "the original face only" and kept being
+                # invisible in the log.
+                if any_ok:
+                    stats["frames_painted"] += 1
+
+                try:
+                    _amax = max(_paint_alpha.values()) if _paint_alpha else 0.0
+                    if 0.02 < _amax < 0.5:
+                        stats["faint_frames"] += 1
+                except Exception:
+                    pass
+                writer_ok = _safe_result_put(out)
+                if writer_ok: stats["frames_out"] += 1
+
+                # Drop aligned crops that no later frame can still be nearest
+                # to, so peak memory stays a few crops rather than one per
+                # swapped frame in the chunk.
+                horizon = g - 2 * max(1, skip_n, swap_gap_base)
+                for _sl, _h in _aligned_hist.items():
+                    if len(_h) > 2:
+                        _aligned_hist[_sl] = [e for e in _h if e[0] >= horizon] or _h[-1:]
+
+            # Trim history: keep the last anchor on each side of the boundary so
+            # the next chunk's leading frames are still bracketed.
+            keep_from = None
+            if _pending_tail:
+                keep_from = _pending_tail[0][0]
+            elif gidx:
+                keep_from = gidx[-1]
+            if keep_from is not None:
+                for slot in _geom_hist:
+                    h = _geom_hist[slot]
+                    idx = max((i for i, (gi, _r) in enumerate(h) if gi <= keep_from), default=None)
+                    trimmed = h[idx:] if idx is not None else h[-1:]
+                    # ALWAYS keep the single most recent REAL (det=True) entry
+                    # too, however far back it falls, even once everything
+                    # else around it has been trimmed away. Without this, a
+                    # long run of carried/predicted entries (a subject turned
+                    # away for longer than one chunk) leaves the most recent
+                    # survivor of the trim above as a CARRIED entry, and the
+                    # last real sighting is discarded entirely. The next
+                    # chunk's _geom_for_frame then has no "observed" anchor to
+                    # measure staleness against, falls through to its
+                    # cold-start fallback, and can bracket that stale carried
+                    # position against a distant FUTURE real detection -
+                    # interpolating confidently across the whole remaining
+                    # gap. That is the same reported "ghost face" defect
+                    # re-entering through the one boundary the render-time fix
+                    # (_geom_for_frame's real_dist check) cannot see across,
+                    # because by then the real anchor it depends on is simply
+                    # gone. A single retained dict per slot costs nothing.
+                    last_real_idx = max(
+                        (i for i, (_gi, r) in enumerate(h) if r.get("det")), default=None)
+                    if last_real_idx is not None and (
+                            not trimmed or h[last_real_idx][0] < trimmed[0][0]):
+                        trimmed = [h[last_real_idx]] + trimmed
+                    _geom_hist[slot] = trimmed
+                for slot in _aligned_hist:
+                    _aligned_hist[slot] = (_aligned_hist[slot] or [])[-1:]
+
+            if not writer_ok:
+                logging.error("Writer failed mid-job — stopping further chunks")
+                break
+
+        stop_io.set()
+        try: result_q.put(None, timeout=5)
+        except Exception: pass
+        try: reader_t.join(timeout=8)
+        except Exception: pass
+        try: writer_t.join(timeout=60)
+        except Exception: pass
+
+        if ex: ex.shutdown(wait=True)
+        try:
+            if wr is not None: wr.release()
+        except Exception: pass
+        try: cap.release()
+        except Exception: pass
+
+        frame_total = time.time() - t0
+        logging.info(f"Frame processing complete in {frame_total:.1f}s — processed {stats['frames_out']} frames; finalizing FFmpeg")
+
+        with _lock:
+            if jid in jobs:
+                jobs[jid]["eta_seconds"] = None
+                _persist_job(jid)
+        # IMPORTANT: do not kill FFmpeg here. The writer has finished feeding
+        # frames, so closing stdin signals EOF and lets the encoder flush/finalize
+        # the MP4. The previous V4 cleanup killed a still-running encoder and then
+        # waited on the already-killed process, which surfaced as
+        # "FFmpeg encoding failed" even when the frames themselves were valid.
+        u(99, "Processing complete · finalizing video…")
+        enc_t0 = time.time()
+        try:
+            if enc_proc.stdin is not None:
+                enc_proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            enc_rc = enc_proc.wait(timeout=max(60, int(trim_duration_sec * 20)))
+        except subprocess.TimeoutExpired:
+            try: enc_proc.kill()
+            except Exception: pass
+            try: enc_proc.wait(timeout=10)
+            except Exception: pass
+            raise RuntimeError("FFmpeg encoding timed out")
+        try:
+            if _enc_log is not None:
+                _enc_log.close()
+        except Exception:
+            pass
+        try:
+            with open(_enc_log_path, "rb") as _ef:
+                enc_err = _ef.read()[-4000:].decode("utf-8", "replace")
+        except Exception:
+            enc_err = ""
+        stats["encode_seconds"] = max(0.0, time.time() - enc_t0)
+        if enc_rc != 0:
+            raise RuntimeError("FFmpeg encoding failed" + (f" (exit={enc_rc}): {enc_err.strip()}" if enc_err.strip() else f" (exit={enc_rc})"))
+        if not os.path.isfile(final) or os.path.getsize(final) < 1000:
+            raise RuntimeError("Output video invalid or empty")
+        try:
+            os.remove(_enc_log_path)
+        except Exception:
+            pass
+        stats["processing_seconds"] = max(0.0, time.time() - t0 - stats["encode_seconds"])
+        # Keep the final output path explicit before optional encryption/autosave.
+        # The previous V4 runtime referenced `res` before assigning it, which
+        # caused the otherwise successful job to emit:
+        # "local variable 'res' referenced before assignment".
+        res = final
+        logging.info(
+            "Done in %.1fs — frames=%d; FACE PAINTED ON %d/%d FRAMES (%.0f%%); "
+            "detector_calls=%d (empty=%d); swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d; det_faces_avg=%.2f max=%d; "
+            "det_passes=%d raw_faces=%d embeds=%d (%.2f embeds per raw face%s); "
+            "shot_cuts=%d; "
+            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d occ_cut=%d/%d",
+            time.time() - t0, stats["frames_out"],
+            stats["frames_painted"], stats["frames_out"],
+            100.0 * stats["frames_painted"] / max(1, stats["frames_out"]),
+            stats["detector_calls"], stats["det_empty"], stats["swap_calls"],
+            (sum(stats["det_times"]) / len(stats["det_times"])) if stats["det_times"] else 0.0,
+            (sum(stats["swap_times"]) / len(stats["swap_times"])) if stats["swap_times"] else 0.0,
+            stats["encode_seconds"], stats["frames_filled"], stats["kps_rejected"],
+            (stats.get("det_faces_sum", 0) / max(1, stats["detector_calls"])),
+            stats.get("det_faces_max", 0),
+            _DET_COUNTERS["passes"], _DET_COUNTERS["raw_faces"],
+            _DET_COUNTERS["embeds"],
+            (_DET_COUNTERS["embeds"] / max(1, _DET_COUNTERS["raw_faces"])),
+            "" if _DEFER_EMB_ON else " · deferral OFF",
+            _CUT_STATS["cuts"],
+            stats.get("revert_frames", 0), stats.get("blind_frames", 0),
+            stats.get("faint_frames", 0), stats.get("vis_reject_calls", 0),
+            _E.OCC_STATS.get("cut_frames", 0), _E.OCC_STATS.get("frames", 0),
+        )
+
+        pw = (cfg.get('password') or "").strip()
+        enc_note = ""
+        if pw:
+            zpath = f"/tmp/result_{jid}.zip"
+            try:
+                _encrypt_zip(res, pw, zpath)
+                try: os.remove(res)
+                except: pass
+                res = zpath
+                enc_note = " · 🔒 encrypted"
+            except Exception as e:
+                raise RuntimeError(f"Encryption failed: {e}")
+
+        el = int(time.time() - t0)
+        m, s = el // 60, el % 60
+        # AUTHORITATIVE SERVER SAVE — must succeed before status=done.
+        server_path, expires_at = _server_save_result(jid, res)
+        # The temporary processing copy is no longer needed; keep the server
+        # copy as the canonical result. Android may download it whenever it
+        # becomes active again, including after a process/app restart.
+        if os.path.abspath(server_path) != os.path.abspath(res):
+            try: os.remove(res)
+            except Exception: pass
+        res = server_path
+        save_note = f" · ☁ server saved · expires {time.strftime('%H:%M:%S', time.localtime(expires_at))}"
+        try:
+            # Optional encrypted autosave remains supplementary, never authoritative.
+            extra = _auto_save_result(jid, res, password=pw)
+            if extra: save_note += extra
+        except Exception as e:
+            logging.warning("optional auto-save: %s", e)
+        # A job that detected faces and swapped NONE of them has not finished,
+        # it has failed - and reporting "Done" for it is how a broken swapper
+        # model stayed invisible. The output video in that case is the input
+        # video, so say so instead of handing back a success message and a
+        # swaps= count that only ever counted attempts.
+        # Coverage, not attempts, decides whether this job did its job. A run
+        # that painted 87 of 451 frames is not a success with a caveat - it is
+        # four fifths of a video showing the original face, which is what was
+        # reported and what no counter here could previously express.
+        _painted = int(stats.get("frames_painted", 0))
+        _outn = max(1, int(stats.get("frames_out", 0)))
+        _cover = 100.0 * _painted / _outn
+        _swapped_none = (int(stats.get("swap_ok", 0)) == 0
+                         and int(stats.get("detector_calls", 0)) > 0)
+        # Low coverage is NOT by itself a fault. A subject who walks out of
+        # frame, or stands behind someone for half the clip, SHOULD leave most
+        # frames unpainted - that is the engine working. Warning on coverage
+        # alone fired on exactly those cases in the regression suite, and in one
+        # of them announced "the detector found nothing" over a clip where the
+        # detector found a face in every single probe. A message that can say
+        # something false is worse than no message.
+        #
+        # The unambiguous signal is the detector going blind: it was asked, and
+        # it came back empty, on the overwhelming majority of probes. Nothing a
+        # subject can legitimately do produces that - if they leave, detection
+        # stops being attempted at that cadence.
+        _dc0 = int(stats.get("detector_calls", 0))
+        _de0 = int(stats.get("det_empty", 0))
+        _blind = (not _swapped_none) and _dc0 >= 10 and _de0 >= 0.70 * _dc0
+        if _swapped_none:
+            # Name the cause instead of just the symptom. The two produce very
+            # different numbers and need very different fixes: a detector that
+            # never found the face at all, versus a swapper that was handed
+            # faces and produced nothing from them.
+            _dc = int(stats.get("detector_calls", 0))
+            _de = int(stats.get("det_empty", 0))
+            if stats.get("swap_error"):
+                _why = stats["swap_error"]
+            elif _dc and _de >= int(_dc * 0.8):
+                _why = (f"the face detector found nothing in {_de} of {_dc} "
+                        f"probes, so there was never a face to swap. The most "
+                        f"common cause is a video whose frames reach the "
+                        f"detector rotated (a portrait phone clip), followed by "
+                        f"a face too small or too far from camera.")
+            else:
+                _why = (f"faces were detected ({_dc - _de} of {_dc} probes) but "
+                        f"none was ever confirmed as the locked identity, so no "
+                        f"swap was scheduled.")
+            _warn = (f"⚠ NO FACES WERE SWAPPED — the output is your original "
+                     f"video. {_why}")
+        elif _blind:
+            logging.error("job %s: the detector found nothing in %d of %d probes; "
+                          "face painted on %d/%d frames (%.0f%%)",
+                          jid, _de0, _dc0, _painted, _outn, _cover)
+        if _swapped_none:
+            logging.error("job %s: %s | detector_calls=%d empty=%d "
+                          "kps_rejected=%d swap_attempts=%d",
+                          jid, _warn, _dc, _de,
+                          int(stats.get("kps_rejected", 0)),
+                          int(stats.get("swap_calls", 0)))
+        with _lock:
+            if jid in jobs:
+                jobs[jid].update(
+                    status='done', result_path=res, server_result_path=res, progress=100, done_at=time.time(), expires_at=expires_at, eta_seconds=None,
+                    message=(_warn if _swapped_none else
+                             (f"⚠ The face detector came back empty on {_de0} of {_dc0} "
+                              f"probes, so the face was painted on only {_painted}/{_outn} "
+                              f"frames ({_cover:.0f}%) and the rest show the original. The "
+                              f"detector is not seeing the face in this clip — usual causes "
+                              f"are a portrait video reaching it rotated, a face too small or "
+                              f"far from camera, heavy motion blur, or very low light."
+                              f"{save_note}"
+                              if _blind else
+                              f"Done — {produced} frames · face on {_painted}/{_outn} ({_cover:.0f}%) · swaps={stats['swap_ok']}/{stats['swap_calls']} · detects={stats['detector_calls']} · {ow}×{oh} · {quality} · "
+                              f"{f'{m}m {s}s' if m else f'{s}s'} · CPU V4{enc_note}{save_note}"))
+                )
+        _persist_job(jid, force=True)
+        _touch_session_expiry()
+    except _CancelledJob:
+        try: stop_io.set()
+        except Exception: pass
+        try:
+            if ex: ex.shutdown(wait=False, cancel_futures=True)
+        except Exception: pass
+        try:
+            if result_q is not None: result_q.put(None, timeout=1)
+        except Exception: pass
+        try: wr.release()
+        except Exception: pass
+        try: cap.release()
+        except Exception: pass
+        with _lock:
+            if jid in jobs:
+                jobs[jid].update(status='cancelled', done_at=time.time(), message="✋ Cancelled")
+                _persist_job(jid, force=True)
+    except Exception as e:
+        logging.exception("JOB CRASH %s", jid)
+        try: stop_io.set()
+        except Exception: pass
+        try:
+            if enc_proc is not None:
+                if enc_proc.stdin is not None:
+                    enc_proc.stdin.close()
+                if enc_proc.poll() is None:
+                    enc_proc.kill()
+                    enc_proc.wait(timeout=10)
+        except Exception: pass
+        with _lock:
+            if jid in jobs:
+                jobs[jid].update(status='error', message=str(e)[:90], done_at=time.time())
+                _persist_job(jid, force=True)
+    finally:
+        try: stop_io.set()
+        except Exception: pass
+        if ex:
+            try: ex.shutdown(wait=True)
+            except: pass
+        for p in list(src_paths.values()) + [vp]:
+            try: os.remove(p)
+            except: pass
+
+def _age(ts):
+    a = int(time.time() - ts)
+    return f"{a}s ago" if a < 60 else (f"{a//60}m ago" if a < 3600 else f"{a//3600}h ago")
+
+
+def _eta_str(j):
+    try:
+        p = int(j.get("progress") or 0)
+        if p <= 0 or p >= 100:
+            return ""
+        eta = j.get("eta_seconds")
+        if eta is None:
+            return ""
+        eta = max(0.0, float(eta))
+        m, s = int(eta) // 60, int(eta) % 60
+        if m >= 60:
+            h, m = divmod(m, 60)
+            return f"ETA {h}h {m}m"
+        if m:
+            return f"ETA {m}m {s}s"
+        return f"ETA {s}s"
+    except Exception:
+        return ""
+
+
+def _owned_job_ids(session_id=None):
+    """Return all Phoenix jobs visible to this private Space UI.
+
+    Gradio session ids change on browser refresh. Jobs therefore must not be
+    hidden merely because the browser received a new session id. The session
+    id is retained on each job for diagnostics/future multi-user isolation.
+    """
+    with _lock:
+        return list(jobs.keys())
+
+
+def _hist_html(session_id=None):
+    ids = _owned_job_ids(session_id)
+    if not ids:
+        return '<div class="empty"><p class="emoji">📭</p><p>No jobs yet</p></div>'
+    rows = []
+    for jid in reversed(ids):
+        with _lock:
+            if jid not in jobs: continue
+            j = jobs[jid].copy()
+        s, p, msg, ts = j['status'], j['progress'], j.get('message',''), j.get('created_at', time.time())
+        if s == 'done':
+            badge = '<span class="bdg bdg-ok">✓ Done</span>'; edge = '#10B981'
+        elif s == 'error':
+            badge = '<span class="bdg bdg-err">✗ Error</span>'; edge = '#EF4444'
+        elif s == 'cancelled':
+            badge = '<span class="bdg bdg-err" style="background:#F59E0B">✋ Cancelled</span>'; edge = '#F59E0B'
+        else:
+            eta = _eta_str(j)
+            eta_bit = f" · {eta}" if eta else ""
+            badge = f'<span class="bdg bdg-run">⏳ {p}%{eta_bit}</span>'; edge = '#1558B0'
+        rows.append(f'<div class="hcard" style="border-left-color:{edge}"><div class="hrow"><code class="hid">{jid}</code>{badge}'
+                    f'<span class="hage">{_age(ts)}</span></div><div class="hmsg">{msg}</div></div>')
+    return '<div>' + ''.join(rows) + '</div>'
+
+def _get_done_choices(session_id=None):
+    ids = _owned_job_ids(session_id)
+    with _lock:
+        return [jid for jid in ids if jobs.get(jid, {}).get('status') == 'done' and jobs.get(jid, {}).get('result_path')]
+
+def load_result(jid):
+    hide = gr.update(visible=False)
+    if not jid: return hide, hide, "Select a job"
+    with _lock:
+        if jid not in jobs: return hide, hide, "Not found"
+        j = jobs[jid].copy()
+    if j['status'] == 'done':
+        rp = j.get('result_path')
+        if not rp or not os.path.exists(rp): return hide, hide, "File deleted"
+        if rp.endswith('.zip'):
+            return hide, gr.update(value=rp, visible=True), j.get('message', 'Ready to download')
+        else:
+            return (
+                gr.update(value=rp, visible=True),
+                gr.update(value=rp, visible=True),
+                j.get('message', 'Video loaded — use the Download button below')
+            )
+    return hide, hide, f"{j['status']}"
+
+def _running_job_ids():
+    with _lock:
+        return [jid for jid, j in jobs.items() if j.get("status") not in ("done", "error", "cancelled")]
+
+
+def _running_job_choices(session_id=None):
+    out = []
+    for jid in _owned_job_ids(session_id):
+        with _lock:
+            j = jobs.get(jid) or {}
+        if j.get("status") in ("done", "error", "cancelled"):
+            continue
+        p = int(j.get("progress", 0))
+        msg = (j.get("message") or "")[:40]
+        out.append(f"{jid} · {p}% · {msg}")
+    return out
+
+
+def _ids_from_cancel_selection(selected):
+    if not selected: return []
+    if isinstance(selected, str): selected = [selected]
+    ids = []
+    for item in selected:
+        s = str(item).strip()
+        if not s: continue
+        jid = s.split("·")[0].strip().split()[0].strip()
+        if jid: ids.append(jid)
+    return ids
+
+
+def cancel_running(selected=None, session_id=None):
+    want = _ids_from_cancel_selection(selected)
+    n = 0
+    owned = set(_owned_job_ids(session_id))
+    with _lock:
+        targets = want if want else list(owned)
+        for jid in targets:
+            if jid not in owned:
+                continue
+            j = jobs.get(jid)
+            if not j:
+                continue
+            if j.get("status") not in ("done", "error", "cancelled"):
+                j["cancel"] = True
+                j["message"] = "Cancel requested…"
+                n += 1
+    choices = _running_job_choices()
+    msg = f"✋ Cancel requested for {n} job(s)" if n else ("No matching running job" if want else "No running job")
+    return (msg, _hist_html(), _video_progress_html(), _status_banner_html(), gr.update(choices=choices, value=[]))
+
+
+def cancel_all_running(): return cancel_running(None)
+
+def delete_now(jid, session_id=None):
+    if not jid:
+        return "Select a job", _hist_html(session_id), gr.update(choices=_get_done_choices(session_id)), gr.update(visible=False), _video_progress_html()
+    owned = set(_owned_job_ids(session_id))
+    if jid not in owned:
+        return "Job not found", _hist_html(session_id), gr.update(choices=_get_done_choices(session_id)), gr.update(visible=False), _video_progress_html()
+    with _lock:
+        j = jobs.pop(jid, None)
+        _remove_job_snapshot(jid)
+        _JOB_PERSIST_LAST.pop(jid, None)
+        if j and j.get('result_path'):
+            try:
+                os.remove(j['result_path'])
+            except Exception:
+                pass
+    return f"Deleted {jid}", _hist_html(session_id), gr.update(choices=_get_done_choices(session_id)), gr.update(visible=False), _video_progress_html()
+
+def clear_history(session_id=None):
+    removed = 0
+    owned = set(_owned_job_ids(session_id))
+    with _lock:
+        for k in list(owned):
+            j = jobs.get(k)
+            if not j:
+                continue
+            if j['status'] in ('done', 'error', 'cancelled'):
+                rp = j.get('result_path')
+                if rp:
+                    try:
+                        os.remove(rp)
+                    except Exception:
+                        pass
+                del jobs[k]
+                _remove_job_snapshot(k)
+                removed += 1
+    return f"Cleared {removed} jobs", _hist_html(session_id), gr.update(choices=_get_done_choices(session_id)), _video_progress_html()
+
+def _pick_focus_job(session_id=None):
+    ids = _owned_job_ids(session_id)
+    with _lock:
+        if not ids: return None, {}
+        for jid in reversed(ids):
+            j = jobs.get(jid) or {}
+            if j.get("status") not in ("done", "error", "cancelled"):
+                return jid, j.copy()
+        jid = ids[-1]
+        return jid, (jobs.get(jid) or {}).copy()
+
+
+def _status_banner_html(session_id=None):
+    jid, j = _pick_focus_job(session_id)
+    if not jid:
+        return (
+            '<div class="stat-banner idle">'
+            '<div class="sb-left"><span class="sb-pct">Idle</span>'
+            '<span class="sb-msg">No active job</span></div></div>'
+        )
+    s = j.get("status")
+    p = int(j.get("progress", 0))
+    msg = (j.get("message") or "").replace("<", "&lt;")
+    if len(msg) > 64: msg = msg[:61] + "…"
+    if s == "done":
+        pct, fill, badge = "100%", "width:100%;background:linear-gradient(90deg,#10B981,#34D399)", "✓ Done"
+    elif s == "error":
+        pct, fill, badge = "—", "width:100%;background:#EF4444", "✗ Error"
+    elif s == "cancelled":
+        pct, fill, badge = "—", "width:100%;background:#F59E0B", "✋ Cancelled"
+    else:
+        eta = _eta_str(j)
+        pct = f"{p}%" + (f" · {eta}" if eta else "")
+        fill, badge = f"width:{max(p, 3)}%", "Processing"
+    return (
+        f'<div class="stat-banner">'
+        f'<div class="sb-left">'
+        f'<span class="sb-pct">{pct}</span>'
+        f'<span class="sb-id">{jid}</span>'
+        f'<span class="bdg bdg-run">{badge}</span>'
+        f'</div>'
+        f'<span class="sb-msg">{msg}</span>'
+        f'<div class="sb-bar"><div class="sb-fill" style="{fill}"></div></div>'
+        f'</div>'
+    )
+
+
+def _video_progress_html(session_id=None):
+    jid, j = _pick_focus_job(session_id)
+    if not jid:
+        return '<div class="vprog idle"><span class="vp-dot"></span> Idle — no jobs</div>'
+    s, p, msg = j.get("status"), int(j.get("progress", 0)), (j.get("message") or "").replace("<", "&lt;")
+    if len(msg) > 72: msg = msg[:69] + "…"
+    if s == "done":
+        head = f'<span class="vp-id">{jid}</span><span class="bdg bdg-ok">✓ Done</span>'
+        fill = "width:100%;background:linear-gradient(90deg,#10B981,#34D399)"
+        pct = "100%"
+    elif s == "error":
+        head = f'<span class="vp-id">{jid}</span><span class="bdg bdg-err">✗ Error</span>'
+        fill = "width:100%;background:#EF4444"
+        pct = "ERR"
+    elif s == "cancelled":
+        head = f'<span class="vp-id">{jid}</span><span class="bdg bdg-err" style="background:#F59E0B">✋ Cancelled</span>'
+        fill = "width:100%;background:#F59E0B"
+        pct = "STOP"
+    else:
+        eta = _eta_str(j)
+        head = f'<span class="vp-id">{jid}</span><span class="bdg bdg-run">Processing</span>'
+        fill = f"width:{max(p, 3)}%"
+        pct = f"{p}%" + (f" · {eta}" if eta else "")
+    return (
+        f'<div class="vprog"><div class="vp-head">{head}</div>'
+        f'<div class="vp-pct">{pct}</div>'
+        f'<div class="vprog-bar"><div class="vprog-fill" style="{fill}"></div></div>'
+        f'<div class="vp-msg">{msg}</div></div>'
+    )
+
+
+SESSION_ROOT = Path("/tmp/swamitech_sessions")
+_SESSION_TTL_SEC = 86400
+
+def _safe_session_id(request=None) -> str:
+    """Isolate users by Gradio session_hash when available."""
+    import re as _re
+    sid = None
+    if request is not None:
+        sid = getattr(request, "session_hash", None) or getattr(request, "session_id", None)
+    if not sid:
+        sid = "anon"
+    return _re.sub(r"[^A-Za-z0-9_-]", "_", str(sid))[:80]
+
+
+def _session_dir(request=None) -> Path:
+    path = SESSION_ROOT / _safe_session_id(request)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def _session_json(request=None) -> Path:
+    return _session_dir(request) / "session.json"
+
+
+def _touch_session_expiry(request=None, extra=None):
+    data = {}
+    sj = _session_json(request)
+    try:
+        if sj.is_file():
+            import json
+            with open(sj, "r") as f:
+                data = json.load(f)
+    except Exception:
+        data = {}
+    if extra:
+        data.update(extra)
+    data["expires_at"] = time.time() + _SESSION_TTL_SEC
+    data["saved_at"] = time.time()
+    try:
+        import json
+        with open(sj, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logging.warning("session save failed: %s", e)
+
+
+def _save_ui_session(vid, s1, s2, s3, s4, settings: dict, request=None):
+    try:
+        import json
+        session_dir = _session_dir(request)
+        media = {}
+        if vid is not None and isinstance(vid, str) and os.path.isfile(vid):
+            dest = str(session_dir / "target_video.mp4")
+            shutil.copy2(vid, dest)
+            media["video"] = dest
+        for i, im in enumerate([s1, s2, s3, s4]):
+            if im is None:
+                continue
+            dest = str(session_dir / f"face_{i}.jpg")
+            try:
+                if isinstance(im, str) and os.path.isfile(im):
+                    shutil.copy2(im, dest)
+                else:
+                    arr = im
+                    if isinstance(arr, np.ndarray):
+                        if arr.dtype != np.uint8:
+                            arr = np.clip(arr, 0, 255).astype(np.uint8)
+                        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR) if (arr.ndim == 3 and arr.shape[2] == 3) else arr
+                        cv2.imwrite(dest, bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                media[f"face_{i}"] = dest
+            except Exception as e:
+                logging.warning("session face %s save failed: %s", i, e)
+        payload = {
+            "settings": settings,
+            "media": media,
+            "saved_at": time.time(),
+            "expires_at": time.time() + _SESSION_TTL_SEC,
+            "session_id": _safe_session_id(request),
+        }
+        with open(_session_json(request), "w") as f:
+            json.dump(payload, f)
+    except Exception as e:
+        logging.warning("_save_ui_session: %s", e)
+
+
+def _load_ui_session(request=None):
+    import json
+    empty = (None, None, None, None, None, {})
+    try:
+        sj = _session_json(request)
+        if not sj.is_file():
+            return empty
+        with open(sj, "r") as f:
+            data = json.load(f)
+        if time.time() > float(data.get("expires_at") or 0):
+            # Expired — delete session media (audit NSDOS-016)
+            try:
+                shutil.rmtree(_session_dir(request), ignore_errors=True)
+            except Exception:
+                pass
+            return empty
+        media = data.get("media") or {}
+        settings = data.get("settings") or {}
+        vid = media.get("video") if media.get("video") and os.path.isfile(media["video"]) else None
+        faces = []
+        for i in range(4):
+            pth = media.get(f"face_{i}")
+            if pth and os.path.isfile(pth):
+                img = cv2.imread(pth)
+                faces.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else None)
+            else:
+                faces.append(None)
+        return vid, faces[0], faces[1], faces[2], faces[3], settings
+    except Exception as e:
+        logging.warning("_load_ui_session: %s", e)
+        return empty
+
+
+def _parse_device_mode(mode):
+    s = (mode or "").lower()
+    return "cpu" if ("cpu only" in s or s.strip() == "cpu") else "gpu"
+
+
+def submit_video(s1, s2, s3, s4, vid, secs, fps, res, quality, enhancer, swap_n, det_n, det_int, password, refs, trim_start, trim_end, face_mode, enhance_scope, device_mode, face_enhance=False, request: gr.Request = None, smooth_motion: str = "Fast (blend)"):
+    if vid is None:
+        return "❌ Upload a target video", _hist_html(), gr.update(choices=_get_done_choices()), _video_progress_html(), _device_status_text()
+    if s1 is None and s2 is None and s3 is None and s4 is None:
+        return "❌ Upload at least one replacement face", _hist_html(), gr.update(choices=_get_done_choices()), _video_progress_html(), _device_status_text()
+
+    faces_bgr = [_as_bgr_image(im) for im in (s1, s2, s3, s4)]
+    n_src = sum(im is not None for im in faces_bgr)
+    parsed_faces = _parse_face_mode(face_mode)
+    if n_src >= 2:
+        face_mode = "2 faces" if n_src == 2 else "Multiple faces"
+        logging.info("slots from photos: %d replacements → %s (dropdown was %s)", n_src, face_mode, parsed_faces)
+    if not face_mode:
+        face_mode = "2 faces"
+
+    pref = _parse_device_mode(device_mode)
+    _device_pref[0] = pref
+    want_gpu = pref == "gpu"
+    use_gpu = _gpu_worth_trying(want_gpu)
+
+    if not use_gpu:
+        try: MODELS.get(prefer_gpu=False)
+        except Exception as e:
+            return f"❌ Model load failed: {e}", _hist_html(), gr.update(choices=_get_done_choices()), _video_progress_html(), _device_status_text()
+
+    jid = str(uuid.uuid4())[:8].upper()
+    src_paths = {}
+    for idx, im in enumerate(faces_bgr):
+        if im is not None:
+            p = f"/tmp/src_{jid}_{idx}.jpg"
+            cv2.imwrite(p, im, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            src_paths[idx] = p
+            logging.info("saved replacement slot %s → %s %s", idx + 1, p, im.shape)
+    vp = f"/tmp/vid_{jid}.mp4"
+    shutil.copy(vid, vp)
+    sid = _safe_session_id(request)
+    with _lock:
+        jobs[jid] = dict(
+            status='processing', progress=0, message='Queued…',
+            result_path=None, created_at=time.time(), cancel=False, eta_seconds=None,
+            session_id=sid,
+        )
+    _persist_job(jid)
+    scope = "all" if enhance_scope and str(enhance_scope).lower().startswith("all") else (
+        "all" if not enhance_scope else "primary"
+    )
+    if isinstance(face_enhance, str):
+        face_enhance = face_enhance.strip().lower() in ("1", "true", "on", "yes", "gfpgan")
+    if face_enhance:
+        enhancer = "GFPGAN"
+        scope = "all"
+        logging.info("face enhancer ON — GFPGAN on the swapped face only")
+    cfg = dict(max_seconds=int(secs), fps=int(fps), resolution=res or "720p (HD)", quality=quality or "Ultra",
+               enhancer=enhancer or "Cinematic (clarity + smooth)",
+               enhance_scope=scope,
+               refs=refs or [], swap_n=swap_n or "1", det_n=det_n or "1", det_int=det_int or 1,
+               password=(password or "").strip(),
+               trim_start=float(trim_start or 0),
+               trim_end=float(trim_end or 100),
+               face_mode=face_mode or "2 faces",
+               device_mode=pref,
+               use_gpu=use_gpu,
+               smooth_motion=(smooth_motion or "Fast (blend)"))
+
+    try:
+        _save_ui_session(
+            vid, s1, s2, s3, s4,
+            dict(
+                secs=int(secs), fps=int(fps), res=res, quality=quality,
+                enhancer=enhancer or "Cinematic (clarity + smooth)", swap_n=str(swap_n or "1"), det_n=str(det_n or "1"),
+                det_int=str(det_int or 1), face_mode=face_mode or "2 faces",
+                enhance_scope=enhance_scope or "All faces",
+                device_mode=device_mode or "CPU only",
+                trim_start=float(trim_start or 0), trim_end=float(trim_end or 100),
+            ),
+            request=request,
+        )
+    except Exception as e:
+        logging.warning(f"session persist: {e}")
+
+    if use_gpu and HAS_SPACES and _is_zerogpu_space():
+        try:
+            _run_job_on_gpu(jid, src_paths, vp, cfg)
+            _gpu_try_cached[0] = True
+            with _lock: j = jobs.get(jid, {})
+            msg = j.get("message") or f"✓ Job {jid} finished on GPU"
+            st = j.get("status", "done")
+            return (
+                f"{'✓' if st == 'done' else '✗'} {msg}",
+                _hist_html(),
+                gr.update(choices=_get_done_choices()),
+                _video_progress_html(),
+                _device_status_text(),
+            )
+        except Exception as e:
+            err = str(e)
+            if any(x in err.lower() for x in ("not supported", "no gpu", "cpu only", "not a zero")):
+                _gpu_try_cached[0] = False
+            cfg = dict(cfg)
+            cfg["use_gpu"] = False
+            with _lock:
+                if jid in jobs:
+                    jobs[jid].update(status="processing", message=f"GPU failed — continuing on CPU…", progress=1)
+            VIDEO_EXECUTOR.submit(_run_job_body, jid, src_paths, vp, cfg)
+            return (
+                f"✓ Job {jid} on CPU · {face_mode}",
+                _hist_html(),
+                gr.update(choices=_get_done_choices()),
+                _video_progress_html(),
+                _device_status_text(),
+            )
+
+    VIDEO_EXECUTOR.submit(_run_job_body, jid, src_paths, vp, cfg)
+    dev = "GPU" if use_gpu else "CPU"
+    return (
+        f"✓ Job {jid} started · {face_mode} · enhance={scope} · device={dev}",
+        _hist_html(),
+        gr.update(choices=_get_done_choices()),
+        _video_progress_html(),
+        _device_status_text(),
+    )
+
+
+if HAS_SPACES:
+    @_spaces.GPU(duration=600)
+    def _run_job_on_gpu(jid, src_paths, vp, cfg):
+        cfg = dict(cfg)
+        cfg["use_gpu"] = True
+        return _run_job_body(jid, src_paths, vp, cfg)
+else:
+    def _run_job_on_gpu(jid, src_paths, vp, cfg):
+        return _run_job_body(jid, src_paths, vp, cfg)
