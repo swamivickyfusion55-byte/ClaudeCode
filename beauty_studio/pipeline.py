@@ -41,6 +41,7 @@ from .mp_backend import mediapipe_ready, mediapipe_status
 from .reshape import BodyProfiler, WarpField, add_body_reshape, add_face_reshape
 from .retouch import Retoucher
 from .settings import Settings, scale_person_amounts
+from .spots import FlowTrack, heal, marks_from, resolve_face
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +71,8 @@ class FrameProcessor:
     job its own.
     """
 
-    def __init__(self, settings: Settings, static: bool = False, max_faces: int = 3):
+    def __init__(self, settings: Settings, static: bool = False, max_faces: int = 3,
+                 flow: "FlowTrack | None" = None):
         self.raw = settings.normalised()
         self.s = _scale_for_naturalness(self.raw)
         self.static = bool(static)
@@ -78,6 +80,9 @@ class FrameProcessor:
         self.grader = Grader(stabilise=self.s.stabilise and not static)
         self.retoucher = Retoucher(stabilise=self.s.stabilise and not static)
         self.colourist = HairColourist(stabilise=self.s.stabilise and not static)
+        self.marks = marks_from(self.s.spots)
+        self.flow = flow
+        self.frame_index = 0
         self.profiler = BodyProfiler(stabilise=self.s.stabilise and not static)
         self.frames_with_face = 0
         self.frames_with_body = 0
@@ -89,6 +94,7 @@ class FrameProcessor:
         # opposite fixes.
         self.max_shift_px = 0.0
         self.max_face_shift_px = 0.0
+        self.spots_healed = 0
         self.max_body_shift_px = 0.0
 
     def close(self):
@@ -100,6 +106,7 @@ class FrameProcessor:
         s = self.s
         img = to_float(frame_u8)
         self.frames_seen += 1
+        self.spots_healed += len(self.marks) if self.marks else 0
 
         faces, body, person = [], None, None
         if self.trackers.face is not None:
@@ -114,6 +121,12 @@ class FrameProcessor:
             person = self.trackers.seg(frame_u8)
             if person is not None and float(person.max()) > 0.5:
                 self.frames_with_person += 1
+
+        if self.marks and s.spot_strength > 0:
+            # Before the retouch: a spot that is still there while the skin is
+            # smoothed gets smeared into its surroundings, and then there is
+            # no clean edge left to heal against.
+            img = heal(img, self._spot_positions(faces, img.shape), s.spot_strength)
 
         if faces and s.touches_face():
             img = self.retoucher.apply(img, faces, s)
@@ -151,6 +164,22 @@ class FrameProcessor:
 
         img = self.grader.apply(img, s)
         return to_u8(img)
+
+    def _spot_positions(self, faces, shape):
+        """Where every mark is in THIS frame - from the face mesh where the
+        mark was made on a face, from the flow pre-pass otherwise."""
+        out = []
+        for i, mark in enumerate(self.marks):
+            if mark.anchor == "face":
+                pos = resolve_face(mark, faces, shape)
+            elif self.flow is not None:
+                pos = self.flow.resolve(i, mark, self.frame_index, shape)
+            else:
+                h, w = shape[:2]
+                pos = (mark.x * w, mark.y * h, mark.radius * max(w, h))
+            if pos is not None:
+                out.append(pos)
+        return out
 
     def process_pair(self, frame_u8: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """(original, processed) - for the before/after preview."""
@@ -294,7 +323,8 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         cap.release()
         raise RuntimeError("no usable video encoder in this OpenCV build")
 
-    fp = FrameProcessor(s, static=False, max_faces=max_faces)
+    flow = _track_spots(src, s, f0, f1, (oh, ow), should_cancel)
+    fp = FrameProcessor(s, static=False, max_faces=max_faces, flow=flow)
     t0 = time.time()
     done = 0
     try:
@@ -309,6 +339,7 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
             if (frame.shape[1], frame.shape[0]) != (ow, oh):
                 interp = cv2.INTER_AREA if frame.shape[1] > ow else cv2.INTER_CUBIC
                 frame = cv2.resize(frame, (ow, oh), interpolation=interp)
+            fp.frame_index = f0 + done
             writer.write(fp.process(frame))
             done += 1
             if progress is not None and (done % 3 == 0 or done == 1):
@@ -358,10 +389,48 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         "persons_seen": fp.frames_with_person,
         "max_shift_px": fp.max_shift_px,
         "max_face_shift_px": fp.max_face_shift_px,
+        "spots": len(fp.marks),
         "max_body_shift_px": fp.max_body_shift_px,
         "frames_seen": fp.frames_seen,
         "notes": notes,
     }
+
+
+def _track_spots(src: str, s: Settings, f0: int, f1: int, shape, should_cancel):
+    """
+    Pre-pass that follows marks which are not anchored to a face.
+
+    It is a separate decode of the clip, which is worth it: tracking has to
+    run backward as well as forward from the frame the mark was made on, and
+    the render only ever moves forward. Face-anchored marks need none of this
+    - the mesh gives their position on any frame directly - so when every mark
+    is on a face this does not run at all.
+    """
+    marks = marks_from(s.spots)
+    if not marks or not any(m.anchor != "face" for m in marks) or s.spot_strength <= 0:
+        return None
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        return None
+
+    def frames():
+        if f0 > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f0)
+        idx = f0
+        while f1 <= 0 or idx < f1:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if (frame.shape[1], frame.shape[0]) != (shape[1], shape[0]):
+                frame = cv2.resize(frame, (shape[1], shape[0]), interpolation=cv2.INTER_AREA)
+            yield idx, frame
+            idx += 1
+
+    try:
+        log.info("tracking %d spot mark(s) through the clip", len(marks))
+        return FlowTrack().build(frames(), marks, shape, should_cancel)
+    finally:
+        cap.release()
 
 
 def _finish(silent: str, final: str, audio_src: str | None, s: Settings,

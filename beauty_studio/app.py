@@ -18,6 +18,7 @@ import time
 
 import cv2
 import gradio as gr
+import numpy as np
 
 if __package__ in (None, ""):
     # Run as a plain script (`python beauty_studio/app.py`, which is how a
@@ -29,16 +30,19 @@ if __package__ in (None, ""):
     __package__ = os.path.basename(_here)
 
 from . import jobs, retention
+from .landmarks import FaceTracker
 from .mp_backend import mediapipe_ready, mediapipe_status
 from .pipeline import (FrameProcessor, capability_report, grab_frame, probe,
                        process_image)
 from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESETS,
                        Settings, combine_presets, stack_label)
+from .spots import (MIN_SURROUND_SHARE, SpotMark, anchor_to_face,
+                    dominant_surround, locate_spot)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v2.0.0 (Aurora)"
+VERSION = "v2.1.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -113,11 +117,12 @@ SCALE_CHOICES = [("Source resolution (slowest)", 0), ("2160p / 4K", 2160),
 
 
 def settings_from(values, hair_colour, hair_hue, protect_skin, stabilise, scale,
-                  out_long, quality, hdr10) -> Settings:
+                  out_long, quality, hdr10, spots=None) -> Settings:
     kw = {}
     for field, v in zip(FIELDS, values):
         kw[field] = float(v) / 100.0
     return Settings(
+        spots=list(spots or []),
         hair_colour=str(hair_colour or "none"),
         hair_hue=float(hair_hue),
         protect_skin_colour=bool(protect_skin),
@@ -195,6 +200,91 @@ def on_preview(path, position, *args):
     return (cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
             cv2.cvtColor(out, cv2.COLOR_BGR2RGB),
             f"Preview at {float(position):.0f}% · {found}{extra}")
+
+
+def on_mark_spot(path, position, marks, evt: gr.SelectData):
+    """
+    A tap on the Before frame: find the spot under it, remember where it is.
+
+    The mark is stored against the face mesh when the tap lands on a face, so
+    it follows the head through the clip without any tracking at all;
+    otherwise it is stored as a position for the flow pre-pass to follow. The
+    size comes from the picture either way - a tap says where, and asking
+    someone to size every mole with a slider is how a feature like this goes
+    unused.
+    """
+    if not path:
+        raise gr.Error("Load a video first.")
+    frame = grab_frame(path, float(position) / 100.0)
+    if frame is None:
+        raise gr.Error("Could not read that frame.")
+    h, w = frame.shape[:2]
+    x, y = int(evt.index[0]), int(evt.index[1])
+    if not (0 <= x < w and 0 <= y < h):
+        raise gr.Error("That tap landed outside the frame.")
+
+    # The tap says which mark, not where its centre is - heal about the finger
+    # and the far edge of the mole falls outside the full-strength core and
+    # stays as a crescent. So the patch under the tap is found first and
+    # everything after this works from ITS centre.
+    sx, sy, radius_px, found = locate_spot(frame, x, y, max_radius=max(8, int(max(w, h) * 0.03)))
+    x, y = int(round(sx)), int(round(sy))
+
+    # Check what surrounds it before accepting the mark. A tap on an edge -
+    # where skin meets a sleeve, a hemline, hair - has no single colour to
+    # carry across, and the renderer will decline it. Better to say so now
+    # than to leave someone wondering why one spot never went.
+    yy, xx = np.ogrid[:h, :w]
+    dist = np.sqrt((xx - sx) ** 2 + (yy - sy) ** 2)
+    _, share = dominant_surround(frame.astype(np.float32) / 255.0, dist, radius_px)
+    if share and share < MIN_SURROUND_SHARE:
+        html, until = _notice(
+            f"That spot sits on an edge — only {share * 100:.0f}% of what surrounds "
+            f"it is one surface, so there is no single colour to carry across it. "
+            f"Tap a point with even skin around it.", bad=True)
+        return list(marks or []), _marks_text(marks), html, until
+    mark = SpotMark(x=sx / w, y=sy / h, radius=radius_px / max(w, h),
+                    frame=_frame_index(path, position), label=f"({x},{y})")
+    tracker = FaceTracker(static=True)
+    try:
+        faces = tracker(frame)
+    finally:
+        tracker.close()
+    mark = anchor_to_face(mark, faces, frame.shape)
+
+    marks = list(marks or []) + [mark.to_dict()]
+    html, until = _notice(
+        f"Spot {len(marks)} marked at ({x}, {y}), about {radius_px:.0f} px across — "
+        f"{'anchored to the face' if mark.anchor == 'face' else 'tracked through the clip'}. "
+        f"Press <b>Preview frame</b> to see it healed."
+        if found else
+        f"Nothing stood out under that tap, so spot {len(marks)} covers a small "
+        f"area around ({x}, {y}) instead. If you meant a mole, tap closer to it; "
+        f"<b>Clear spot marks</b> undoes this.")
+    return marks, _marks_text(marks), html, until
+
+
+def _frame_index(path, position) -> int:
+    try:
+        info = probe(path)
+        return int(np.clip(float(position) / 100.0, 0, 0.999) * max(info.frames - 1, 0))
+    except Exception:
+        return 0
+
+
+def _marks_text(marks) -> str:
+    if not marks:
+        return ("No spots marked. Tap a mole or dark patch on the **Before** "
+                "frame and it is removed from the whole clip.")
+    bits = [f"{i}. {m.get('label', '')} "
+            f"{'(face)' if m.get('anchor') == 'face' else '(tracked)'}"
+            for i, m in enumerate(marks or [], 1)]
+    return f"**{len(marks)} spot(s):** " + " · ".join(bits)
+
+
+def on_clear_spots():
+    html, until = _notice("Spot marks cleared.")
+    return [], _marks_text([]), html, until
 
 
 def on_photo(image, *args):
@@ -446,6 +536,10 @@ def build() -> gr.Blocks:
     init = preset_values(DEFAULT_PRESET)
 
     with gr.Blocks(title="Swamitech Beauty Studio", css=CSS, analytics_enabled=False) as demo:
+        # Tapped spots. Clip data rather than settings, so switching or
+        # stacking presets never clears what someone has marked. Declared up
+        # here because the control list below refers to it.
+        spots_state = gr.State([])
         gr.HTML(
             "<div class='app-hdr'><h1>Swamitech Beauty Studio</h1>"
             "<p>HDR grading · natural skin retouch · face &amp; body shaping · hair enhancement</p></div>"
@@ -469,8 +563,13 @@ def build() -> gr.Blocks:
                             stop_btn = gr.Button("Stop", elem_classes=["btn-s"])
                         job_state = gr.State("")
                         with gr.Row():
-                            before_img = gr.Image(label="Before", height=250, interactive=False)
+                            before_img = gr.Image(
+                                label="Before — tap a mole or dark patch to remove it",
+                                height=250, interactive=False)
                             after_img = gr.Image(label="After", height=250, interactive=False)
+                        marks_md = gr.Markdown(_marks_text([]), elem_classes=["note", "marks"])
+                        clear_spots_btn = gr.Button("Clear spot marks",
+                                                    elem_classes=["btn-s"])
                         preview_note = gr.Markdown("", elem_classes=["note"])
                         status = gr.HTML(_status("Load a video, pick a preset, preview a frame, then render."))
                         video_out = gr.Video(label="Result", height=300, interactive=False)
@@ -561,7 +660,7 @@ def build() -> gr.Blocks:
                                              "detail the source never had.")
 
         extras = [hair_colour, hair_hue, protect_skin, stabilise, scale,
-                  out_long, quality, hdr10]
+                  out_long, quality, hdr10, spots_state]
         controls = sliders + extras
         # Which finished file the player is already showing, so the poller can
         # leave it alone until it actually changes.
@@ -576,6 +675,10 @@ def build() -> gr.Blocks:
         video_in.change(on_video, inputs=video_in, outputs=[info_md, before_img, after_img])
         preview_btn.click(on_preview, inputs=[video_in, preview_pos] + controls,
                           outputs=[before_img, after_img, preview_note])
+        before_img.select(on_mark_spot, inputs=[video_in, preview_pos, spots_state],
+                          outputs=[spots_state, marks_md, status, notice_state])
+        clear_spots_btn.click(on_clear_spots,
+                              outputs=[spots_state, marks_md, status, notice_state])
         render_btn.click(on_submit,
                          inputs=[video_in, preset, trim_a, trim_b] + controls,
                          outputs=[job_state, status, history_dd, notice_state])

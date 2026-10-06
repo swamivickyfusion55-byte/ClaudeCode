@@ -52,6 +52,81 @@ Also: under-eye circle reduction (weighted by how dark the shadow actually is,
 so it does not leave pale rectangles), sclera whitening, iris and lash
 definition, teeth whitening inside the mouth only, and lip definition.
 
+**Moles and dark patches.** Tap one on the Before frame and it is gone from
+the whole clip - every frame, including the frames *before* the one you tapped.
+
+A tap says which mark, not where its centre is or how big it is: the patch
+under your finger is found in the picture as the connected region that differs
+in **colour** from the skin around it, and everything after that works from
+*its* centre rather than from the tap. Healing about the finger instead leaves
+a crescent of mole on the far side - the part that fell outside the
+full-strength core - and that crescent is more noticeable than the mole was.
+Taps anywhere within a few pixels of a mole all land on the same centre; a tap
+with nothing distinct under it says so rather than leaving you to guess what
+the app thought it marked. Colour, not brightness, because brightness alone finds a black mole
+on pale skin and very little else - a brown patch on brown skin can sit within
+a couple of levels of its surroundings in luminance while being plainly a
+different colour, and on deeper skin most marks are of that kind. Distance in
+Lab catches both and assumes nothing about the skin it is on. This works
+anywhere on the body, not only on a face: a mark on an arm, a shoulder or a
+back is the same measurement.
+
+Removing it is what was asked for - the skin colour around the patch is
+carried across it - with two details that decide whether it reads as skin or as
+a smudge:
+
+- The fill is a **quadratic surface** fitted to the ring of real skin around
+  the mark, not one flat colour. A cheek or a shoulder is curved, and over the
+  width of a mole plus its ring that curvature shows: a flat fill leaves a
+  faintly lighter or darker disc exactly where the mole was.
+- The **grain is borrowed**, because a textureless disc reads as a smudge even
+  when the colour is perfect. Donors are taken from clean skin a couple of
+  radii away and judged against the grain of the ring around *this* mark -
+  anything markedly busier is refused outright, and what is used is scaled to
+  the ring's own level. Without that guard a mole beside a nostril or a
+  hairline gets the crescent of that feature stamped onto the cheek, which
+  looks worse than the mole did.
+
+Measured on synthetic skin, three tones against four patch colours (black
+mole, dark brown, brown, reddish), the mark's visibility falls by 95% in every
+case and the residual sits inside the natural variation of the untouched skin
+beside it. On a moving limb - a shaded, grainy arm that travels and rotates
+across 40 frames with a brown patch riding it - a single tap on frame 20 clears
+every frame of the clip, frame 0 included.
+
+**A tap on an edge is declined, and says so.** Where skin meets a sleeve, a
+hemline or hair, the ring around the mark is made of two different things and a
+fit over both lands halfway between them - a patch matching neither, which is
+worse than leaving it. The share of the ring belonging to one surface is
+measured; below 62% the mark is refused at the moment you tap it, with a
+message saying why, rather than silently doing nothing at render time.
+
+**Staying gone while the subject moves** is the harder half, and it is why a
+mark is never stored as a rectangle:
+
+- **On a face**, the mark is stored as weights over the six nearest face-mesh
+  landmarks, plus whatever those weights do not reach, kept in the face's own
+  frame of reference - across the face and along its axis, as fractions of its
+  width. The mesh moves, turns and scales with the head, so the mark follows it
+  for free on every frame where a face is found - earlier frames as readily as
+  later ones, which no tracker can do in one pass. Its radius scales with the
+  face, so a mole that was 6 px in a wide shot is still the right size in a
+  close-up.
+
+  Solving the weights for an exact fit instead is the obvious shortcut and the
+  wrong one: the solution is free to leave the simplex, and weights that sum to
+  one while running past ±1 turn a pixel of mesh jitter into several pixels of
+  drift. Measured on a 60-frame clip, that put the heal off the mole entirely
+  on six of them. Convex weights with the remainder stored separately hold all
+  sixty.
+- **Anywhere else**, Lucas-Kanade optical flow in a cheap pre-pass, run
+  forward *and* backward from the marked frame before the render starts. People
+  mark a mole when they notice it, which is rarely frame one.
+
+Both hand the renderer the same thing: where this spot is in this frame.
+Strength is a slider, and marks are clip data rather than preset data, so
+switching or stacking presets never clears them.
+
 **Face and body shape.** Every adjustment writes into one smooth displacement
 field that is applied with a single `remap`. Jaw and cheek slimming pull toward
 the face's own centre line, so a tilted head slims correctly. Body work follows
@@ -190,6 +265,13 @@ at once without touching the grade.
 settings on one frame (a second or two), then *Render video*. Trim start/end
 render a section instead of the whole clip. The Photo tab runs the same stack
 on a still.
+
+**Removing a mole or a dark patch: tap it.** Press *Preview frame*, then tap
+(or click) the mark on the **Before** image. It is measured, anchored and
+listed under the frame, and it is gone from every frame of the render - not
+just from the one you tapped. Mark up to as many as you like, anywhere on the
+body; *Clear spot marks* starts over. If a tap lands on an edge rather than on
+open skin, the app says so on the spot instead of quietly skipping it later.
 
 **Renders run on the server, not in your tab.** *Render video* queues a job and
 returns immediately; a worker thread owns it from there. Close the tab, lock
@@ -352,6 +434,16 @@ NumPy - no GPU is required and none is used.
   ran" are not the same message.
 - **Shape amounts are capped** (see `CAPS` in `settings.py`) at the point where
   each effect starts to read as an edit rather than a flattering adjustment.
+- **Spot removal needs skin around the spot.** It carries the surrounding skin
+  across the mark, so it needs a ring of one surface to carry: a mole in open
+  skin goes, a mark straddling a hemline, a sleeve edge or a hairline is
+  declined at the moment you tap it. It also heals marks, not regions - a tap
+  on a large area (a shadow, a tattoo, a birthmark the size of a palm) is
+  bounded by the measurement rather than flood-filled.
+- **A spot can only be followed where the subject can be followed.** On a face
+  it rides the face mesh and survives turns and cuts in framing; elsewhere it
+  rides optical flow, which a hard cut or a limb leaving frame will lose. The
+  render report counts the marks it carried.
 
 ## Layout
 

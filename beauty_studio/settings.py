@@ -12,7 +12,7 @@ Two rules hold this file together:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 
 # Upper bound applied to each normalised amount (1.0 = the slider's 100 really
 # means 100). These are the "you can't make it look fake" guard rails; the
@@ -20,6 +20,7 @@ from dataclasses import dataclass, asdict, fields, replace
 CAPS = {
     "skin_smooth": 0.85,
     "skin_texture": 0.90,
+    "spot_strength": 1.00,
     "skin_even": 0.80,
     "blemish": 0.90,
     "glow": 0.55,
@@ -80,6 +81,11 @@ class Settings:
     teeth_whiten: float = 0.30
     lip_enhance: float = 0.25
     under_eye: float = 0.35         # dark-circle reduction
+    # Spot removal. `spots` are marks the user tapped on a frame (see
+    # spots.py); they are clip-specific data, not part of any preset, so
+    # stacking or switching presets never clears them.
+    spots: list = field(default_factory=list)
+    spot_strength: float = 0.90
 
     # ---- face shape ------------------------------------------------------
     face_slim: float = 0.25         # jaw + cheek narrowing
@@ -125,7 +131,11 @@ class Settings:
         out = {}
         for f in fields(self):
             v = getattr(self, f.name)
-            if f.name == "hair_colour":
+            if f.name == "spots":
+                # Clip data, passed through untouched: a list of marks, each
+                # already validated when it was made.
+                out[f.name] = list(v or [])
+            elif f.name == "hair_colour":
                 # A name, not a number. Anything unrecognised means "leave the
                 # colour alone" rather than an exception mid-render.
                 name = str(v or "none").strip().lower()
@@ -157,9 +167,15 @@ class Settings:
     def with_(self, **kw) -> "Settings":
         return replace(self, **kw)
 
+    def removes_spots(self) -> bool:
+        return bool(self.spots) and self.spot_strength > 0
+
     def touches_face(self) -> bool:
+        if self.removes_spots():
+            return True
         return any(getattr(self, k) > 0 for k in (
             "skin_smooth", "skin_texture", "skin_even", "blemish", "glow",
+            "spot_strength",
             "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye",
             "face_slim", "face_round", "chin_shape", "nose_slim", "eye_enlarge"))
 
@@ -362,7 +378,8 @@ DOMAIN_FIELDS: dict[str, tuple[str, ...]] = {
               "saturation", "warmth", "tint", "contrast", "bloom", "sharpen",
               "protect_skin_colour"),
     "skin": ("skin_smooth", "texture", "skin_texture", "skin_even", "blemish",
-             "glow", "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye"),
+             "glow", "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye",
+             "spot_strength"),
     "face": ("face_slim", "face_round", "chin_shape", "nose_slim", "eye_enlarge"),
     "body": ("body_slim", "body_fuller", "waist_shape", "curve_shape",
              "bust_shape", "hip_shape", "posture"),
