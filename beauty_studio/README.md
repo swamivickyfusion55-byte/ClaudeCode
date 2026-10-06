@@ -328,25 +328,32 @@ settings on one frame (a second or two), then *Render video*. Trim start/end
 render a section instead of the whole clip. The Photo tab runs the same stack
 on a still.
 
-**Removing a mole or a dark patch: tap it, or let it find them.**
+**Removing a mole or a dark patch: rub it out.**
 
-1. Load the video. The **① Before** frame appears on its own — no button to
-   press first.
+1. Load the video. Frame **①** appears on its own — no button to press first.
 2. *(optional)* Drag **Preview position** to the moment you want to work on.
    The frame follows the slider.
-3. **Tap the mark** on ① Before — or press **Find marks on this frame** and
-   let it look for you.
-4. It vanishes in **② After**, immediately. No *Preview frame* press, no
-   render, no wait.
+3. **Drag your finger over the mark.** Roughly is fine. A single touch works
+   too — it is just a very short rub. Or press **Find marks on this frame**
+   and let it look for you.
+4. Press **Erase what I rubbed**. It vanishes in **②**, and the paint comes
+   off ① ready for the next one.
 
-Everything marked is ringed and numbered on ① Before, so you can see exactly
-what it took. *Clear spot marks* starts over. Mark as many as you like,
+What you rubbed is used for **aiming, not measuring**: the marks inside the
+band are found and sized from the picture, exactly as before, and the band only
+decides which of them to take. That is what makes it easy — you do not have to
+hit anything, you only have to go over it. Catching the edge of a mole works;
+so does a scrub across half a cheek. If there is genuinely nothing to find
+under the rub, the band itself is cleaned, because you asked for it.
+
+Everything marked is ringed and numbered on ①, so you can see exactly what it
+took. *Put everything back* starts over. Mark as many as you like,
 anywhere on the body. What you see in ② After is what the render will do, on
 every frame — not just the one you tapped. If a tap lands on an edge rather
 than on open skin, the app says so on the spot instead of quietly skipping it
 at render time, and a tap with nothing distinct under it says that too.
 
-Two things about this used to be wrong, and both produced the same report —
+Three things about this used to be wrong. Two produced the same report —
 *"I tapped the dark area and it stayed as it was"*:
 
 - **② After only updated when you pressed *Preview frame*.** You tapped,
@@ -358,6 +365,10 @@ Two things about this used to be wrong, and both produced the same report —
   Scrub to a different moment, tap the mole you can see, and the mark landed
   on whatever happened to be at those coordinates seconds away. The frame now
   follows the slider.
+- **It wanted a tap at all.** Aiming a fingertip at a mole a few pixels across
+  is a precision task on a phone, and precision is the thing a finger is worst
+  at. Rubbing is what people reach for, so rubbing is what it takes now, and a
+  tap is simply the shortest possible rub.
 
 **Renders run on the server, not in your tab.** *Render video* queues a job and
 returns immediately; a worker thread owns it from there. Close the tab, lock

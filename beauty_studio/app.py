@@ -37,13 +37,13 @@ from .pipeline import (FrameProcessor, capability_report, grab_frame, probe,
 from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESETS,
                        Settings, combine_presets, stack_label)
 from .spots import (MIN_SURROUND_SHARE, SpotMark, anchor_to_face, detect_spots,
-                    dominant_surround, heal, locate_spot, marks_from,
-                    resolve_face, skin_region)
+                    dominant_surround, heal, marks_from, marks_from_stroke,
+                    resolve_face, skin_region, stroke_mask)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v2.2.1 (Aurora)"
+VERSION = "v2.3.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -167,8 +167,7 @@ def on_video(path):
         if info.frames == 0:
             msg += " · frame count unknown (the progress bar will be approximate)"
         frame = grab_frame(path, 0.35)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if frame is not None else None
-        return msg, rgb, None
+        return msg, _editor(frame, []), None
     except Exception as e:
         return f"**Could not read that file** · {e}", None, None
 
@@ -187,7 +186,7 @@ def on_scrub(path, position, marks):
     frame = grab_frame(path, float(position) / 100.0)
     if frame is None:
         return gr.update(), gr.update()
-    return _draw_marks(frame, marks), _healed_preview(frame, marks)
+    return _editor(frame, marks), _healed_preview(frame, marks)
 
 
 def on_preview(path, position, *args):
@@ -224,74 +223,79 @@ def on_preview(path, position, *args):
     extra = (" · " + " · ".join(bits)) if bits else ""
     # Keep the rings: the Before frame is the only place that says which marks
     # are in play, and a preview must not quietly wipe them.
-    return (_draw_marks(frame, s.spots),
+    return (_editor(frame, s.spots),
             cv2.cvtColor(out, cv2.COLOR_BGR2RGB),
             f"Preview at {float(position):.0f}% · {found}{extra}")
 
 
-def on_mark_spot(path, position, marks, evt: gr.SelectData):
+def on_rub(path, position, marks, canvas, sensitivity):
     """
-    A tap on the Before frame: find the spot under it, remember where it is.
+    A rub, or a touch, on the Before surface.
 
-    The mark is stored against the face mesh when the tap lands on a face, so
-    it follows the head through the clip without any tracking at all;
-    otherwise it is stored as a position for the flow pre-pass to follow. The
-    size comes from the picture either way - a tap says where, and asking
-    someone to size every mole with a slider is how a feature like this goes
-    unused.
+    Both arrive the same way - as paint on a layer - so there is one handler
+    and one gesture. What the band is used for is aiming, not measuring: the
+    marks inside it are found and sized from the picture, exactly as a tap's
+    were, and what you rubbed over only decides which of them to take. So a
+    sloppy stroke works, and so does catching the edge of a mole.
     """
     if not path:
-        raise gr.Error("Load a video first.")
+        return (list(marks or []), _marks_text(marks), *_notice(
+            "Load a video first.", bad=True), gr.update(), gr.update())
     frame = grab_frame(path, float(position) / 100.0)
     if frame is None:
-        raise gr.Error("Could not read that frame.")
+        return (list(marks or []), _marks_text(marks), *_notice(
+            "Could not read that frame.", bad=True), gr.update(), gr.update())
+    painted = stroke_mask((canvas or {}).get("layers") if isinstance(canvas, dict) else None,
+                          frame.shape)
+    marks = list(marks or [])
+    if painted is None:
+        # The layer came back empty: either nothing was drawn, or this is the
+        # echo of us clearing it. Either way there is nothing to do.
+        return marks, _marks_text(marks), gr.update(), gr.update(), gr.update(), gr.update()
+
+    level = (float(sensitivity) / 100.0) or 0.5
     h, w = frame.shape[:2]
-    x, y = int(evt.index[0]), int(evt.index[1])
-    if not (0 <= x < w and 0 <= y < h):
-        raise gr.Error("That tap landed outside the frame.")
+    found = marks_from_stroke(frame, painted, level, limit=12)
 
-    # The tap says which mark, not where its centre is - heal about the finger
-    # and the far edge of the mole falls outside the full-strength core and
-    # stays as a crescent. So the patch under the tap is found first and
-    # everything after this works from ITS centre.
-    sx, sy, radius_px, found = locate_spot(frame, x, y, max_radius=max(8, int(max(w, h) * 0.03)))
-    x, y = int(round(sx)), int(round(sy))
-
-    # Check what surrounds it before accepting the mark. A tap on an edge -
-    # where skin meets a sleeve, a hemline, hair - has no single colour to
-    # carry across, and the renderer will decline it. Better to say so now
-    # than to leave someone wondering why one spot never went.
-    yy, xx = np.ogrid[:h, :w]
-    dist = np.sqrt((xx - sx) ** 2 + (yy - sy) ** 2)
-    _, share = dominant_surround(frame.astype(np.float32) / 255.0, dist, radius_px)
-    if share and share < MIN_SURROUND_SHARE:
-        html, until = _notice(
-            f"That spot sits on an edge — only {share * 100:.0f}% of what surrounds "
-            f"it is one surface, so there is no single colour to carry across it. "
-            f"Tap a point with even skin around it.", bad=True)
-        return (list(marks or []), _marks_text(marks), html, until,
-                _draw_marks(frame, marks), _healed_preview(frame, marks))
-    mark = SpotMark(x=sx / w, y=sy / h, radius=radius_px / max(w, h),
-                    frame=_frame_index(path, position), label=f"({x},{y})")
     tracker = FaceTracker(static=True)
     try:
         faces = tracker(frame)
     finally:
         tracker.close()
-    mark = anchor_to_face(mark, faces, frame.shape)
 
-    marks = list(marks or []) + [mark.to_dict()]
-    html, until = _notice(
-        f"Spot {len(marks)} marked at ({x}, {y}), about {radius_px:.0f} px across — "
-        f"{'anchored to the face' if mark.anchor == 'face' else 'tracked through the clip'}. "
-        f"It is gone in the <b>After</b> image on the right, and it will be gone "
-        f"on every frame of the render."
-        if found else
-        f"Nothing stood out under that tap, so spot {len(marks)} covers a small "
-        f"area around ({x}, {y}) instead. If you meant a mole, tap closer to it; "
-        f"<b>Clear spot marks</b> undoes this.")
-    return (marks, _marks_text(marks), html, until, _draw_marks(frame, marks),
-            _healed_preview(frame, marks))
+    added, refused = 0, 0
+    for (mx, my, radius) in found:
+        if any((mx - m["x"] * w) ** 2 + (my - m["y"] * h) ** 2
+               < (radius + m["radius"] * max(w, h)) ** 2 for m in marks):
+            continue
+        yy, xx = np.ogrid[:h, :w]
+        dist = np.sqrt((xx - mx) ** 2 + (yy - my) ** 2)
+        _, share = dominant_surround(frame.astype(np.float32) / 255.0, dist, radius)
+        if share and share < MIN_SURROUND_SHARE:
+            refused += 1
+            continue
+        mark = SpotMark(x=mx / w, y=my / h, radius=radius / max(w, h),
+                        frame=_frame_index(path, position),
+                        label=f"({mx:.0f},{my:.0f})")
+        marks.append(anchor_to_face(mark, faces, frame.shape).to_dict())
+        added += 1
+
+    if added:
+        html, until = _notice(
+            f"Rubbed out {added} mark{'s' if added != 1 else ''} — gone in "
+            f"<b>② After</b>, and gone on every frame of the render. "
+            f"Keep rubbing to take out more; <b>Clear spot marks</b> puts "
+            f"everything back."
+            + (f" {refused} spot sat on an edge and was left alone." if refused else ""))
+    elif refused:
+        html, until = _notice(
+            f"That rub only covered an edge — where skin meets hair, a collar "
+            f"or a sleeve there is no single colour to carry across. Rub over "
+            f"the skin side of it.", bad=True)
+    else:
+        html, until = _notice("That rub landed on something already marked.")
+    return (marks, _marks_text(marks), html, until,
+            _editor(frame, marks), _healed_preview(frame, marks))
 
 
 def _frame_index(path, position) -> int:
@@ -304,10 +308,11 @@ def _frame_index(path, position) -> int:
 
 def _marks_text(marks) -> str:
     if not marks:
-        return ("**No spots marked.** Tap a mole or dark patch on the **①&nbsp;Before** "
-                "frame — it disappears in **②&nbsp;After** straight away, and from "
-                "every frame of the render. Or press **Find marks on this frame** "
-                "and let it look for you.")
+        return ("**No spots marked.** Rub your finger over a mole or dark patch on "
+                "**①** — roughly is fine, and a single touch works too. It "
+                "disappears in **②** as you go, and from every frame of the "
+                "render. Or press **Find marks on this frame** and let it look "
+                "for you.")
     bits = [f"{i}. {m.get('label', '')} "
             f"{'(face)' if m.get('anchor') == 'face' else '(tracked)'}"
             for i, m in enumerate(marks or [], 1)]
@@ -345,7 +350,7 @@ def on_auto_find(path, position, marks, sensitivity):
         html, until = _notice(
             "No face or body found in this frame, so there is nowhere to look. "
             "Try a frame where the person is clearly in shot.", bad=True)
-        return (marks, _marks_text(marks), html, until, _draw_marks(frame, marks),
+        return (marks, _marks_text(marks), html, until, _editor(frame, marks),
                 _healed_preview(frame, marks))
 
     # The slider is the sensitivity; at zero, use a middling setting rather
@@ -375,7 +380,7 @@ def on_auto_find(path, position, marks, sensitivity):
         html, until = _notice(
             "Nothing stood out on this frame at that sensitivity. Raise "
             "<b>Find and remove marks</b> to look harder, or tap a mark yourself.")
-    return (marks, _marks_text(marks), html, until, _draw_marks(frame, marks),
+    return (marks, _marks_text(marks), html, until, _editor(frame, marks),
             _healed_preview(frame, marks))
 
 
@@ -409,6 +414,17 @@ def _healed_preview(frame, marks, strength: float = 0.9):
     return cv2.cvtColor(np.clip(out * 255, 0, 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
 
 
+def _editor(frame, marks):
+    """The Before surface's value: the frame with its marks ringed, and no
+    paint on it. Handing back empty layers is what wipes the stroke you just
+    made, so the next rub starts on a clean picture rather than on top of the
+    last one."""
+    rgb = _draw_marks(frame, marks)
+    if rgb is None:
+        return None
+    return {"background": rgb, "layers": [], "composite": rgb}
+
+
 def _draw_marks(frame, marks):
     """Ring every mark on the Before frame.
 
@@ -436,7 +452,7 @@ def _draw_marks(frame, marks):
 def on_clear_spots(path, position):
     html, until = _notice("Spot marks cleared.")
     frame = grab_frame(path, float(position) / 100.0) if path else None
-    return ([], _marks_text([]), html, until, _draw_marks(frame, []),
+    return ([], _marks_text([]), html, until, _editor(frame, []),
             _healed_preview(frame, []))
 
 
@@ -687,19 +703,24 @@ footer{ display:none!important; }
    touch-action:manipulation drops the wait, and the rest stops the tap being
    taken for a drag, a text selection or a save. */
 .tappable img,.tappable canvas{
-  touch-action:manipulation!important; -ms-touch-action:manipulation!important;
+  touch-action:none!important; -ms-touch-action:none!important;
   cursor:crosshair!important; -webkit-user-select:none!important; user-select:none!important;
   -webkit-touch-callout:none!important; -webkit-tap-highlight-color:rgba(201,162,39,.35)!important;
 }
-.tappable{ touch-action:manipulation!important; }
+/* The surface is drawn on, so the browser must not claim the gesture: with
+   anything but touch-action:none a drag across it scrolls the page instead of
+   painting, which is the whole feature gone on a phone. */
+.tappable{ touch-action:none!important; }
 .tappable .image-frame,.tappable [data-testid="image"]{ cursor:crosshair!important; }
+
 .tappable label span,.tappable .block-label{ color:#E4BA3E!important; }
 @media (max-width:820px){
   .gradio-container{ max-width:100%!important; padding:0 6px!important; }
-  /* A fingertip covers far more of a 360 px-wide phone than a mouse pointer
-     does, so the frame you tap gets the full width and the height to match. */
-  .tappable{ min-height:300px!important; }
-  .tappable img,.tappable canvas{ min-height:280px!important; object-fit:contain!important; }
+  /* The editor sizes its canvas to the component's height ONCE, on mount,
+     and writes the result inline - so the picture is grown with the `height`
+     argument, not from here. All this has to do is stop the two frames
+     sharing a row, which left each of them half a phone wide. */
+
   .btn-s,.btn-p{ min-height:50px!important; }
 }
 """
@@ -735,18 +756,41 @@ def build() -> gr.Blocks:
                             render_btn = gr.Button("Render video", elem_classes=["btn-p"], variant="primary")
                             stop_btn = gr.Button("Stop", elem_classes=["btn-s"])
                         job_state = gr.State("")
-                        with gr.Row():
-                            before_img = gr.Image(
-                                label="① Before — tap a mole or dark patch",
-                                height=250, interactive=False,
-                                elem_classes=["tappable"])
-                            after_img = gr.Image(label="② After — the tap shows up here",
-                                                 height=250, interactive=False)
+                        # Stacked, not side by side. The editor sizes its
+                        # canvas to its container once, when it mounts, and
+                        # writes the result inline - so sharing a row with the
+                        # After frame left it permanently half-width, and no
+                        # amount of CSS afterwards moved it. Full width is the
+                        # right answer regardless: the bigger the picture, the
+                        # less precision a fingertip needs.
+                        #
+                        # An editor rather than a picture, because the gesture
+                        # people reach for is rubbing a mark out, not aiming at
+                        # it. A single touch is a one-dot stroke, so the same
+                        # surface takes both and there is nothing to choose.
+                        before_img = gr.ImageEditor(
+                            label="① Rub out a mole",
+                            height=430, type="numpy", interactive=True,
+                            sources=(), transforms=(), layers=False,
+                            show_download_button=False,
+                            brush=gr.Brush(colors=["#C9A227"], default_color="#C9A227",
+                                           color_mode="fixed", default_size=18),
+                            eraser=gr.Eraser(default_size=18),
+                            elem_classes=["tappable"])
+                        after_img = gr.Image(label="② After", height=380,
+                                             interactive=False)
+                        gr.Markdown(
+                            "Drag your finger over a mole or dark patch on ① — "
+                            "roughly is fine, a single touch works too — then press "
+                            "**Erase what I rubbed**.",
+                            elem_classes=["note", "howto"])
                         marks_md = gr.Markdown(_marks_text([]), elem_classes=["note", "marks"])
                         with gr.Row():
+                            erase_btn = gr.Button("Erase what I rubbed",
+                                                  elem_classes=["btn-s"])
                             auto_find_btn = gr.Button("Find marks on this frame",
                                                       elem_classes=["btn-s"])
-                            clear_spots_btn = gr.Button("Clear spot marks",
+                            clear_spots_btn = gr.Button("Put everything back",
                                                         elem_classes=["btn-s"])
                         preview_note = gr.Markdown("", elem_classes=["note"])
                         status = gr.HTML(_status("Load a video, pick a preset, preview a frame, then render."))
@@ -859,9 +903,16 @@ def build() -> gr.Blocks:
                            outputs=[before_img, after_img], show_progress="minimal")
         preview_btn.click(on_preview, inputs=[video_in, preview_pos] + controls,
                           outputs=[before_img, after_img, preview_note])
-        before_img.select(on_mark_spot, inputs=[video_in, preview_pos, spots_state],
-                          outputs=[spots_state, marks_md, status, notice_state,
-                                   before_img, after_img])
+        # `change` rather than `input`: on this pinned Gradio, `input` does not
+        # fire for a brush stroke. The echo of handing the cleared canvas back
+        # is harmless because a canvas with no paint on it returns early.
+        rub_args = dict(fn=on_rub,
+                        inputs=[video_in, preview_pos, spots_state, before_img,
+                                sliders[FIELDS.index("auto_spots")]],
+                        outputs=[spots_state, marks_md, status, notice_state,
+                                 before_img, after_img])
+        before_img.change(**rub_args)
+        erase_btn.click(**rub_args)
         auto_find_btn.click(
             on_auto_find,
             inputs=[video_in, preview_pos, spots_state,

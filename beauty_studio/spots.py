@@ -998,3 +998,104 @@ def _reconstruct(track, face):
     along, across = _face_frame(face)
     pos = pos + (across * ox + along * oy) * max(float(face.width), 1.0)
     return float(pos[0]), float(pos[1])
+
+
+# ------------------------------------------------------------------- rubbing
+
+def marks_from_stroke(bgr, painted, sensitivity: float = 0.5, limit: int = 12,
+                      reference=None) -> list[tuple[float, float, float]]:
+    """
+    Everything the finger went over.
+
+    Rubbing is not a second feature bolted beside tapping - it is a looser way
+    of aiming the same one. The band you rubbed becomes the place to look, and
+    the marks inside it are found and measured exactly as a tap's are. That is
+    what makes it easy: you do not have to hit anything, you only have to go
+    over it. A single touch is just a very short rub, so one gesture covers
+    both and there is nothing to choose between.
+
+    If there is nothing to find in the band - plain skin, or a mark too faint
+    to measure against its surroundings - the band itself is cleaned, in
+    overlapping discs laid along its middle. You asked for that area to go, and
+    answering "there was nothing there" to a deliberate rub is not useful.
+    Each disc still goes through the edge guard, so rubbing across a hemline
+    cleans the skin side and leaves the hem.
+    """
+    painted = (np.asarray(painted) > 0).astype(np.uint8)
+    if not painted.any():
+        return []
+    h, w = bgr.shape[:2]
+    long_edge = float(max(h, w))
+    r_min = max(1.5, AUTO_MIN_RADIUS * long_edge)
+    r_max = max(r_min + 1.0, AUTO_MAX_RADIUS * long_edge)
+
+    # A little wider than the finger, because a mark's halo reaches past the
+    # part of it you can see, and nobody rubs to the pixel.
+    grow = int(max(2, r_min))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow * 2 + 1,) * 2)
+    band = cv2.dilate(painted, k)
+
+    if reference is None:
+        # Ordinary skin to measure against: a ring outside the band, which is
+        # what the rubbed area is supposed to end up looking like.
+        out_k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (int(r_max * 3) * 2 + 1,) * 2)
+        reference = (cv2.dilate(band, out_k) - band)
+
+    # Look over a region wider than the band, and then keep what the band
+    # actually went over. Searching the band itself clips every mark it only
+    # half-covers into a sliver, and a sliver fails the roundness test that
+    # keeps hairs and creases out - so a narrow dab straight across a mole
+    # found nothing, and fell through to cleaning the skin beside it.
+    reach = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(r_max) * 2 + 1,) * 2)
+    search = cv2.dilate(band, reach)
+    found = detect_spots(bgr, search.astype(np.float32), sensitivity, limit * 3,
+                         reference=np.asarray(reference, np.float32))
+    picked = [(x, y, r) for x, y, r, _ in found
+              if band[int(np.clip(y, 0, h - 1)), int(np.clip(x, 0, w - 1))]]
+    if picked:
+        return picked[:max(1, int(limit))]
+
+    # Nothing stood out: clean the band. Discs are placed at the band's
+    # thickest points first, so a stroke is covered along its middle rather
+    # than nibbled from one end.
+    dt = cv2.distanceTransform(band, cv2.DIST_L2, 5)
+    out: list[tuple[float, float, float]] = []
+    while len(out) < max(1, int(limit)):
+        _, peak, _, (px, py) = cv2.minMaxLoc(dt)
+        if peak < r_min:
+            break
+        r = float(np.clip(peak, r_min, r_max))
+        out.append((float(px), float(py), r))
+        cv2.circle(dt, (int(px), int(py)), int(max(r * 1.4, 2)), 0.0, -1)
+    return out
+
+
+def stroke_mask(layers, shape) -> np.ndarray | None:
+    """The painted pixels out of an image editor's layers, as a 0/1 mask.
+
+    What comes back is whatever the editor hands over - RGBA layers, RGB ones,
+    a single array, None - so this is deliberately forgiving: anything opaque,
+    or on an RGB layer anything not black, counts as painted.
+    """
+    if layers is None:
+        return None
+    if not isinstance(layers, (list, tuple)):
+        layers = [layers]
+    h, w = shape[:2]
+    out = np.zeros((h, w), np.uint8)
+    for layer in layers:
+        if layer is None:
+            continue
+        a = np.asarray(layer)
+        if a.ndim == 2:
+            m = a > 8
+        elif a.shape[2] >= 4:
+            m = a[:, :, 3] > 8
+        else:
+            m = a[:, :, :3].max(axis=2) > 8
+        m = m.astype(np.uint8)
+        if m.shape[:2] != (h, w):
+            m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+        out |= m
+    return out if out.any() else None
