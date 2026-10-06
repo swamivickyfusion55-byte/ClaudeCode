@@ -36,13 +36,14 @@ from .pipeline import (FrameProcessor, capability_report, grab_frame, probe,
                        process_image)
 from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESETS,
                        Settings, combine_presets, stack_label)
-from .spots import (MIN_SURROUND_SHARE, SpotMark, anchor_to_face,
-                    detect_spots, dominant_surround, locate_spot, skin_region)
+from .spots import (MIN_SURROUND_SHARE, SpotMark, anchor_to_face, detect_spots,
+                    dominant_surround, heal, locate_spot, marks_from,
+                    resolve_face, skin_region)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v2.2.0 (Aurora)"
+VERSION = "v2.2.1 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -172,6 +173,23 @@ def on_video(path):
         return f"**Could not read that file** · {e}", None, None
 
 
+def on_scrub(path, position, marks):
+    """Move the preview position: show THAT frame, not the one from before.
+
+    This was a trap. The Before image was loaded once at 35% and left there,
+    while a tap read the frame at wherever the slider had since been moved to.
+    Slide to a different moment, tap the mole you can see, and the mark lands
+    on whatever happens to be at those coordinates a few seconds away - so the
+    tap appears to do nothing, which is exactly the report that found it.
+    """
+    if not path:
+        return gr.update(), gr.update()
+    frame = grab_frame(path, float(position) / 100.0)
+    if frame is None:
+        return gr.update(), gr.update()
+    return _draw_marks(frame, marks), _healed_preview(frame, marks)
+
+
 def on_preview(path, position, *args):
     """Process a single frame so settings can be judged without a render."""
     if not path:
@@ -252,7 +270,7 @@ def on_mark_spot(path, position, marks, evt: gr.SelectData):
             f"it is one surface, so there is no single colour to carry across it. "
             f"Tap a point with even skin around it.", bad=True)
         return (list(marks or []), _marks_text(marks), html, until,
-                _draw_marks(frame, marks))
+                _draw_marks(frame, marks), _healed_preview(frame, marks))
     mark = SpotMark(x=sx / w, y=sy / h, radius=radius_px / max(w, h),
                     frame=_frame_index(path, position), label=f"({x},{y})")
     tracker = FaceTracker(static=True)
@@ -266,12 +284,14 @@ def on_mark_spot(path, position, marks, evt: gr.SelectData):
     html, until = _notice(
         f"Spot {len(marks)} marked at ({x}, {y}), about {radius_px:.0f} px across — "
         f"{'anchored to the face' if mark.anchor == 'face' else 'tracked through the clip'}. "
-        f"Press <b>Preview frame</b> to see it healed."
+        f"It is gone in the <b>After</b> image on the right, and it will be gone "
+        f"on every frame of the render."
         if found else
         f"Nothing stood out under that tap, so spot {len(marks)} covers a small "
         f"area around ({x}, {y}) instead. If you meant a mole, tap closer to it; "
         f"<b>Clear spot marks</b> undoes this.")
-    return marks, _marks_text(marks), html, until, _draw_marks(frame, marks)
+    return (marks, _marks_text(marks), html, until, _draw_marks(frame, marks),
+            _healed_preview(frame, marks))
 
 
 def _frame_index(path, position) -> int:
@@ -284,8 +304,10 @@ def _frame_index(path, position) -> int:
 
 def _marks_text(marks) -> str:
     if not marks:
-        return ("No spots marked. Tap a mole or dark patch on the **Before** "
-                "frame and it is removed from the whole clip.")
+        return ("**No spots marked.** Tap a mole or dark patch on the **①&nbsp;Before** "
+                "frame — it disappears in **②&nbsp;After** straight away, and from "
+                "every frame of the render. Or press **Find marks on this frame** "
+                "and let it look for you.")
     bits = [f"{i}. {m.get('label', '')} "
             f"{'(face)' if m.get('anchor') == 'face' else '(tracked)'}"
             for i, m in enumerate(marks or [], 1)]
@@ -323,7 +345,8 @@ def on_auto_find(path, position, marks, sensitivity):
         html, until = _notice(
             "No face or body found in this frame, so there is nowhere to look. "
             "Try a frame where the person is clearly in shot.", bad=True)
-        return marks, _marks_text(marks), html, until, _draw_marks(frame, marks)
+        return (marks, _marks_text(marks), html, until, _draw_marks(frame, marks),
+                _healed_preview(frame, marks))
 
     # The slider is the sensitivity; at zero, use a middling setting rather
     # than finding nothing, because pressing the button IS the request.
@@ -352,7 +375,38 @@ def on_auto_find(path, position, marks, sensitivity):
         html, until = _notice(
             "Nothing stood out on this frame at that sensitivity. Raise "
             "<b>Find and remove marks</b> to look harder, or tap a mark yourself.")
-    return marks, _marks_text(marks), html, until, _draw_marks(frame, marks)
+    return (marks, _marks_text(marks), html, until, _draw_marks(frame, marks),
+            _healed_preview(frame, marks))
+
+
+def _healed_preview(frame, marks, strength: float = 0.9):
+    """The frame with ONLY the spot pass applied, for the After image.
+
+    The complaint this answers is the obvious one: you tap a mole, and the
+    picture you are looking at still has the mole in it - because the Before
+    frame is the before. Waiting for a full preview render to find out whether
+    the tap did anything is too long a loop for something you do five times in
+    a row, and the spot pass on its own takes milliseconds.
+    """
+    if frame is None:
+        return None
+    if not marks:
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    spots = []
+    for m in marks_from(marks):
+        h, w = frame.shape[:2]
+        pos = None
+        if m.anchor == "face":
+            tracker = FaceTracker(static=True)
+            try:
+                pos = resolve_face(m, tracker(frame), frame.shape)
+            finally:
+                tracker.close()
+        if pos is None:
+            pos = (m.x * w, m.y * h, m.radius * max(w, h))
+        spots.append(pos)
+    out = heal(frame.astype(np.float32) / 255.0, spots, strength)
+    return cv2.cvtColor(np.clip(out * 255, 0, 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
 
 
 def _draw_marks(frame, marks):
@@ -382,7 +436,8 @@ def _draw_marks(frame, marks):
 def on_clear_spots(path, position):
     html, until = _notice("Spot marks cleared.")
     frame = grab_frame(path, float(position) / 100.0) if path else None
-    return [], _marks_text([]), html, until, _draw_marks(frame, [])
+    return ([], _marks_text([]), html, until, _draw_marks(frame, []),
+            _healed_preview(frame, []))
 
 
 def on_photo(image, *args):
@@ -682,10 +737,11 @@ def build() -> gr.Blocks:
                         job_state = gr.State("")
                         with gr.Row():
                             before_img = gr.Image(
-                                label="Before — tap a mole or dark patch to remove it",
+                                label="① Before — tap a mole or dark patch",
                                 height=250, interactive=False,
                                 elem_classes=["tappable"])
-                            after_img = gr.Image(label="After", height=250, interactive=False)
+                            after_img = gr.Image(label="② After — the tap shows up here",
+                                                 height=250, interactive=False)
                         marks_md = gr.Markdown(_marks_text([]), elem_classes=["note", "marks"])
                         with gr.Row():
                             auto_find_btn = gr.Button("Find marks on this frame",
@@ -795,19 +851,26 @@ def build() -> gr.Blocks:
         preset.change(lambda names: preset_extras(names), inputs=preset,
                       outputs=[hair_colour, hair_hue])
         video_in.change(on_video, inputs=video_in, outputs=[info_md, before_img, after_img])
+        # `change`, not `release`: a slider is also a number box, and typing a
+        # position into it has to refresh the frame for the same reason
+        # dragging does - otherwise the picture and the frame a tap reads come
+        # apart again, by another route.
+        preview_pos.change(on_scrub, inputs=[video_in, preview_pos, spots_state],
+                           outputs=[before_img, after_img], show_progress="minimal")
         preview_btn.click(on_preview, inputs=[video_in, preview_pos] + controls,
                           outputs=[before_img, after_img, preview_note])
         before_img.select(on_mark_spot, inputs=[video_in, preview_pos, spots_state],
                           outputs=[spots_state, marks_md, status, notice_state,
-                                   before_img])
+                                   before_img, after_img])
         auto_find_btn.click(
             on_auto_find,
             inputs=[video_in, preview_pos, spots_state,
                     sliders[FIELDS.index("auto_spots")]],
-            outputs=[spots_state, marks_md, status, notice_state, before_img])
+            outputs=[spots_state, marks_md, status, notice_state, before_img,
+                     after_img])
         clear_spots_btn.click(on_clear_spots, inputs=[video_in, preview_pos],
                               outputs=[spots_state, marks_md, status, notice_state,
-                                       before_img])
+                                       before_img, after_img])
         render_btn.click(on_submit,
                          inputs=[video_in, preset, trim_a, trim_b] + controls,
                          outputs=[job_state, status, history_dd, notice_state])

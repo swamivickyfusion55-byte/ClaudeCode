@@ -328,15 +328,36 @@ settings on one frame (a second or two), then *Render video*. Trim start/end
 render a section instead of the whole clip. The Photo tab runs the same stack
 on a still.
 
-**Removing a mole or a dark patch: tap it, or let it find them.** Press
-*Preview frame*, then tap (or click) the mark on the **Before** image —
-or press *Find marks on this frame* and let it do the looking. Everything it
-marks is ringed and numbered on the frame, so you can see what is in play
-before you render. It is measured, anchored and
-listed under the frame, and it is gone from every frame of the render - not
-just from the one you tapped. Mark up to as many as you like, anywhere on the
-body; *Clear spot marks* starts over. If a tap lands on an edge rather than on
-open skin, the app says so on the spot instead of quietly skipping it later.
+**Removing a mole or a dark patch: tap it, or let it find them.**
+
+1. Load the video. The **① Before** frame appears on its own — no button to
+   press first.
+2. *(optional)* Drag **Preview position** to the moment you want to work on.
+   The frame follows the slider.
+3. **Tap the mark** on ① Before — or press **Find marks on this frame** and
+   let it look for you.
+4. It vanishes in **② After**, immediately. No *Preview frame* press, no
+   render, no wait.
+
+Everything marked is ringed and numbered on ① Before, so you can see exactly
+what it took. *Clear spot marks* starts over. Mark as many as you like,
+anywhere on the body. What you see in ② After is what the render will do, on
+every frame — not just the one you tapped. If a tap lands on an edge rather
+than on open skin, the app says so on the spot instead of quietly skipping it
+at render time, and a tap with nothing distinct under it says that too.
+
+Two things about this used to be wrong, and both produced the same report —
+*"I tapped the dark area and it stayed as it was"*:
+
+- **② After only updated when you pressed *Preview frame*.** You tapped,
+  looked at the Before frame — which is the before, and still had the mole in
+  it — and reasonably concluded nothing had happened. The spot pass costs
+  milliseconds, so it now runs on the tap itself.
+- **The position slider moved the frame a tap reads, but not the frame you
+  were looking at.** The Before image was loaded once at 35% and left there.
+  Scrub to a different moment, tap the mole you can see, and the mark landed
+  on whatever happened to be at those coordinates seconds away. The frame now
+  follows the slider.
 
 **Renders run on the server, not in your tab.** *Render video* queues a job and
 returns immediately; a worker thread owns it from there. Close the tab, lock
