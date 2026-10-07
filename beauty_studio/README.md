@@ -1,0 +1,674 @@
+---
+title: Swamitech Beauty Studio
+emoji: ✨
+colorFrom: indigo
+colorTo: pink
+sdk: gradio
+sdk_version: 4.44.1
+python_version: "3.10"
+app_file: app.py
+pinned: false
+---
+
+# Swamitech Beauty Studio
+
+An HDR video editor with natural retouching: it grades your footage, cleans up
+skin without erasing it, shapes the face and silhouette within believable
+limits, enhances hair, and writes a finished MP4 with the original audio.
+
+Everything runs locally (or in your own Space) on CPU. Nothing is uploaded
+anywhere, and no generative model is involved - every pixel in the output comes
+from your footage.
+
+```
+python -m beauty_studio.app                   # web UI on http://localhost:7860
+python -m beauty_studio.cli clip.mp4 -o out.mp4 --preset "HDR Cinematic"
+python -m beauty_studio.cli --selftest        # check the install end to end
+```
+
+---
+
+## What it does
+
+**HDR grade.** A real local tone-mapping operator, not a contrast curve: the
+luminance is split in the log domain into a base layer (the lighting, via an
+edge-preserving guided filter) and a detail layer (the texture). Compressing
+the base while keeping the detail is what opens shadows and recovers a blown
+window in the same shot. Clarity, vibrance, bloom, white balance and an
+edge-aware final sharpen sit on top as grading.
+
+Detail-boosting stages are gated by a texture-energy map, so skies, walls and
+studio backdrops do not hand back amplified noise and JPEG blocking - the
+single clearest tell of a phone "HDR" filter.
+
+**Skin.** Frequency separation. The face is split into a smooth tone layer and
+a texture layer; the tone layer is evened out and the texture is put back at
+whatever level you choose (default: two thirds). Blemish removal only touches
+pixels that are both darker than their surroundings and smaller than the local
+median kernel, so a spot goes and the shadow under the nose stays. Eyes, brows,
+lips and nostrils are masked out of all of it.
+
+Also: under-eye circle reduction (weighted by how dark the shadow actually is,
+so it does not leave pale rectangles), sclera whitening, iris and lash
+definition, teeth whitening inside the mouth only, and lip definition.
+
+**Moles and dark patches.** Tap one on the Before frame and it is gone from
+the whole clip - every frame, including the frames *before* the one you tapped.
+
+A tap says which mark, not where its centre is or how big it is: the patch
+under your finger is found in the picture as the connected region that differs
+in **colour** from the skin around it, and everything after that works from
+*its* centre rather than from the tap. Healing about the finger instead leaves
+a crescent of mole on the far side - the part that fell outside the
+full-strength core - and that crescent is more noticeable than the mole was.
+Taps anywhere within a few pixels of a mole all land on the same centre; a tap
+with nothing distinct under it says so rather than leaving you to guess what
+the app thought it marked. Colour, not brightness, because brightness alone finds a black mole
+on pale skin and very little else - a brown patch on brown skin can sit within
+a couple of levels of its surroundings in luminance while being plainly a
+different colour, and on deeper skin most marks are of that kind. Distance in
+Lab catches both and assumes nothing about the skin it is on. This works
+anywhere on the body, not only on a face: a mark on an arm, a shoulder or a
+back is the same measurement.
+
+Removing it is what was asked for - the skin colour around the patch is
+carried across it - with two details that decide whether it reads as skin or as
+a smudge:
+
+- The fill is a **quadratic surface** fitted to the ring of real skin around
+  the mark, not one flat colour. A cheek or a shoulder is curved, and over the
+  width of a mole plus its ring that curvature shows: a flat fill leaves a
+  faintly lighter or darker disc exactly where the mole was.
+- The **grain is borrowed**, because a textureless disc reads as a smudge even
+  when the colour is perfect. Donors are taken from clean skin a couple of
+  radii away and judged against the grain of the ring around *this* mark -
+  anything markedly busier is refused outright, and what is used is scaled to
+  the ring's own level. Without that guard a mole beside a nostril or a
+  hairline gets the crescent of that feature stamped onto the cheek, which
+  looks worse than the mole did.
+
+Measured on synthetic skin, three tones against four patch colours (black
+mole, dark brown, brown, reddish), the mark's visibility falls by 95% in every
+case and the residual sits inside the natural variation of the untouched skin
+beside it. On a moving limb - a shaded, grainy arm that travels and rotates
+across 40 frames with a brown patch riding it - a single tap on frame 20 clears
+every frame of the clip, frame 0 included.
+
+**Or let it find them: auto-detect.** A slider — *Find and remove marks* —
+runs the same measurement over the whole person on every frame, with no tapping
+at all. Low finds only what is unmistakable; high finds every freckle; zero is
+off. Beside it, **Find marks on this frame** runs the detector once, here, and
+adds what it finds to the list as if you had tapped each one, so you can see
+what it caught before committing an hour of rendering to it — and clear it if
+it caught something you wanted kept. Marks are ringed and numbered on the
+Before frame either way.
+
+Three things keep it from healing a face off:
+
+- **It only looks at skin.** On a face that is the face's own skin mask, which
+  already excludes eyes, brows, lips and nostrils — the four things on a face
+  most reliably darker than their surroundings. On a body the person mask is a
+  mask of the *person*, clothes included, so the body half is gated on colour
+  — and the colour it is gated on is measured from this subject's own face in
+  this frame, not from a table. That is what makes it work at any skin tone
+  rather than at the ones a table happened to list. Both masks are closed by a
+  little more than the largest mark it will heal, because a mole is not
+  skin-coloured and a colour gate otherwise punches a hole in the mask exactly
+  where the mark is.
+- **Size in both directions, and roundness.** Below the floor it is grain;
+  above the ceiling it is a shadow, a tattoo or the shade under a jaw. A hair,
+  a lash, a crease and the edge of a seam are all darker than what surrounds
+  them, and all long and thin.
+- **An absolute bar as well as a relative one.** The threshold is set in
+  robust deviations of the skin's own signal — measured on the part that is
+  confidently skin, not on the widened search region, or a sleeve raises the
+  bar until the mole on the cheek measures as ordinary — and a mark has to
+  clear a fixed contrast too.
+
+Measured on synthetic skin at three tones, six marks of four colours and sizes
+per tone: **6/6 found with no false positives at every sensitivity** on light
+and mid tones, 4–5/6 on deep (the misses are the ones already invisible there),
+and the marks' visibility falls from 35–49 to 1–2. On a real photograph — a
+640×480 frame with a 78-pixel-wide face, which is about as hard as it gets —
+eyes, brows, lips and nostrils were untouched at every sensitivity.
+
+**It does not flicker.** A detector run independently on each frame does not
+agree with itself: a mark on the threshold is found, missed, found, and healing
+that switches a patch of skin on and off twenty-four times a second, which is
+far more visible than the mark was. So detections are carried as tracks, the
+way faces are elsewhere in this app — seen twice before anything is healed,
+coasted for a few frames when missed, ramped in and out rather than switched,
+and matched to the face mesh so a track survives a turn of the head. The first
+frame is the one exception: there is nothing to appear from, so it heals
+immediately rather than leaving the mark on the frame most likely to end up as
+the thumbnail. Measured frame-to-frame change at a healed mark comes out
+*below* the source clip's own: 0.06 against 0.22 on a moving limb, 0.63 against
+0.54 on a face.
+
+**It costs the same at 4K as at 480p.** Detection runs on a 640-pixel copy and
+the heal happens at full resolution, so the detector's cost does not scale with
+the footage: about 70 ms a frame at any size. Getting there needed one other
+fix — the region masks were being closed with round structuring elements on
+float arrays, which took 46 ms a frame where squares on uint8 take 0.6 ms, and
+OpenCV runs a rectangle separably. On a 60-frame 640×480 clip, a full Natural
+render goes from 3.3 fps to 2.6 with auto-detect on; the *Spot clean (auto)*
+preset on its own runs at 7.2.
+
+**A tap on an edge is declined, and says so.** Where skin meets a sleeve, a
+hemline or hair, the ring around the mark is made of two different things and a
+fit over both lands halfway between them - a patch matching neither, which is
+worse than leaving it. The share of the ring belonging to one surface is
+measured; below 62% the mark is refused at the moment you tap it, with a
+message saying why, rather than silently doing nothing at render time.
+
+**Staying gone while the subject moves** is the harder half, and it is why a
+mark is never stored as a rectangle:
+
+- **On a face**, the mark is stored as weights over the six nearest face-mesh
+  landmarks, plus whatever those weights do not reach, kept in the face's own
+  frame of reference - across the face and along its axis, as fractions of its
+  width. The mesh moves, turns and scales with the head, so the mark follows it
+  for free on every frame where a face is found - earlier frames as readily as
+  later ones, which no tracker can do in one pass. Its radius scales with the
+  face, so a mole that was 6 px in a wide shot is still the right size in a
+  close-up.
+
+  Solving the weights for an exact fit instead is the obvious shortcut and the
+  wrong one: the solution is free to leave the simplex, and weights that sum to
+  one while running past ±1 turn a pixel of mesh jitter into several pixels of
+  drift. Measured on a 60-frame clip, that put the heal off the mole entirely
+  on six of them. Convex weights with the remainder stored separately hold all
+  sixty.
+- **Anywhere else**, Lucas-Kanade optical flow in a cheap pre-pass, run
+  forward *and* backward from the marked frame before the render starts. People
+  mark a mole when they notice it, which is rarely frame one.
+
+Both hand the renderer the same thing: where this spot is in this frame.
+Strength is a slider, and marks are clip data rather than preset data, so
+switching or stacking presets never clears them.
+
+**Face and body shape.** Every adjustment writes into one smooth displacement
+field that is applied with a single `remap`. Jaw and cheek slimming pull toward
+the face's own centre line, so a tilted head slims correctly. Body work follows
+the silhouette from the segmentation mask - not the pose skeleton, which says
+nothing about how wide a coat is - with the waist, bust and hip bands located
+from the pose.
+
+Three rules keep it from bending the person, all learned the hard way:
+
+- **Nothing above the shoulders.** The person mask includes the head, so a
+  whole-silhouette squeeze used to narrow the skull and jaw along with the
+  body. The field is gated at the shoulder line now, ramped over the neck.
+- **Torso features use torso width.** Waist, bust and hips are measured
+  against the shoulder span, not the whole outline. Measured against the
+  outline, their peak displacement lands out on the arms, which then bend
+  with the torso.
+- **A band whose centre is off-screen sits out.** On a chest-up shot the
+  estimated waist lands below the frame, and its tail was squeezing the
+  shoulders at the bottom edge. No waist in shot, no waist shaping - the
+  render report says when this happens.
+
+Row widths are measured about the body's axis, which comes from the pose
+(shoulder, hip, knee and ankle midpoints) rather than from the silhouette.
+Below the knees that axis runs down the gap *between* the legs, where there is
+no silhouette at all - and a profiler that picks the widest run instead latches
+onto one leg, warps it about its own centre, and leaves the other where it was.
+Runs too far from the axis are still excluded, so an arm held away from the
+body is not counted as torso width.
+
+Legs also taper out of the warp below the knee: a calf is narrow, moves fast
+and sits against background, so shaping it buys nothing and only risks calves
+that do not line up with the knees. Thighs - where slimming actually reads -
+keep the full amount.
+
+A fuller **face** is a different mechanism from a slimmer one. Slimming only
+has to move the jaw line inward, but dragging an outline outward leaves the
+nose and mouth where they were and stretches the picture between them. So
+**Rounder face** scales the lower face about its own axis instead: everything
+inside widens together, which is what a fuller face actually is.
+
+Bust, waist and hips are separate bands, positioned from the shoulder line and
+the torso length rather than read straight off the pose - a subject framed from
+the chest up still gets a waist in a sensible place instead of one extrapolated
+below the bottom of the picture. **Curvy (hourglass)** moves all three at once;
+**Bust** and **Hips** move one without the other.
+
+Measured on a standing subject:
+
+| | bust | waist | hips |
+| --- | --- | --- | --- |
+| Natural | – | −10% | – |
+| Glam | – | −14% | – |
+| Curvy | +8% | −18% | +10% |
+| Curvy (strong) | +13% | −23% | +13% |
+
+Two ceilings keep that honest: the per-row total is capped at 30% of the body's
+own half-width, so three sliders pushed up together cannot compound into a
+caricature, and the field as a whole is capped relative to the frame, which is
+why straight lines in the background stay straight.
+
+**Complexion.** A depth and an undertone, by name — porcelain, fair, rosy
+fair, creamy fair, light olive, wheatish, golden, olive, light brown, honey,
+caramel, bronze, deep, rich deep — plus a strength and a bipolar **depth**
+control that nudges lighter or deeper while keeping your own undertone. The
+depth control works on its own, without picking a named complexion at all.
+
+It moves your skin's colour rather than replacing it: the average is shifted
+onto the target and every pixel keeps its own departure from that average. Skin
+is not one colour — a cheek is not a forehead, and the shadow under a jaw is
+neither — so a transform that lands every pixel on one value gives a mask, not
+a face. Three things make the difference between skin and paint:
+
+- **It runs on the whole person**, not the face. The body half of the mask is
+  the person outline narrowed to the colour measured from this subject's own
+  face, so it follows neck, shoulders and arms without assuming anything about
+  the tone. Shift a face without its neck and you have given someone a mask —
+  the single most common way this effect is got wrong.
+- **Chroma moves with depth.** Carry fair-skin chroma down to a deep lightness
+  and the face comes out grey and ashy; the per-pixel colour spread is scaled
+  with the lightness gain instead of held flat.
+- **The colour mask is not the retouch mask.** Retouching cuts eyes, brows,
+  lips and nostrils out cleanly, because smoothing any of them is how a face
+  melts. Colour wants the opposite: smooth, and without holes. Using the
+  retouch mask here made every one of those exclusions show up as an
+  un-shifted blotch as soon as the shift was large. The colour mask takes the
+  eyes out properly, only damps brows and lips — they do carry some of a
+  complexion, just less than a cheek — and is closed and feathered until no
+  edge of it is visible as an edge.
+
+Measured on a fair subject, the skin lands within a few Lab units of each named
+target through the middle of the range (wheatish 73 → 71, olive 68 → 67, light
+brown 60 → 62, honey 55 → 58), and background, clothing, hair and the irises
+move by 0.0–0.2. The far end is honestly limited: taking a very fair face to
+*deep* is a 30-point move in lightness, and what comes back is flatter than
+life because the source never held that information. Big moves in either
+direction are more convincing on good footage than on a compressed upload.
+
+**There are no nationality or ethnicity presets, and that is deliberate.**
+There is no "Indian" or "Brazilian" or "Italian" skin colour: each of those
+names covers most of the human range, so a preset carrying one would be a
+single guess frozen into three numbers — wrong for the great majority of the
+people it claims to describe, and a stereotype taught to the software besides.
+What such a label is reaching for is a depth and an undertone, and both are
+above, by name, where you can see exactly what you are choosing.
+
+**Hair.** The mask is seeded on the crown - which is hair beyond argument -
+and grown outward through pixels that are both joined to it and the same
+colour. Elimination alone was not enough: the earlier version leaned on a
+skin-tone test, and blonde hair sits squarely inside the skin-tone window, so
+on the reference frame it scored real hair at 0.13 while a space helmet's
+visor stayed at 1.0. Seed-and-grow gets the hair and nothing else.
+
+On that mask: strand definition, gloss that follows the light already in the
+shot, colour depth, flyaway control on the outer edge only, a volume pass that
+grows the silhouette by a few pixels of real re-sampled hair - and
+**recolouring**.
+
+**Hair colour.** Pick a target (black, dark brown, brown, light brown, auburn,
+red, blonde, platinum, grey, or a custom hue) and a strength. The hair's
+average colour is moved to the target while every pixel keeps its own
+departure from that average, so the variation between strands survives instead
+of becoming one flat colour; lightness is scaled about the mean rather than
+offset, because dark hair genuinely has a narrower range than blonde; and
+specular highlights are held back so gloss survives the change.
+
+Going darker is the strong direction. Lightening dark hair is limited and
+honestly so: near-black pixels hold little detail to carry, so the result is
+flatter than life. Nothing here is generated - every pixel still comes from
+your footage.
+
+**Video, not stills.** Landmarks, silhouette profiles and exposure statistics
+are all smoothed over time; a lost face is coasted for a few frames and a newly
+found one ramps up over a few, so effects never pop on and off between frames.
+`--selftest` reports the resulting frame-to-frame stability as a number.
+
+## Presets
+
+| Preset | For |
+| --- | --- |
+| **Natural** | The default. Should read as good lighting, not as an edit. |
+| **Natural+ (subtle)** | Half strength again - very lightly graded footage. |
+| **Professional Portrait** | Interviews, corporate, talking heads. Clean skin, almost no shape work. |
+| **HDR Cinematic** | Strong tone mapping and local contrast, warm, filmic. |
+| **Glam** | Everything up, still inside the caps. |
+| **Curvy** | The hourglass by name: waist in, bust and hips out, lightly graded. |
+| **Curvy (strong)** | The same shape, pushed. |
+| **Chubby (light / medium / heavy)** | The other direction: fuller face and silhouette, waist left alone. Face widens ~3 / 5 / 7%. |
+| **Hair colour only** | Recolours the hair and changes nothing else at all. |
+| **Skin texture only** | Adds skin micro-detail back and changes nothing else at all. |
+| **Spot clean (auto)** | Finds marks on the face and body and takes them out. Nothing else at all — stack it onto any look. |
+| **Complexion only** | Depth and undertone, and nothing else. Pick the complexion from the dropdown; stack this onto any look. |
+| **Shape Only** | Reshaping with no grade or retouch. |
+| **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
+
+### Stacking presets
+
+Up to three presets can be combined - *Chubby (medium) + HDR Cinematic*, say.
+Each preset writes only the part of the picture it is about, so they add up
+instead of overwriting each other:
+
+| Preset | Writes |
+| --- | --- |
+| Natural, Natural+, Professional Portrait, Glam | everything (full looks) |
+| HDR Cinematic, HDR Only | the grade |
+| Curvy, Curvy (strong) | the body |
+| Chubby (light / medium / heavy) | the body and the face |
+| Hair colour only | the hair |
+| Skin texture only | the skin |
+| Spot clean (auto) | the skin |
+| Complexion only | the skin |
+| Shape Only | the face and the body |
+
+**Order does not matter.** The broadest preset is applied first and the most
+specific last, whichever order you picked them in - so adding a full look on
+top of a shape preset brings its skin and hair without quietly undoing the
+shaping. In the CLI: `--preset "Chubby (medium),HDR Cinematic"`.
+
+Every slider is 0-100 and every preset is just a set of slider positions, so
+you can start from one and adjust. **Naturalness** scales every person-effect
+at once without touching the grade.
+
+## Using it
+
+**Web UI.** Load a video, pick a preset, hit *Preview frame* to judge the
+settings on one frame (a second or two), then *Render video*. Trim start/end
+render a section instead of the whole clip. The Photo tab runs the same stack
+on a still.
+
+**Removing a mole or a dark patch: rub it out.**
+
+1. Load the video. Frame **①** appears on its own — no button to press first.
+2. *(optional)* Drag **Preview position** to the moment you want to work on.
+   The frame follows the slider.
+3. **Drag your finger over the mark.** Roughly is fine. A single touch works
+   too — it is just a very short rub. Or press **Find marks on this frame**
+   and let it look for you.
+4. Press **Erase what I rubbed**. It vanishes in **②**, and the paint comes
+   off ① ready for the next one.
+
+What you rubbed is used for **aiming, not measuring**: the marks inside the
+band are found and sized from the picture, exactly as before, and the band only
+decides which of them to take. That is what makes it easy — you do not have to
+hit anything, you only have to go over it. Catching the edge of a mole works;
+so does a scrub across half a cheek. If there is genuinely nothing to find
+under the rub, the band itself is cleaned, because you asked for it.
+
+Everything marked is ringed and numbered on ①, so you can see exactly what it
+took. *Put everything back* starts over. Mark as many as you like,
+anywhere on the body. What you see in ② After is what the render will do, on
+every frame — not just the one you tapped. If a tap lands on an edge rather
+than on open skin, the app says so on the spot instead of quietly skipping it
+at render time, and a tap with nothing distinct under it says that too.
+
+Three things about this used to be wrong. Two produced the same report —
+*"I tapped the dark area and it stayed as it was"*:
+
+- **② After only updated when you pressed *Preview frame*.** You tapped,
+  looked at the Before frame — which is the before, and still had the mole in
+  it — and reasonably concluded nothing had happened. The spot pass costs
+  milliseconds, so it now runs on the tap itself.
+- **The position slider moved the frame a tap reads, but not the frame you
+  were looking at.** The Before image was loaded once at 35% and left there.
+  Scrub to a different moment, tap the mole you can see, and the mark landed
+  on whatever happened to be at those coordinates seconds away. The frame now
+  follows the slider.
+- **It wanted a tap at all.** Aiming a fingertip at a mole a few pixels across
+  is a precision task on a phone, and precision is the thing a finger is worst
+  at. Rubbing is what people reach for, so rubbing is what it takes now, and a
+  tap is simply the shortest possible rub.
+
+**Renders run on the server, not in your tab.** *Render video* queues a job and
+returns immediately; a worker thread owns it from there. Close the tab, lock
+the phone, lose the wifi - the render carries on, and any tab that comes back
+picks it up by polling. The **History** tab lists every render on the server,
+newest first, with the file to download and the stats for each; renders started
+on another device show up there too. One render at a time, because a second
+concurrent one only makes both slower.
+
+A job whose files have been swept by the retention policy stays in the list as
+a record and reads *expired*. A job that was mid-render when the app restarted
+reads *interrupted* rather than pretending to still be running.
+
+**CLI.**
+
+```bash
+python -m beauty_studio.cli clip.mp4 -o out.mp4 \
+    --preset "Professional Portrait" \
+    --set skin_smooth=55 --set face_slim=30 --set waist_shape=25 \
+    --scale 1080 --trim 10:90 --quality 18
+```
+
+`--set NAME=VALUE` takes any field in `settings.py` on the same 0-100 scale as
+the UI. `--list-presets` prints what each preset does; `--selftest` renders a
+synthetic clip and reports tracking and stability.
+
+## MediaPipe: both generations work
+
+Everything except the HDR grade needs MediaPipe to find the face and body, and
+there are now two incompatible MediaPipe APIs:
+
+| Installed | API used | Models | Needs |
+| --- | --- | --- | --- |
+| **≤ 0.10.21** | legacy `solutions` | inside the wheel | nothing extra |
+| **≥ 0.10.30** (1.x included) | `tasks` | downloaded once (~10 MB) and cached | outbound network on first run, and `libEGL` |
+
+The app detects which is present and uses it; the header line and `--doctor`
+say which is active. All three of 0.10.14, 0.10.35 and 1.0.1 are tested, and
+give the same result to within half a percent of a pixel value.
+
+**`solutions` was removed at 0.10.30, not at 1.0.** That is the trap: a
+`mediapipe<0.11` pin looks conservative and still resolves to 0.10.35, which
+does not have it. An app written against the old API (including this one
+before v1.1.0) then fails on the first frame with:
+
+```
+AttributeError: module 'mediapipe' has no attribute 'solutions'
+```
+
+If you are seeing that, update to this version. `requirements.txt` here pins
+`mediapipe>=0.10.14,<0.10.22` - the last release that needs nothing at runtime.
+To run on a current MediaPipe instead, relax it to `mediapipe>=0.10.30` and add
+`libegl1` and `libgles2` to `packages.txt`.
+
+Model downloads land in `$BEAUTY_STUDIO_MODELS`, else `$HF_HOME/beauty_studio`,
+else `~/.cache/beauty_studio/models`, else the system temp directory - the
+first one that is writable. Set `BEAUTY_STUDIO_MODELS` to bake them into an
+image and skip the runtime download.
+
+When none of this works - no MediaPipe, no network for the models, no libEGL -
+the app does not fail. It grades the video, says why the rest is off in the
+header and in the render report, and renders.
+
+## When something is off: `--doctor`
+
+```
+$ python -m beauty_studio.cli --doctor
+python        3.10.14 (x86_64)
+mediapipe     1.0.1
+backend       tasks
+status        MediaPipe 1.0.1 (tasks API)
+face features ON
+model cache   /home/user/.cache/beauty_studio/models
+  face        cached  face_landmarker.task
+  pose        will download  pose_landmarker_lite.task
+  segment     cached  selfie_segmenter.tflite
+ffmpeg        /usr/bin/ffmpeg
+ffprobe       /usr/bin/ffprobe
+opencv        4.10.0
+```
+
+That block answers, in one place, every "why is it only grading?" and "why is
+there no audio?" question this app can raise.
+
+## Deploying to Hugging Face Spaces
+
+Copy the **folder** into the Space and point the Space at it - the modules
+import each other as a package, so keep them together in a directory rather
+than spilling them into the repository root:
+
+```bash
+git clone https://huggingface.co/spaces/<you>/<space> && cd <space>
+cp -r /path/to/beauty_studio .
+cp beauty_studio/requirements.txt beauty_studio/packages.txt .
+git add -A && git commit -m "Beauty Studio" && git push
+```
+
+Then in the Space's root `README.md` YAML header:
+
+```yaml
+sdk: gradio
+sdk_version: 4.44.1
+python_version: "3.10"
+app_file: beauty_studio/app.py
+```
+
+The header at the top of this file is the same thing for a Space whose root
+*is* this folder.
+
+`packages.txt` installs **ffmpeg**, which carries the original audio into the
+output and re-encodes to browser-safe H.264 (OpenCV writes video only, and
+many OpenCV builds have no H.264 encoder at all), plus **libgl1**. Without
+ffmpeg the render still completes, silent, and the UI says so.
+
+That file is fed straight to `xargs apt-get install`, so it takes **bare
+package names only** - one per line, no comments and no apostrophes. A `#`
+comment in it does not get ignored, it gets installed, and the build fails
+with `E: Unable to locate package #`.
+
+**On a Docker Space** `packages.txt` is ignored - your Dockerfile owns the
+system packages, so install them there:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg libgl1 libegl1 libgles2 && rm -rf /var/lib/apt/lists/*
+```
+
+## Performance
+
+Measured on a 4-core cloud CPU, per frame, with a face in shot:
+
+| Working resolution | Grade only | Full stack |
+| --- | --- | --- |
+| 720p | ~0.4 s | ~0.6 s |
+| 1080p | ~0.7 s | ~1.0 s |
+
+So roughly 4-6 frames/second at 720p: a 30-second clip takes a few minutes.
+Drop **Working resolution** to 720p for speed, and use *Preview frame* rather
+than repeated renders while you dial settings in. The stack is all OpenCV and
+NumPy - no GPU is required and none is used.
+
+## Limits, stated plainly
+
+- **HDR10 export is experimental.** It converts to BT.2020 primaries and the PQ
+  transfer function and tags the file so a display switches into HDR mode
+  (verified: HEVC, `yuv420p10le`, `color_primaries=bt2020`,
+  `color_transfer=smpte2084`). It is an inverse tone map of SDR material: it
+  does not recover highlight detail that was never captured. If this ffmpeg
+  build cannot do it, the render automatically falls back to standard H.264
+  and the report says so - it never hands back a file you cannot play.
+- **Faces need to be findable.** Everything except the grade depends on
+  MediaPipe finding the face. Very small, heavily backlit or extremely
+  motion-blurred faces will be skipped - the report after each render says on
+  what percentage of frames the face was tracked.
+- **Body shaping needs the body in frame.** Waist and hourglass adjustments
+  need the hips visible for the pose model to place the bands; with only a
+  head-and-shoulders framing, the overall slimming still works. The render
+  report says what was found - face percentage, body-outline percentage, and
+  the largest reshape actually applied in pixels - so "too subtle" and "never
+  ran" are not the same message.
+- **Shape amounts are capped** (see `CAPS` in `settings.py`) at the point where
+  each effect starts to read as an edit rather than a flattering adjustment.
+- **A complexion change wants the person findable.** The body half of the
+  mask needs the segmenter and a face to calibrate the skin colour from; with
+  no face in shot the shift falls back to the face mask alone, which on a
+  head-and-shoulders framing is most of what is visible anyway. Very large
+  moves — fair to deep, or the reverse — are limited by what the footage
+  actually holds, and the result is flatter than a real complexion at that
+  depth. The render report gives the skin area it found, so "too subtle" and
+  "never ran" are different messages.
+- **Auto-detect wants a face in the frame.** It gates the body half on the
+  skin colour it measures from the subject's own face; with no face in shot it
+  falls back to a broad generic window, which is weaker. It also gates on the
+  person outline, so footage the segmenter cannot resolve gets face-only
+  detection. And it is deliberately conservative: it finds marks, not
+  freckle-fields, and on deep skin tones a brown patch that is barely visible
+  in the first place is left alone, because at that point there is nothing to
+  remove.
+- **Spot removal needs skin around the spot.** It carries the surrounding skin
+  across the mark, so it needs a ring of one surface to carry: a mole in open
+  skin goes, a mark straddling a hemline, a sleeve edge or a hairline is
+  declined at the moment you tap it. It also heals marks, not regions - a tap
+  on a large area (a shadow, a tattoo, a birthmark the size of a palm) is
+  bounded by the measurement rather than flood-filled.
+- **A spot can only be followed where the subject can be followed.** On a face
+  it rides the face mesh and survives turns and cuts in framing; elsewhere it
+  rides optical flow, which a hard cut or a limb leaving frame will lose. The
+  render report counts the marks it carried.
+
+## Layout
+
+| File | What is in it |
+| --- | --- |
+| `app.py` | Gradio UI (Spaces entry point) |
+| `cli.py` | Headless renderer |
+| `pipeline.py` | Per-frame orchestration, video render, ffmpeg encode/mux |
+| `grade.py` | HDR tone mapping and colour |
+| `retouch.py` | Skin, eyes, teeth, lips |
+| `reshape.py` | Warp field, face and body shaping |
+| `hair.py` | Hair mask and enhancement |
+| `landmarks.py` | MediaPipe trackers, smoothing, coasting |
+| `imaging.py` | Guided filter, blend modes, masks, EMA |
+| `settings.py` | Every knob, the caps, the presets |
+| `selftest.py` | Synthetic end-to-end check |
+
+## Jobs and history
+
+| State | What it means |
+| --- | --- |
+| queued | waiting for the renderer (one runs at a time) |
+| running | in progress; the page shows frames, fps and an ETA |
+| done | finished; the file is in History until the retention window passes |
+| stopped | you pressed Stop or Cancel this job; the row keeps the percentage it reached |
+| interrupted | the app restarted mid-render - submit it again |
+| expired | the retention policy deleted the file; the row is the record |
+| failed | the reason is on the row |
+
+**Progress** is on both tabs: the Video tab shows a bar with the percentage,
+frames done and an ETA, and History has a progress column that updates while
+you watch it - so a render started on your phone can be followed from a laptop.
+
+**Stopping** works from either tab and from any device. *Stop* on the Video
+tab halts whatever this tab started, or, in a tab that did not start anything,
+whatever is currently rendering. *Cancel this job* in History stops the render
+you picked from the list. A stopped render finishes the frame it is on and
+then gives up, and its row keeps the percentage it reached.
+
+Messages from buttons stay on screen for a few seconds before the status line
+goes back to reporting the job - otherwise the two-second refresh wipes
+"Stopping…" off the screen before it can be read.
+
+`BEAUTY_JOBS_DIR` sets where job outputs and the index live (default: a
+`beauty_jobs` directory in the system temp directory).
+
+## Data retention
+
+Uploads, renders, previews and working files are deleted automatically **three
+hours** after they are last touched. A janitor thread sweeps every ten minutes;
+the UI has a **Delete my files now** button, and the CLI has `--purge`.
+
+- `BEAUTY_RETENTION_HOURS` changes the window (e.g. `0.5` for thirty minutes).
+- Swept: this app's render directories, finished jobs (one at a time, so the
+  history index survives and the row can say the file expired), and Gradio's
+  cache, which is where uploads and the files served back to the browser live. Both are addressed by
+  name - sweeping a whole temp directory would risk another process's files.
+- Not swept by default: the MediaPipe model cache. Those are weights, not
+  anyone's data, and dropping them only forces a re-download. Add
+  `BEAUTY_PURGE_MODELS=1` to include them, or use `--purge --purge-models`.
+
+## A note on what this is for
+
+This edits video you provide, on your own machine, into a more flattering
+version of itself - the same thing a colourist and a retoucher do by hand. The
+caps exist so that the result still looks like the person who was filmed. It is
+not a face swap, it does not synthesise anyone, and it should not be used to
+make footage of someone who has not agreed to it.
