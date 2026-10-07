@@ -247,6 +247,51 @@ own half-width, so three sliders pushed up together cannot compound into a
 caricature, and the field as a whole is capped relative to the frame, which is
 why straight lines in the background stay straight.
 
+**Complexion.** A depth and an undertone, by name — porcelain, fair, rosy
+fair, creamy fair, light olive, wheatish, golden, olive, light brown, honey,
+caramel, bronze, deep, rich deep — plus a strength and a bipolar **depth**
+control that nudges lighter or deeper while keeping your own undertone. The
+depth control works on its own, without picking a named complexion at all.
+
+It moves your skin's colour rather than replacing it: the average is shifted
+onto the target and every pixel keeps its own departure from that average. Skin
+is not one colour — a cheek is not a forehead, and the shadow under a jaw is
+neither — so a transform that lands every pixel on one value gives a mask, not
+a face. Three things make the difference between skin and paint:
+
+- **It runs on the whole person**, not the face. The body half of the mask is
+  the person outline narrowed to the colour measured from this subject's own
+  face, so it follows neck, shoulders and arms without assuming anything about
+  the tone. Shift a face without its neck and you have given someone a mask —
+  the single most common way this effect is got wrong.
+- **Chroma moves with depth.** Carry fair-skin chroma down to a deep lightness
+  and the face comes out grey and ashy; the per-pixel colour spread is scaled
+  with the lightness gain instead of held flat.
+- **The colour mask is not the retouch mask.** Retouching cuts eyes, brows,
+  lips and nostrils out cleanly, because smoothing any of them is how a face
+  melts. Colour wants the opposite: smooth, and without holes. Using the
+  retouch mask here made every one of those exclusions show up as an
+  un-shifted blotch as soon as the shift was large. The colour mask takes the
+  eyes out properly, only damps brows and lips — they do carry some of a
+  complexion, just less than a cheek — and is closed and feathered until no
+  edge of it is visible as an edge.
+
+Measured on a fair subject, the skin lands within a few Lab units of each named
+target through the middle of the range (wheatish 73 → 71, olive 68 → 67, light
+brown 60 → 62, honey 55 → 58), and background, clothing, hair and the irises
+move by 0.0–0.2. The far end is honestly limited: taking a very fair face to
+*deep* is a 30-point move in lightness, and what comes back is flatter than
+life because the source never held that information. Big moves in either
+direction are more convincing on good footage than on a compressed upload.
+
+**There are no nationality or ethnicity presets, and that is deliberate.**
+There is no "Indian" or "Brazilian" or "Italian" skin colour: each of those
+names covers most of the human range, so a preset carrying one would be a
+single guess frozen into three numbers — wrong for the great majority of the
+people it claims to describe, and a stereotype taught to the software besides.
+What such a label is reaching for is a depth and an undertone, and both are
+above, by name, where you can see exactly what you are choosing.
+
 **Hair.** The mask is seeded on the crown - which is hair beyond argument -
 and grown outward through pixels that are both joined to it and the same
 colour. Elimination alone was not enough: the earlier version leaned on a
@@ -292,6 +337,7 @@ found one ramps up over a few, so effects never pop on and off between frames.
 | **Hair colour only** | Recolours the hair and changes nothing else at all. |
 | **Skin texture only** | Adds skin micro-detail back and changes nothing else at all. |
 | **Spot clean (auto)** | Finds marks on the face and body and takes them out. Nothing else at all — stack it onto any look. |
+| **Complexion only** | Depth and undertone, and nothing else. Pick the complexion from the dropdown; stack this onto any look. |
 | **Shape Only** | Reshaping with no grade or retouch. |
 | **HDR Only (no retouch)** | Grade only - landscapes, product, b-roll. |
 
@@ -310,6 +356,7 @@ instead of overwriting each other:
 | Hair colour only | the hair |
 | Skin texture only | the skin |
 | Spot clean (auto) | the skin |
+| Complexion only | the skin |
 | Shape Only | the face and the body |
 
 **Order does not matter.** The broadest preset is applied first and the most
@@ -531,6 +578,14 @@ NumPy - no GPU is required and none is used.
   ran" are not the same message.
 - **Shape amounts are capped** (see `CAPS` in `settings.py`) at the point where
   each effect starts to read as an edit rather than a flattering adjustment.
+- **A complexion change wants the person findable.** The body half of the
+  mask needs the segmenter and a face to calibrate the skin colour from; with
+  no face in shot the shift falls back to the face mask alone, which on a
+  head-and-shoulders framing is most of what is visible anyway. Very large
+  moves — fair to deep, or the reverse — are limited by what the footage
+  actually holds, and the result is flatter than a real complexion at that
+  depth. The render report gives the skin area it found, so "too subtle" and
+  "never ran" are different messages.
 - **Auto-detect wants a face in the frame.** It gates the body half on the
   skin colour it measures from the subject's own face; with no face in shot it
   falls back to a broad generic window, which is weaker. It also gates on the

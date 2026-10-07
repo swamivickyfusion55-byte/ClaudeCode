@@ -41,6 +41,7 @@ from .mp_backend import mediapipe_ready, mediapipe_status
 from .reshape import BodyProfiler, WarpField, add_body_reshape, add_face_reshape
 from .retouch import Retoucher
 from .settings import Settings, scale_person_amounts
+from .complexion import Complexion, complexion_mask
 from .spots import AutoSpotter, FlowTrack, heal, marks_from, resolve_face
 
 log = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ class FrameProcessor:
         self.grader = Grader(stabilise=self.s.stabilise and not static)
         self.retoucher = Retoucher(stabilise=self.s.stabilise and not static)
         self.colourist = HairColourist(stabilise=self.s.stabilise and not static)
+        self.complexion = Complexion(stabilise=self.s.stabilise and not static)
         self.marks = marks_from(self.s.spots)
         self.flow = flow
         self.frame_index = 0
@@ -99,6 +101,7 @@ class FrameProcessor:
         self.max_shift_px = 0.0
         self.max_face_shift_px = 0.0
         self.spots_healed = 0
+        self.complexion_px = 0.0
         self.max_body_shift_px = 0.0
 
     def close(self):
@@ -140,6 +143,15 @@ class FrameProcessor:
                           if not any((a[0] - m[0]) ** 2 + (a[1] - m[1]) ** 2
                                      < (a[2] + m[2]) ** 2 for m in spots)]
             img = heal(img, spots, s.spot_strength)
+
+        if s.changes_complexion() and (faces or person is not None):
+            # Before the retouch, and on the whole person: the smoothing and
+            # evening below should work on the skin as it will look, and a
+            # face shifted without its neck and arms is a mask.
+            cm = complexion_mask(img, faces, person, img.shape)
+            if cm is not None:
+                img = self.complexion.apply(img, cm, s)
+                self.complexion_px = max(self.complexion_px, float((cm > 0.25).sum()))
 
         if faces and s.touches_face():
             img = self.retoucher.apply(img, faces, s)
@@ -404,6 +416,7 @@ def render_video(src: str, settings: Settings, out_path: str | None = None,
         "max_face_shift_px": fp.max_face_shift_px,
         "spots": len(fp.marks),
         "spots_auto": fp.auto_found,
+        "complexion_px": fp.complexion_px,
         "max_body_shift_px": fp.max_body_shift_px,
         "frames_seen": fp.frames_seen,
         "notes": notes,

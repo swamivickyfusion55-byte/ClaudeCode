@@ -386,7 +386,11 @@ class Trackers:
         # Auto-detected spots are looked for on the whole person, not just on a
         # face, so the outline is needed even when nothing is being reshaped.
         finds_spots = bool(getattr(settings, "finds_spots", lambda: False)())
-        need_seg = settings.touches_body() or settings.touches_hair() or finds_spots
+        # A complexion shift covers the whole person, not just the face, so it
+        # needs the outline too.
+        tones = bool(getattr(settings, "changes_complexion", lambda: False)())
+        need_seg = (settings.touches_body() or settings.touches_hair()
+                    or finds_spots or tones)
         self.face = FaceTracker(max_faces, static=static, stabilise=stabilise) if need_face else None
         self.pose = PoseTracker(static=static, stabilise=stabilise) if need_body else None
         self.seg = PersonSegmenter(stabilise=stabilise, static=static) if need_seg else None

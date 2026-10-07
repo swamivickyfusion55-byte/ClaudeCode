@@ -34,7 +34,7 @@ from .landmarks import FaceTracker, PersonSegmenter
 from .mp_backend import mediapipe_ready, mediapipe_status
 from .pipeline import (FrameProcessor, capability_report, grab_frame, probe,
                        process_image)
-from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESETS,
+from .settings import (COMPLEXIONS, DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESETS,
                        Settings, combine_presets, stack_label)
 from .spots import (MIN_SURROUND_SHARE, SpotMark, anchor_to_face, detect_spots,
                     dominant_surround, heal, marks_from, marks_from_stroke,
@@ -43,7 +43,7 @@ from .spots import (MIN_SURROUND_SHARE, SpotMark, anchor_to_face, detect_spots,
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("beauty_studio")
 
-VERSION = "v2.3.0 (Aurora)"
+VERSION = "v2.4.0 (Aurora)"
 
 
 # --------------------------------------------------------------- control spec
@@ -73,6 +73,12 @@ GROUPS: list[tuple[str, list[tuple[str, str, bool, str]]]] = [
          "Auto-detect: finds moles and dark patches anywhere on the person and "
          "takes them out, no tapping. Low finds only what is unmistakable, high "
          "finds every freckle. 0 = off"),
+        ("skin_tone_amount", "Complexion strength", False,
+         "How far toward the complexion chosen above. Nothing happens while it "
+         "is \"none\" — use the depth control below for a nudge without picking one"),
+        ("skin_depth", "Complexion depth", True,
+         "Deeper (left) or lighter (right), keeping your own undertone. Works "
+         "on its own or on top of a chosen complexion"),
         ("blemish", "Blemish removal", False, "Suppresses small dark spots only"),
         ("skin_even", "Even skin tone", False, "Evens colour blotches, leaves the lighting alone"),
         ("under_eye", "Under-eye circles", False, "Lifts and de-blues the shadow under the eyes"),
@@ -121,13 +127,14 @@ SCALE_CHOICES = [("Source resolution (slowest)", 0), ("2160p / 4K", 2160),
                  ("720p (fastest)", 720)]
 
 
-def settings_from(values, hair_colour, hair_hue, protect_skin, stabilise, scale,
-                  out_long, quality, hdr10, spots=None) -> Settings:
+def settings_from(values, skin_tone, hair_colour, hair_hue, protect_skin, stabilise,
+                  scale, out_long, quality, hdr10, spots=None) -> Settings:
     kw = {}
     for field, v in zip(FIELDS, values):
         kw[field] = float(v) / 100.0
     return Settings(
         spots=list(spots or []),
+        skin_tone=str(skin_tone or "none"),
         hair_colour=str(hair_colour or "none"),
         hair_hue=float(hair_hue),
         protect_skin_colour=bool(protect_skin),
@@ -140,10 +147,11 @@ def settings_from(values, hair_colour, hair_hue, protect_skin, stabilise, scale,
     ).normalised()
 
 
-def preset_extras(names) -> tuple[str, float]:
-    """The preset's non-slider hair-colour settings, for the dropdown."""
+def preset_extras(names):
+    """The preset's named settings - the ones that are not numbers, so not
+    part of the generated slider set."""
     s = combine_presets(names)
-    return s.hair_colour, float(s.hair_hue)
+    return s.skin_tone, s.hair_colour, float(s.hair_hue)
 
 
 def preset_values(names) -> list[float]:
@@ -836,10 +844,27 @@ def build() -> gr.Blocks:
                          "general one.")
                 gr.HTML("<span class='sec-lbl'>Adjustments</span>")
                 sliders: list[gr.Slider] = []
+                skin_tone = None
                 hair_colour = None
                 hair_hue = None
                 for gi, (group, items) in enumerate(GROUPS):
                     with gr.Accordion(group, open=(gi == 0)):
+                        if group == "Skin & face detail":
+                            # A depth and an undertone, by name. Deliberately
+                            # not nationalities: there is no "Indian" or
+                            # "Brazilian" skin colour - each of those names
+                            # covers most of the human range, so a preset
+                            # carrying one would be a guess frozen into three
+                            # numbers, wrong for nearly everyone it claims to
+                            # describe. The axes below are what such a label
+                            # is reaching for, and they are honest about it.
+                            skin_tone = gr.Dropdown(
+                                list(COMPLEXIONS.keys()), value="none",
+                                label="Complexion",
+                                info="Shifts your skin's depth and undertone across "
+                                     "the whole person — face, neck, shoulders, arms. "
+                                     "Your own variation is kept, so it reads as skin "
+                                     "rather than as paint.")
                         if group == "Hair":
                             # The colour is a name, not a number, so it is not
                             # part of the generated slider set - and it goes
@@ -881,7 +906,7 @@ def build() -> gr.Blocks:
                                              "An inverse tone map of SDR - it does not recover "
                                              "detail the source never had.")
 
-        extras = [hair_colour, hair_hue, protect_skin, stabilise, scale,
+        extras = [skin_tone, hair_colour, hair_hue, protect_skin, stabilise, scale,
                   out_long, quality, hdr10, spots_state]
         controls = sliders + extras
         # Which finished file the player is already showing, so the poller can
@@ -893,7 +918,7 @@ def build() -> gr.Blocks:
 
         preset.change(lambda names: preset_values(names), inputs=preset, outputs=sliders)
         preset.change(lambda names: preset_extras(names), inputs=preset,
-                      outputs=[hair_colour, hair_hue])
+                      outputs=[skin_tone, hair_colour, hair_hue])
         video_in.change(on_video, inputs=video_in, outputs=[info_md, before_img, after_img])
         # `change`, not `release`: a slider is also a number box, and typing a
         # position into it has to refresh the frame for the same reason

@@ -27,7 +27,7 @@ if __package__ in (None, ""):
     __package__ = os.path.basename(_here)
 
 from .pipeline import capability_report, probe, process_image, render_video
-from .settings import (DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESET_DOMAINS,
+from .settings import (COMPLEXIONS, DEFAULT_PRESET, HAIR_COLOURS, MAX_STACK, PRESET_DOMAINS,
                        PRESETS, Settings, combine_presets, stack_label)
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
@@ -72,6 +72,12 @@ def build_settings(args) -> Settings:
     s = combine_presets(parse_presets(args.preset))
     s = s.with_(process_scale=args.scale, quality=args.quality, hdr10=args.hdr10,
                 out_long_edge=args.out_long_edge, stabilise=not args.no_stabilise)
+    if args.complexion:
+        name = args.complexion.strip().lower()
+        if name not in COMPLEXIONS:
+            raise SystemExit(f"unknown complexion {args.complexion!r}. "
+                             f"known: {', '.join(COMPLEXIONS)}")
+        s = s.with_(skin_tone=name)
     if args.hair_colour:
         name = args.hair_colour.strip().lower()
         if name not in HAIR_COLOURS:
@@ -99,6 +105,10 @@ def main(argv=None) -> int:
                     help="resize the output further (0 = same as working)")
     ap.add_argument("--trim", metavar="A:B", help="percent range of the clip to render, e.g. 10:90")
     ap.add_argument("--quality", type=int, default=18, metavar="CRF", help="x264 CRF (default 18)")
+    ap.add_argument("--complexion", "--skin-tone", dest="complexion", default=None,
+                    metavar="NAME",
+                    help="shift skin depth and undertone: " + ", ".join(
+                        k for k in COMPLEXIONS if k != "none"))
     ap.add_argument("--hair-colour", "--hair-color", dest="hair_colour", default=None,
                     metavar="NAME",
                     help="recolour the hair: " + ", ".join(

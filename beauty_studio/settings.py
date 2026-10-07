@@ -22,6 +22,7 @@ CAPS = {
     "skin_texture": 0.90,
     "spot_strength": 1.00,
     "auto_spots": 1.00,
+    "skin_tone_amount": 1.00,
     "skin_even": 0.80,
     "blemish": 0.90,
     "glow": 0.55,
@@ -87,6 +88,13 @@ class Settings:
     # stacking or switching presets never clears them.
     spots: list = field(default_factory=list)
     spot_strength: float = 0.90
+    # Complexion. `skin_tone` names a depth-and-undertone from COMPLEXIONS
+    # ("none" leaves it alone), `skin_tone_amount` is how far toward it to go,
+    # and `skin_depth` is a bipolar fine control usable with or without a
+    # named look: left deeper, right lighter.
+    skin_tone: str = "none"
+    skin_tone_amount: float = 0.70
+    skin_depth: float = 0.0
     # Auto-detect, as a sensitivity rather than a switch: 0 is off, low finds
     # only what is unmistakable, high finds every freckle. `auto_spot_limit`
     # bounds how many it will act on in one frame, so a textured surface
@@ -142,6 +150,9 @@ class Settings:
                 # Clip data, passed through untouched: a list of marks, each
                 # already validated when it was made.
                 out[f.name] = list(v or [])
+            elif f.name == "skin_tone":
+                name = str(v or "none").strip().lower()
+                out[f.name] = name if name in COMPLEXIONS else "none"
             elif f.name == "hair_colour":
                 # A name, not a number. Anything unrecognised means "leave the
                 # colour alone" rather than an exception mid-render.
@@ -157,7 +168,8 @@ class Settings:
                 out[f.name] = int(v)
             else:
                 v = float(v)
-                if f.name in ("shadows", "highlights", "saturation", "warmth", "tint", "posture"):
+                if f.name in ("shadows", "highlights", "saturation", "warmth", "tint",
+                              "posture", "skin_depth"):
                     v = max(-1.0, min(1.0, v))
                 else:
                     v = max(0.0, min(1.0, v))
@@ -184,8 +196,16 @@ class Settings:
         so marks on an arm or a shoulder are looked for as well as on a face."""
         return self.auto_spots > 0 and self.spot_strength > 0
 
+    def changes_complexion(self) -> bool:
+        """Depth or undertone being moved. Needs the person's outline as well
+        as the face: shifting a face without its neck and arms is how this
+        effect gets done wrong."""
+        named = (str(self.skin_tone).lower() not in ("", "none")
+                 and self.skin_tone_amount > 0)
+        return bool(named or abs(self.skin_depth) > 1e-3)
+
     def touches_face(self) -> bool:
-        if self.removes_spots():
+        if self.removes_spots() or self.changes_complexion():
             return True
         return any(getattr(self, k) > 0 for k in (
             "skin_smooth", "skin_texture", "skin_even", "blemish", "glow",
@@ -322,6 +342,20 @@ PRESETS: dict[str, Settings] = {
         bust_shape=0.0, hip_shape=0.0, hair_detail=0.0, hair_shine=0.0,
         hair_volume=0.0, hair_frizz=0.0, hair_richness=0.0, naturalness=1.0),
 
+    # Depth and undertone, and nothing else. Stack it onto a look you already
+    # like. The complexion itself is picked from the dropdown; this preset
+    # only sets the strength and clears everything else out of the way.
+    "Complexion only": Settings(
+        hdr_strength=0.0, shadows=0.0, highlights=0.0, clarity=0.0, vibrance=0.0,
+        saturation=0.0, warmth=0.0, tint=0.0, contrast=0.0, bloom=0.0, sharpen=0.0,
+        skin_smooth=0.0, texture=1.0, skin_texture=0.0, skin_even=0.0, blemish=0.0,
+        glow=0.0, eye_brighten=0.0, teeth_whiten=0.0, lip_enhance=0.0, under_eye=0.0,
+        skin_tone="none", skin_tone_amount=0.70, skin_depth=0.0,
+        face_slim=0.0, face_round=0.0, chin_shape=0.0, nose_slim=0.0, eye_enlarge=0.0,
+        body_slim=0.0, body_fuller=0.0, waist_shape=0.0, curve_shape=0.0,
+        bust_shape=0.0, hip_shape=0.0, hair_detail=0.0, hair_shine=0.0,
+        hair_volume=0.0, hair_frizz=0.0, hair_richness=0.0, naturalness=1.0),
+
     # Find the marks and take them out, and do nothing else whatsoever. The
     # one to stack onto a look you already like, and the one to try first if
     # you are not sure how strong to set the detector.
@@ -379,6 +413,31 @@ DEFAULT_PRESET = "Natural"
 # rather than saturated paint: the transform moves the hair's average toward
 # one of these and keeps every pixel's own deviation from that average, which
 # is where the strands and the gloss live.
+# Depth and undertone, as sRGB. Deliberately spanning the range in both
+# directions: an app that offers only lightening is making a statement, and
+# not one this is interested in making.
+COMPLEXIONS: dict[str, tuple[int, int, int] | None] = {
+    "none": None,
+    # --- light -----------------------------------------------------------
+    "porcelain": (240, 223, 214),       # very light, cool-neutral
+    "fair": (233, 205, 185),            # light, neutral
+    "rosy fair": (236, 202, 193),       # light, pink undertone
+    "creamy fair": (236, 212, 184),     # light, yellow undertone, low chroma
+    "light olive": (218, 198, 168),     # light, green-gold undertone
+    # --- medium ----------------------------------------------------------
+    "wheatish": (206, 173, 138),        # medium, golden
+    "golden": (203, 164, 119),          # medium, strongly warm
+    "olive": (186, 162, 125),           # medium, green-gold
+    "light brown": (176, 137, 104),     # medium-deep, neutral-warm
+    # --- deep ------------------------------------------------------------
+    "honey": (166, 123, 84),
+    "caramel": (144, 103, 70),
+    "bronze": (120, 85, 60),
+    "deep": (92, 64, 48),
+    "rich deep": (68, 47, 38),
+}
+
+
 HAIR_COLOURS: dict[str, tuple[int, int, int] | None] = {
     "none": None,
     "black": (30, 27, 25),
@@ -407,7 +466,8 @@ DOMAIN_FIELDS: dict[str, tuple[str, ...]] = {
               "protect_skin_colour"),
     "skin": ("skin_smooth", "texture", "skin_texture", "skin_even", "blemish",
              "glow", "eye_brighten", "teeth_whiten", "lip_enhance", "under_eye",
-             "spot_strength", "auto_spots", "auto_spot_limit"),
+             "spot_strength", "auto_spots", "auto_spot_limit",
+             "skin_tone", "skin_tone_amount", "skin_depth"),
     "face": ("face_slim", "face_round", "chin_shape", "nose_slim", "eye_enlarge"),
     "body": ("body_slim", "body_fuller", "waist_shape", "curve_shape",
              "bust_shape", "hip_shape", "posture"),
@@ -436,6 +496,7 @@ PRESET_DOMAINS: dict[str, tuple[str, ...]] = {
     "Hair colour only": ("hair",),
     "Skin texture only": ("skin",),
     "Spot clean (auto)": ("skin",),
+    "Complexion only": ("skin",),
 }
 
 MAX_STACK = 3
@@ -489,7 +550,7 @@ PERSON_AMOUNTS = (
     "nose_slim", "eye_enlarge", "face_round", "body_slim", "body_fuller",
     "waist_shape", "curve_shape", "bust_shape", "hip_shape",
     "hair_detail", "hair_shine", "hair_volume", "hair_frizz", "hair_richness",
-    "hair_colour_amount", "auto_spots",
+    "hair_colour_amount", "auto_spots", "skin_tone_amount",
 )
 
 
