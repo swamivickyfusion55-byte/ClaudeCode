@@ -19,7 +19,7 @@ def reset():
     SPACES["Swamivicky/HubConformance"] = {"files": {}, "commits": [], "stage": "RUNNING"}
     SPACES["Swamivicky/AppConformance"] = {"files": {}, "commits": [], "stage": "RUNNING"}
 reset()
-STATE = {"deny_commit": {"Swamivicky/SwamitechGradio13"}, "lfs_paths": set(), "records": [], "list_calls": 0}
+STATE = {"deny_commit": {"Swamivicky/SwamitechGradio13"}, "lfs_paths": set(), "records": [], "list_calls": 0, "strict_ct": False, "reject_ndjson": False, "reject_json": False}
 LOCK = threading.Lock()
 
 class H(BaseHTTPRequestHandler):
@@ -39,7 +39,7 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path); q = parse_qs(u.query); who = self._auth()
         if who is None: return self._send(401, {"error": "Invalid credentials in Authorization header"})
         if u.path == "/api/control/reset":
-            reset(); STATE["records"].clear(); STATE["deny_commit"] = {"Swamivicky/SwamitechGradio13"}; STATE["lfs_paths"] = set(); STATE["list_calls"] = 0
+            reset(); STATE["records"].clear(); STATE["deny_commit"] = {"Swamivicky/SwamitechGradio13"}; STATE["lfs_paths"] = set(); STATE["list_calls"] = 0; STATE["strict_ct"] = STATE["reject_ndjson"] = STATE["reject_json"] = False
             return self._send(200, {"ok": True})
         if u.path == "/api/whoami-v2":
             return self._send(200, {"type": "user", "name": who[0], "orgs": [{"name": "SwamiOrg"}], "auth": {"type": "access_token", "accessToken": {"displayName": "t", "role": who[1]}}})
@@ -75,6 +75,8 @@ class H(BaseHTTPRequestHandler):
         if who is None: return self._send(401, {"error": "Invalid credentials in Authorization header"})
         if u.path == "/api/control/set":
             d = json.loads(body); STATE["deny_commit"] = set(d.get("deny_commit", [])); STATE["lfs_paths"] = set(d.get("lfs_paths", []))
+            for k in ("strict_ct", "reject_ndjson", "reject_json"):
+                if k in d: STATE[k] = bool(d[k])
             for k, v in d.get("stage", {}).items(): SPACES[k]["stage"] = v
             return self._send(200, {"ok": True})
         m = re.fullmatch(r"/api/spaces/([^/]+/[^/]+)/preupload/main", u.path)
@@ -98,8 +100,23 @@ class H(BaseHTTPRequestHandler):
             if not sp: return self._send(404, {"error": "Repository not found"})
             if who[1] == "read" or repo in STATE["deny_commit"]:
                 return self._send(403, {"error": "You don't have the rights to create a commit on this repo"})
-            if self.headers.get("Content-Type", "").split(";")[0] != "application/x-ndjson": return self._send(400, {"error": "Content-Type must be application/x-ndjson"})
-            lines = [json.loads(l) for l in body.decode().split("\n") if l.strip()]
+            with LOCK: STATE["records"].append({"repo": repo, "kind": "commit_wire", "headers": {k.lower(): v for k, v in self.headers.items()}, "body_len": len(body), "body_head": body[:200].decode("utf-8", "replace"), "body": base64.b64encode(body).decode()})
+            ctype = self.headers.get("Content-Type", "").strip().lower()
+            SUMMARY_ERR = {"error": "\u2716 Invalid input: expected string, received undefined\n  \u2192 at value.summary"}
+            if ctype == "application/json":
+                if STATE["reject_json"]: return self._send(400, {"error": "json mode rejected (test)"})
+                try: dj = json.loads(body)
+                except Exception: return self._send(400, SUMMARY_ERR)
+                if not isinstance(dj.get("summary"), str): return self._send(400, SUMMARY_ERR)
+                lines = [{"key": "header", "value": {"summary": dj["summary"], "description": dj.get("description", "")}}] + [{"key": "file", "value": f} for f in dj.get("files", [])]
+            elif ctype == "application/x-ndjson" and not STATE["reject_ndjson"]:
+                lines = [json.loads(l) for l in body.decode().split("\n") if l.strip()]
+            elif STATE["strict_ct"] or STATE["reject_ndjson"]:
+                # MODEL OF THE SUSPECTED HUB BEHAVIOUR (unverified): the body format is chosen by the exact
+                # Content-Type; anything else is read as the plain-JSON form, whose top-level `summary` is absent.
+                return self._send(400, SUMMARY_ERR)
+            else:
+                lines = [json.loads(l) for l in body.decode().split("\n") if l.strip()]
             if not lines or lines[0].get("key") != "header" or "summary" not in lines[0]["value"]:
                 return self._send(400, {"error": "first line must be the header"})
             new = {}

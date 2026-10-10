@@ -367,30 +367,77 @@ class HfDeploy(
             return Result(true, "Already up to date - not restarted$note", repoId, changed = 0)
         }
 
-        // 2. commit: one NDJSON body, header line then one line per file.
-        val ndjson = StringBuilder()
-        ndjson.append(JSONObject().put("key", "header").put("value", JSONObject().put("summary", summary).put("description", "")).toString()).append('\n')
-        for (f in changed) {
-            ndjson.append(
-                JSONObject().put("key", "file").put(
-                    "value",
-                    JSONObject()
-                        .put("content", Base64.getEncoder().encodeToString(f.bytes))
-                        .put("path", f.path)
-                        .put("encoding", "base64")
-                ).toString()
-            ).append('\n')
+        // 2. commit: one NDJSON body, header line then one line per file. Written the way
+        //    huggingface_hub / huggingface.js write it, and sent with the Content-Type EXACTLY
+        //    "application/x-ndjson": OkHttp appends "; charset=utf-8" to a String body, and the
+        //    Hub picks its NDJSON-or-JSON body format by that header (see SDOS notes / the
+        //    1.2.10 builder changelog: it answered "expected string, received undefined at
+        //    value.summary" for a body that had a summary).
+        var (code, text) = postCommit(repoId, commitNdjson(summary, changed), ndjsonType)
+        var via = ""
+        if (code == 400 && text.contains("summary", ignoreCase = true)) {
+            // Still read as the plain-JSON form: say what the Hub said, retry once in that form.
+            val first = text
+            val second = postCommit(repoId, commitJson(summary, changed), jsonCommitType)
+            if (second.first in 200..299) { code = second.first; text = second.second; via = " (JSON form)" }
+            else throw HubException(400, "$repoId: ${explain(400, first, "Commit (NDJSON)")} | retry as JSON: ${explain(second.first, second.second, "Commit (JSON)")}")
         }
-        return call(
-            request("/api/spaces/$repoId/commit/main").post(ndjson.toString().toRequestBody(ndjsonType)).build(),
-            repoId
-        ) { _, body ->
-            val oid = runCatching { JSONObject(body).optString("commitOid") }.getOrNull().orEmpty()
-            Result(
-                true,
-                "Updated ${changed.size} file(s)${if (oid.length >= 7) " · commit ${oid.take(7)}" else ""} · rebuilding$note",
-                repoId, oid.ifBlank { null }, changed.size
-            )
+        if (code !in 200..299) throw HubException(code, explain(code, text, repoId))
+        val oid = runCatching { JSONObject(text).optString("commitOid") }.getOrNull().orEmpty()
+        return Result(
+            true,
+            "Updated ${changed.size} file(s)${if (oid.length >= 7) " · commit ${oid.take(7)}" else ""} · rebuilding$via$note",
+            repoId, oid.ifBlank { null }, changed.size
+        )
+    }
+
+    private val jsonCommitType = "application/json".toMediaType()
+
+    /** (status, body). ByteArray.toRequestBody leaves the media type exactly as given. */
+    private fun postCommit(repoId: String, body: ByteArray, type: okhttp3.MediaType): Pair<Int, String> {
+        http.newCall(request("/api/spaces/$repoId/commit/main").post(body.toRequestBody(type)).build()).execute().use { resp ->
+            return resp.code to resp.body?.string().orEmpty()
         }
+    }
+
+    private fun commitNdjson(summary: String, files: List<PackageFile>): ByteArray {
+        val out = StringBuilder()
+        out.append("{\"key\":\"header\",\"value\":{\"summary\":").append(jsonString(summary)).append(",\"description\":\"\"}}\n")
+        for (f in files) {
+            out.append("{\"key\":\"file\",\"value\":{\"content\":\"").append(Base64.getEncoder().encodeToString(f.bytes))
+                .append("\",\"path\":").append(jsonString(f.path)).append(",\"encoding\":\"base64\"}}\n")
+        }
+        return out.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    private fun commitJson(summary: String, files: List<PackageFile>): ByteArray {
+        val out = StringBuilder()
+        out.append("{\"summary\":").append(jsonString(summary)).append(",\"description\":\"\",\"files\":[")
+        files.forEachIndexed { i, f ->
+            if (i > 0) out.append(',')
+            out.append("{\"path\":").append(jsonString(f.path)).append(",\"content\":\"")
+                .append(Base64.getEncoder().encodeToString(f.bytes)).append("\",\"encoding\":\"base64\"}")
+        }
+        out.append("]}")
+        return out.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    /** A JSON string literal the way JSON.stringify writes it ("/" stays as it is). */
+    private fun jsonString(s: String): String {
+        val b = StringBuilder(s.length + 2).append('"')
+        for (c in s) {
+            when {
+                c == '"' -> b.append("\\\"")
+                c == '\\' -> b.append("\\\\")
+                c == '\n' -> b.append("\\n")
+                c == '\r' -> b.append("\\r")
+                c == '\t' -> b.append("\\t")
+                c == '\b' -> b.append("\\b")
+                c == '\u000C' -> b.append("\\f")
+                c < ' ' -> b.append("\\u").append("%04x".format(c.code))
+                else -> b.append(c)
+            }
+        }
+        return b.append('"').toString()
     }
 }

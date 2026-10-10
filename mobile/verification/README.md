@@ -14,3 +14,11 @@ APK build:
   2.0.21 against Robolectric android-all 15-robolectric-12650502, JetBrains Compose desktop 1.7.3,
   kotlinx-coroutines 1.9.0, okhttp(+dnsoverhttps) 4.12.0, okio 3.6.0, with
   `-Xnullability-annotations=@android.annotation:warn`.
+
+## Wire-level checks (1.2.10)
+
+`FixedTest.kt` runs the real `HfApi.commitSpaceFiles` (old = 1.2.9b, new = 1.2.10) against `mockhub.py`, redirecting the
+hard-coded https://huggingface.co URL to the mock with an interceptor. `fixed_scenarios.py` / `my_scenarios.py` drive it.
+`mockhub.py`'s `strict_ct` flag models the suspected Hub behaviour (body format chosen by exact Content-Type) and is a
+hypothesis, not the Hub's code. `wirecmp.py` prints the raw Content-Type each client sends. NOTE: run each client against
+its own Space name - the mock keys wire records by repo and a later run overwrites an earlier one.
