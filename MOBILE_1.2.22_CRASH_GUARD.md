@@ -35,8 +35,8 @@ Install it over the app. **Do not uninstall.** If the phone refuses (key mismatc
 
 | Verified here | |
 |---|---|
-| Decision logic on the JVM — restart limits, safe mode, windowing, log ring, tolerant history load, error text | 24 checks pass |
-| Coroutine error handling with the real kotlinx-coroutines: handled errors do not reach the crash handler, the scope survives, cancellation is not an error, and (contrast) the same error without the handler does | 6 checks pass |
+| Decision logic on the JVM — restart limits, safe mode, windowing, log ring, tolerant history load, error text | 25 checks pass |
+| Coroutine error handling with the real kotlinx-coroutines: handled errors do not reach the crash handler, the scope survives, cancellation is not an error, and (contrast) the same error without the handler does | 5 checks pass |
 | Whole app source compiles (kotlinc 2.0.21, Compose plugin, AndroidX stubs) | 0 errors |
 | Audit 42/42; keystore bytes equal 1.2.19's; Dockerfile unchanged; builder against a fake SDK | pass |
 
