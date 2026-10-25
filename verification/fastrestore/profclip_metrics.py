@@ -14,6 +14,9 @@ def parse_face(img, bbox):
     x = (crop[:, :, ::-1].astype(np.float32) / 255 - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]
     o = bis.run(None, {bis.get_inputs()[0].name: x.transpose(2, 0, 1)[None].astype(np.float32)})[0][0].argmax(0)
     return cv2.warpAffine(np.isin(o, [1, 2, 3, 4, 5, 6, 10, 11, 12, 13]).astype(np.uint8), cv2.invertAffineTransform(A), (img.shape[1], img.shape[0]), flags=cv2.INTER_NEAREST)
+import os
+FASTC = os.environ.get("FAST") == "1"
+def DX(g): return 160 * np.sin(g / 4.0) if FASTC else 40 * np.sin(g / 11.0)
 tag = sys.argv[1]
 for name in sys.argv[2:]:
     im = cv2.resize(cv2.imread(f"/tmp/claude-0/prnet/TestImages/AFLW2000/{name}.jpg"), (700, 700), interpolation=cv2.INTER_CUBIC)
@@ -31,13 +34,13 @@ for name in sys.argv[2:]:
     scores = {}
     for sl, idx in cand.items():
         i = idx[len(idx) // 2]; size = int(z["size"][i]); g = len(idx) // 2
-        s_ = 1.0 + 0.06 * np.sin(g / 19.0); A = np.float32([[s_, 0, 640 - 350 * s_ + 40 * np.sin(g / 11.0)], [0, s_, 360 - 350 * s_ + 12 * np.cos(g / 13.0)]])
+        s_ = 1.0 + 0.06 * np.sin(g / 19.0); A = np.float32([[s_, 0, 640 - 350 * s_ + DX(g)], [0, s_, 360 - 350 * s_ + 12 * np.cos(g / 13.0)]])
         w = cv2.warpAffine(cv2.warpAffine(cv2.resize(z["m"][i], (size, size)), cv2.invertAffineTransform(z["M"][i]), (1280, 720)), cv2.invertAffineTransform(A), (700, 700))
         scores[sl] = float((w * fm).sum())
     use = max(scores, key=scores.get)
     for g, i in enumerate(cand[use]):
         m, M, size = z["m"][i], z["M"][i], int(z["size"][i])
-        s = 1.0 + 0.06 * np.sin(g / 19.0); dx = 40 * np.sin(g / 11.0); dy = 12 * np.cos(g / 13.0)
+        s = 1.0 + 0.06 * np.sin(g / 19.0); dx = DX(g); dy = 12 * np.cos(g / 13.0)
         A = np.float32([[s, 0, 640 - 350 * s + dx], [0, s, 360 - 350 * s + dy]])
         w = cv2.warpAffine(cv2.resize(m, (size, size)), cv2.invertAffineTransform(M), (1280, 720))
         wp = cv2.warpAffine(w, cv2.invertAffineTransform(A), (700, 700))
