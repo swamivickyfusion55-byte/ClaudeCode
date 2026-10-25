@@ -33,9 +33,24 @@ fi
 rm -rf "$ROOT/source/.gradle/configuration-cache" "${GRADLE_USER_HOME:-$ROOT/.gradle}/configuration-cache" || true
 
 echo
+echo "=== Clearing packaging leftovers ==="
+# A build that was stopped half way (page reloaded, Space restarted, out of time or disk) leaves a cut-off APK
+# behind, and the next build's incremental packager reads it back and fails with "Unexpected end of ZLIB input
+# stream" / "Still waiting to inspect output APK's classes.dex". Packaging takes seconds: always start it fresh.
+rm -rf app/build/outputs/apk app/build/intermediates/apk app/build/intermediates/incremental/packageDebug \
+       app/build/intermediates/incremental/debug/packageDebug 2>/dev/null || true
+df -h "$ROOT" 2>/dev/null | tail -n 1 | awk '{print "Disk: " $4 " free of " $2}' || true
+
+echo
 echo "=== Gradle incremental build ==="
 # --console=plain keeps the streamed log readable (no ANSI progress redraws).
-gradle --no-daemon --stacktrace --console=plain --build-cache --no-configuration-cache --max-workers=2 assembleDebug
+if ! gradle --no-daemon --stacktrace --console=plain --build-cache --no-configuration-cache --max-workers=2 assembleDebug; then
+    echo
+    echo "=== The build failed. Retrying once from a clean tree (no build cache) ==="
+    # Anything a cut-off earlier build left behind - outputs, intermediates, cached task results - goes.
+    rm -rf app/build build .gradle "${GRADLE_USER_HOME:-$ROOT/.gradle}/caches/build-cache-1" 2>/dev/null || true
+    gradle --no-daemon --stacktrace --console=plain --no-build-cache --no-configuration-cache --max-workers=2 assembleDebug
+fi
 
 echo
 echo "=== Collecting artefact ==="
