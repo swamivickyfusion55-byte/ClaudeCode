@@ -6,9 +6,9 @@ import time
 import gradio as gr
 
 ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
-APK = f"{ROOT}/PhoenixMobile-1.2.24-debug.apk"
-SHA = f"{ROOT}/PhoenixMobile-1.2.24-debug.sha256"
-INFO = f"{ROOT}/PhoenixMobile-1.2.24-install-info.txt"
+APK = f"{ROOT}/PhoenixMobile-1.2.25-debug.apk"
+SHA = f"{ROOT}/PhoenixMobile-1.2.25-debug.sha256"
+INFO = f"{ROOT}/PhoenixMobile-1.2.25-install-info.txt"
 
 INSTALL_TIP = (
     "**Install this APK over the Phoenix that is already on the phone. Do not uninstall first** - "
@@ -83,7 +83,7 @@ def build():
 
     started = time.time()
     header = [
-        "=== Phoenix Mobile 1.2.24 build ===",
+        "=== Phoenix Mobile 1.2.25 build ===",
         _env_report(),
         "",
         "=== Launching build.sh ===",
@@ -165,10 +165,10 @@ def build():
     )
 
 
-with gr.Blocks(title="Phoenix Mobile 1.2.24 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Phoenix Mobile 1.2.25 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
     gr.HTML(
-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.24</h1>"
-        "<p>Builds Phoenix Mobile 1.2.24, then hands back the debug APK and its SHA-256.</p></div>"
+        "<div id='phx-head'><h1>Phoenix Mobile 1.2.25</h1>"
+        "<p>Builds Phoenix Mobile 1.2.25, then hands back the debug APK and its SHA-256.</p></div>"
     )
 
     with gr.Row():

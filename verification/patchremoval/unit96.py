@@ -56,6 +56,11 @@ rgba = np.zeros(rmask.shape + (4,), np.uint8); rgba[..., 3] = rmask; rgba[..., :
 pl2, err2 = ad._load_patches({"patches": [{"image_b64": b(ref, ".jpg"), "mask_b64": b(rgba, ".png"), "t": 1}]})
 mm2 = cv2.imread(pl2[0]["mask"], cv2.IMREAD_GRAYSCALE) if pl2 else None
 check("settings.patches: an RGBA mask (painted = alpha) is read from its alpha", mm2 is not None and int((mm2 > 127).sum()) == int((rmask > 127).sum()))
+opaque = np.zeros(rmask.shape + (4,), np.uint8); opaque[..., 3] = 255; opaque[rmask > 127, :3] = 255   # the app's PNG
+pl3, _ = ad._load_patches({"patches": [{"image_b64": b(ref, ".jpg"), "mask_b64": b(opaque, ".png"), "t": 2.5}]})
+mm3 = cv2.imread(pl3[0]["mask"], cv2.IMREAD_GRAYSCALE) if pl3 else None
+check("settings.patches: the app's mask (opaque ARGB PNG, white strokes on black) is read as painted = white",
+      mm3 is not None and int((mm3 > 127).sum()) == int((rmask > 127).sum()) and abs(pl3[0]["t"] - 2.5) < 1e-9)
 _, e1 = ad._load_patches({"patches": [{"image_b64": b(ref, ".jpg"), "mask_b64": b(np.zeros_like(rmask), ".png")}]})
 _, e2 = ad._load_patches({"patches": [{"image_b64": "not base64 !!", "mask_b64": b(rmask, ".png")}]})
 _, e3 = ad._load_patches({"patches": [good["patches"][0]] * 5})

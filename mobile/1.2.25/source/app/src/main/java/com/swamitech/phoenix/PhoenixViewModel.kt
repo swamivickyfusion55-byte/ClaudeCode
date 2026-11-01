@@ -36,9 +36,9 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -117,7 +117,9 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
     private data class UploadedVideo(
         val path: String,
         val trimStartPct: Int,
-        val trimEndPct: Int
+        val trimEndPct: Int,
+        /** Where the uploaded file starts in the ORIGINAL video (a local cut lands on a key frame), microseconds. */
+        val offsetUs: Long = 0L
     )
 
     /**
@@ -243,6 +245,7 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
                 var trimmedFile: File? = null
                 var sendStart = wantStart
                 var sendEnd = wantEnd
+                var offsetUs = 0L
                 if (wantStart > 0 || wantEnd < 100) {
                     val totalUs = VideoTrimmer.durationUs(app, uri)
                     if (totalUs != null && totalUs > 0L) {
@@ -254,6 +257,7 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
                             val cut = VideoTrimmer.trim(app, uri, startUs, endUs, dest)
                             if (cut != null && cut.durationUs > 0L) {
                                 trimmedFile = cut.file
+                                offsetUs = (startUs - cut.residualStartUs).coerceAtLeast(0L)
                                 // Only the sync-frame residue is left for the
                                 // server, expressed against the NEW duration.
                                 // Truncating (not rounding) is deliberate: the
@@ -298,7 +302,7 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
                     transferEnded()
                 }
                 trimmedFile?.let { safeDelete(it) }
-                UploadedVideo(path, sendStart, sendEnd)
+                UploadedVideo(path, sendStart, sendEnd, offsetUs)
             }
         }
         return try {
@@ -348,6 +352,97 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
 
     var framePercent by mutableStateOf(0); private set
     var detectedFrameUri by mutableStateOf<Uri?>(null); private set
+
+    // ---- Patch Removal (1.2.25; Space v11.2.96 / SDOS-096) ------------------------------------------------------
+    var patches by mutableStateOf<List<PatchSpec>>(emptyList()); private set
+    var patchBusy by mutableStateOf(false); private set
+    var patchMessage by mutableStateOf<String?>(null); private set
+
+    private fun patchDir(): File = File(getApplication<Application>().filesDir, "patches").apply { mkdirs() }
+
+    /** Save the painted mark (frame JPEG + mask PNG of the same size) for preview / the job. */
+    fun makePatchDraft(frame: android.graphics.Bitmap, strokes: List<PaintStroke>, timeMs: Long): PatchDraft {
+        val id = "p" + System.currentTimeMillis().toString(36)
+        val dir = File(patchDir(), id).apply { mkdirs() }
+        val f = File(dir, "frame.jpg")
+        val m = File(dir, "mask.png")
+        PatchFrames.save(frame, f, png = false)
+        PatchFrames.save(PatchFrames.maskBitmap(frame.width, frame.height, strokes), m, png = true)
+        patchMessage = null
+        return PatchDraft(id, f, m, timeMs, frame.width, frame.height)
+    }
+
+    /** Ask the Space for the frame with the mark removed (the same fill the job makes on this frame). */
+    fun previewPatch(draft: PatchDraft, onDone: (File?) -> Unit) {
+        if (patchBusy) return
+        patchBusy = true
+        patchMessage = "Erasing on ${spaceLabel}\u2026 (about 5\u201315 s)"
+        viewModelScope.launch(guard + Dispatchers.IO) {
+            var out: File? = null
+            try {
+                val s = settings()
+                val res = hf.patchPreview(s, draft.frameFile, draft.maskFile)
+                val info = res.info
+                if (info != null && !info.optBoolean("ok", false)) {
+                    throw IllegalStateException(info.optString("error").ifBlank { "the Space could not erase it" })
+                }
+                val path = res.path ?: throw IllegalStateException("the Space returned no picture")
+                out = File(File(patchDir(), draft.id), "preview.jpg").also { hf.downloadOutput(s, path, it) }
+                patchMessage = "Erased" + (info?.let { " (${it.optString("inpainter", "")}, ${it.optInt("ms") / 1000.0} s)" } ?: "") +
+                    ". Toggle before/after to check, then Freeze. Not right? Undo / paint more and preview again."
+            } catch (e: Throwable) {
+                val d = e.message ?: e.javaClass.simpleName
+                patchMessage = if (d.contains("phoenix_patch_preview") || d.contains("404"))
+                    "This Space has no Patch Removal yet (it needs Phoenix v11.2.96). You can still Freeze; " +
+                        "the mark is only removed by Spaces on v11.2.96 or later."
+                else "Preview failed: $d"
+            } finally {
+                patchBusy = false
+                val f = out
+                withContext(Dispatchers.Main) { onDone(f) }
+            }
+        }
+    }
+
+    /** Keep this mark: it travels with the next job(s) on this video. */
+    fun freezePatch(draft: PatchDraft, previewFile: File?) {
+        if (patches.size >= PatchFrames.MAX_PATCHES) {
+            status = "At most ${PatchFrames.MAX_PATCHES} marks per video"
+            return
+        }
+        patches = patches + PatchSpec(draft.id, draft.frameFile, draft.maskFile, previewFile, draft.timeMs, draft.width, draft.height)
+        patchMessage = null
+        status = "Mark frozen at ${PatchFrames.clock(draft.timeMs)} \u2014 it will be removed across the video (${patches.size}/${PatchFrames.MAX_PATCHES})"
+    }
+
+    fun removePatch(id: String) {
+        patches.find { it.id == id }?.let { p -> runCatching { p.frameFile.parentFile?.deleteRecursively() } }
+        patches = patches.filterNot { it.id == id }
+    }
+
+    private fun clearPatches() {
+        patches.forEach { p -> runCatching { p.frameFile.parentFile?.deleteRecursively() } }
+        patches = emptyList()
+        patchMessage = null
+    }
+
+    /** settings.patches for phoenix_submit_video: frame + mask (base64) and the time IN THE UPLOADED FILE. */
+    private fun addPatches(o: JSONObject, offsetUs: Long) {
+        val list = patches
+        if (list.isEmpty()) return
+        val arr = JSONArray()
+        list.take(PatchFrames.MAX_PATCHES).forEach { p ->
+            runCatching {
+                val fb = p.frameFile.readBytes()
+                val mb = p.maskFile.readBytes()
+                arr.put(JSONObject()
+                    .put("image_b64", android.util.Base64.encodeToString(fb, android.util.Base64.NO_WRAP))
+                    .put("mask_b64", android.util.Base64.encodeToString(mb, android.util.Base64.NO_WRAP))
+                    .put("t", ((p.timeMs * 1000L - offsetUs).coerceAtLeast(0L)) / 1_000_000.0))
+            }
+        }
+        if (arr.length() > 0) o.put("patches", arr)
+    }
     var detectedFaces by mutableStateOf<List<Uri?>>(listOf(null, null, null, null)); private set
     private var targetRefs = mutableListOf<Uri?>(null, null, null, null)
     var detectingFrame by mutableStateOf(false); private set
@@ -664,6 +759,7 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectVideo(uri: Uri?) {
         clearDisplayedDetectionFiles()
+        if (uri != selectedVideo) clearPatches()
         selectedVideo = uri; resultUri = null; detectedFrameUri = null; detectedFaces = List(4) { null }
         progress = 0f; eta = "ETA —"; status = if (uri == null) "No video selected" else "Video selected"
         // A new video invalidates any previously-uploaded copy sitting on a
@@ -986,7 +1082,8 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
         "swap_image" to "7 in (target, face1-4, quality, reserved)",
         "phoenix_submit_video" to "6 in (video, face1-4, options JSON)",
         "phoenix_job_status" to "1 in (job id)",
-        "phoenix_download" to "1 in (job id)"
+        "phoenix_download" to "1 in (job id)",
+        "phoenix_patch_preview" to "2 in (frame FileData, mask FileData)"
     )
     var diagnosing by mutableStateOf(false); private set
     var lastError by mutableStateOf<String?>(null); private set
@@ -1517,7 +1614,8 @@ class PhoenixViewModel(app: Application) : AndroidViewModel(app) {
                 val data = JSONArray().put(fileData(videoUpload.path)).put(uploaded[0]?.let(::fileData) ?: JSONObject.NULL)
                     .put(uploaded[1]?.let(::fileData) ?: JSONObject.NULL).put(uploaded[2]?.let(::fileData) ?: JSONObject.NULL)
                     .put(uploaded[3]?.let(::fileData) ?: JSONObject.NULL)
-                    .put(optionsJson(videoUpload.trimStartPct, videoUpload.trimEndPct, uploadedRefs, faceMode, durationSec, partIndex, partCount).toString())
+                    .put(optionsJson(videoUpload.trimStartPct, videoUpload.trimEndPct, uploadedRefs, faceMode, durationSec, partIndex, partCount)
+                        .also { addPatches(it, videoUpload.offsetUs) }.toString())
                 updateHistory(localId, status = "Submitting", progress = .08f, eta = "Queueing…")
                 val submitEndpoint = targetSpace.endpoint.ifBlank { DEFAULT_ENDPOINT }
                 val submit = hf.callAndWait(targetSpace, submitEndpoint, data, 90_000L)

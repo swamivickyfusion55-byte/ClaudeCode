@@ -705,6 +705,18 @@ class HfApi(private val tokenProvider: () -> String?) {
         return FrameDetection(annotated, message, faces)
     }
 
+    /** phoenix_patch_preview (Space v11.2.96): [0] the frame with the mark removed, [1] JSON info. */
+    data class PatchPreview(val path: String?, val info: JSONObject?)
+
+    fun patchPreview(settings: HfSettings, frame: File, mask: File): PatchPreview {
+        val fp = upload(settings, frame, "image/jpeg")
+        val mp = upload(settings, mask, "image/png")
+        val result = callAndWait(settings, "phoenix_patch_preview", JSONArray().put(fileData(fp)).put(fileData(mp)), 240_000L)
+        val path = if (result.length() > 0) extractPath(result.opt(0)) else null
+        val info = if (result.length() > 1) runCatching { JSONObject(result.optString(1)) }.getOrNull() else null
+        return PatchPreview(path, info)
+    }
+
     fun detectImage(settings: HfSettings, imageFile: File): List<String?> {
         val imagePath = upload(settings, imageFile, "image/jpeg")
         val result = callAndWait(settings, "detect_image", JSONArray().put(fileData(imagePath)), 180_000L)

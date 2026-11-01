@@ -2615,8 +2615,8 @@ def _patch_prepare(vp, specs, start_frame, end_frame, step, lim, ow, oh, upright
         g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
         grays.append(cv2.imencode(".jpg", g, [cv2.IMWRITE_JPEG_QUALITY, q])[1])
         thumbs.append(_E._pr_thumb(g))
-        if any(abs(i - h) <= win for h in hints):
-            keep_bgr[i] = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 97])[1]
+        if any(abs(i - h) <= win for h in hints):      # lossless: the anchor's look is compared pixel by pixel later
+            keep_bgr[i] = cv2.imencode(".png", f, [cv2.IMWRITE_PNG_COMPRESSION, 1])[1]
         if i % 200 == 0:
             u(10, f"Patch removal: reading the video {i}/{lim}…")
     n = len(grays)

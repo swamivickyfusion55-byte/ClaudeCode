@@ -8,7 +8,7 @@ app_port: 7860
 pinned: false
 ---
 
-# Phoenix APK Builder 1.2.24
+# Phoenix APK Builder 1.2.25
 
 Upload every file in this pack, including `source.zip`, replacing the old ones.
 Then open the Space and press Build APK.
@@ -16,6 +16,10 @@ Then open the Space and press Build APK.
 **Builder fix (1.2.24):** a build that was stopped half way used to leave a cut-off APK that made the next build
 fail at the very end ("Unexpected end of ZLIB input stream"). Packaging now always starts fresh, and a failed
 build is retried once from a clean tree.
+
+**1.2.25**: optional **Patch Removal** under the target video. Pick the exact frame, paint over a tattoo, mole or
+dark mark with a finger (pinch to zoom), tap Preview to see it erased by the Space, then Freeze. Frozen marks are
+removed on every frame of the video by the Space, even as they move. Needs Space v11.2.96.
 
 **1.2.24**: "Push to all Spaces" no longer restarts a Space that is rendering: busy Spaces are updated by
 themselves when their job ends (no running job is lost). Face restoration gets "GPEN + Cinematic" (fast face

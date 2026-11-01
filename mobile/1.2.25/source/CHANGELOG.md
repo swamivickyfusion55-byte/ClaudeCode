@@ -1,3 +1,19 @@
+# v1.2.25 - Patch Removal (needs Space v11.2.96)
+
+- New optional "Patch Removal" button under the target video. It opens a full-screen editor:
+  - choose the exact frame (not the nearest key frame);
+  - paint over a tattoo, mole or dark mark with one finger (brush S / M / L, Undo, Clear); pinch with two fingers to
+    zoom and pan for small marks, "Fit" to reset;
+  - "Preview" sends the frame and the painted mask to the Space (`phoenix_patch_preview`) and shows the frame with
+    the mark removed - "Show before / Show after" to compare;
+  - "Freeze" keeps the mark (up to 4 per video; each can be removed again from the list).
+- Frozen marks travel with every job on that video (settings.patches: frame + mask as base64, and the frame's time in
+  the uploaded file - corrected for a local trim, whose cut starts on a key frame). The Space finds each mark on its
+  frame, follows the skin through the whole video and removes it on every frame, before the face swap.
+- Choosing another video clears the marks. A Space older than v11.2.96 has no preview route; the editor says so.
+- Compile check: kotlinc 2.0.21 + Compose plugin against Android 15 classes, 0 errors (a missing
+  ViewModelProvider stub was added to the verification stubs). Builder static audit passes.
+
 # v1.2.24 - updates wait for running jobs; GPEN face restore
 
 - **"Push to all Spaces" no longer loses a running job.** An update restarts the Space, so a job rendering there

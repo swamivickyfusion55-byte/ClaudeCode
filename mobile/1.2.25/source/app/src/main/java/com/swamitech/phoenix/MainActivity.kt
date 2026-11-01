@@ -602,6 +602,7 @@ private fun VideoWorkspace(
                 busy = vm.detectingFrame,
                 onClick = { vm.detectFrame() }
             )
+            PatchRemovalSection(vm)
         }
     }
 

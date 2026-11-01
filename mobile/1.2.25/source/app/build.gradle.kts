@@ -13,8 +13,8 @@ android {
         applicationId = "com.swamitech.phoenix2"
         minSdk = 26
         targetSdk = 35
-        versionCode = 144
-        versionName = "1.2.24"
+        versionCode = 145
+        versionName = "1.2.25"
     }
 
 

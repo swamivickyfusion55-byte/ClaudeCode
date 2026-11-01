@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${PHOENIX_ROOT:-/workspace}"
-VER="1.2.24"
+VER="1.2.25"
 cd "$ROOT/source"
 
 echo "=== Phoenix v$VER static release audit ==="
