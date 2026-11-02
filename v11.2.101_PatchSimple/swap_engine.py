@@ -4316,6 +4316,14 @@ def _pr_cover(roi, res, hole, core, ok):
         return res
     ys, xs = np.nonzero(hole)
     size = max(int(np.ptp(ys)), int(np.ptp(xs))) + 1
+    Hf, Wf = hole.shape
+    y0, y1 = max(0, int(ys.min()) - 6), min(Hf, int(ys.max()) + 7)          # work on the painted area's own box (the ROI is
+    x0, x1 = max(0, int(xs.min()) - 6), min(Wf, int(xs.max()) + 7)          #  several times larger): same result, a fraction of the time
+    if (y1 - y0) * (x1 - x0) < 0.6 * Hf * Wf:
+        out = res.copy()
+        out[y0:y1, x0:x1] = _pr_cover(roi[y0:y1, x0:x1], res[y0:y1, x0:x1], hole[y0:y1, x0:x1],
+                                      None if core is None else core[y0:y1, x0:x1], ok[y0:y1, x0:x1])
+        return out
     H, W = hole.shape
     inner = cv2.erode(hole.astype(np.uint8), _pr_disk(2)).astype(bool)
     if core is not None and core.any():
