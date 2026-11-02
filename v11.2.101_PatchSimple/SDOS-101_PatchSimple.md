@@ -45,12 +45,12 @@ The painted stroke covers plain skin around the mark, and in the current frame t
 
 | Clip | inside the mark: cover off -> **on** | on the stroke around it: off -> **on** |
 |---|---|---|
-| procedural mole | +1.09 -> **+0.84** | +0.51 -> **+0.15** |
-| mole shifting 1-3 px against the skin | +0.73 -> **+0.65** | +0.42 -> **+0.23** |
-| procedural birthmark | +1.07 -> +1.06 | +1.01 -> +0.93 |
+| procedural mole | +1.09 -> **+0.93** | +0.51 -> **+0.20** |
+| mole shifting 1-3 px against the skin | +0.73 -> **+0.69** | +0.42 -> **+0.27** |
+| procedural birthmark | +1.07 -> +1.06 | +1.01 -> +0.95 |
 | photo mole (fill already lighter than the truth) | unchanged (never darkened) | unchanged |
 
-**What this does and does not show.** On these clips the leftover is small and flat: the darkness is the same +0.6-0.7 L 18-24 px away, outside the painted area, where nothing is painted (a measuring offset between the two encodings). There is no ghost spot of the mark to remove; the cover roughly halves the little that is there. **A faint residue under the paint on real footage may have a cause these clips do not model** (relief of a real mole, skin sliding, auto-exposure, compression). The cover is the stronger safety net for it; it cannot be proven here. If a faint leftover is still seen, send the job log (text only).
+**What this does and does not show.** On these clips the leftover is small and flat: the darkness is the same +0.6-0.7 L 18-24 px away, outside the painted area, where nothing is painted (a measuring offset between the two encodings). There is no ghost spot of the mark to remove; the cover cuts the darkness on the stroke around the mark by about 40-60 % and inside the mole by 5-15 %. **A faint residue under the paint on real footage may have a cause these clips do not model** (relief of a real mole, skin sliding, auto-exposure, compression). The cover is the stronger safety net for it; it cannot be proven here. If a faint leftover is still seen, send the job log (text only).
 
 ## 3. Positions and marks
 
@@ -89,7 +89,7 @@ The painted stroke covers plain skin around the mark, and in the current frame t
 ## 6. Limits
 
 - Synthetic tests only; the faint-leftover cause on real footage is not reproduced (section 2).
-- Under a moving shadow the fill follows the shadow less closely than v11.2.99's relight (shadow test: error about 3 levels against 2): the mark is still covered, the tone of the patch matches a little less. The fill's fine texture is the inpainter's own (about 50-80 % of the surrounding skin on photo skin) - v11.2.99's texture step is not in this build.
+- Under a moving shadow the fill follows the shadow less closely than v11.2.99's relight (shadow test: error about 3 levels against 2; the shadowed tattoo clip 3.8 L against 2.0-2.6 L): the mark is still covered on every frame (0 missed), the tone of the patch matches a little less. The fill's fine texture is the inpainter's own (about 50-80 % of the surrounding skin on photo skin) - v11.2.99's texture step is not in this build.
 - The Space still accepts a second job while one runs (it only warns); the app now avoids it.
 - The adapter's new warning line is inside a try/except and was not exercised by a test.
 
