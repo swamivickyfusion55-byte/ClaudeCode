@@ -9,7 +9,7 @@ Skins: 'proc' (procedural skin: shading, mottling, pores, fine noise) and 'astro
 astronaut portrait, 2x: a mole on the cheek, and one on the jaw line where skin meets the shadow/collar - an edge case). Marks: 'mole' (dark brown, soft edge, ~16 px), 'tattoo' (blue-black ink
 strokes, ~150x90 px), 'birth' (irregular light-brown birthmark, ~60 px)."""
 import sys, os, subprocess, cv2, numpy as np
-OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...] | make_patchclip.py OUTDIR cut | make_patchclip.py OUTDIR warp | make_patchclip.py OUTDIR jit | make_patchclip.py OUTDIR multi
+OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...] | make_patchclip.py OUTDIR cut | make_patchclip.py OUTDIR warp | make_patchclip.py OUTDIR jit | make_patchclip.py OUTDIR multi | make_patchclip.py OUTDIR hard
 FF = "/tmp/claude-0/bin/ffmpeg"
 W, H, N, FPS = 1280, 720, 150, 30
 
@@ -280,7 +280,78 @@ def render_multi(skin, centre, layers, offs):
     return frames, clean, marks, occs
 
 
-if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("multi"):
+def render_hard(skin, centre, layer, lc, amp=4.0, blur=True):
+    """v11.2.102: footage that is hard to follow - the body part turns up to +-32 deg, scales 0.75-1.35, changes perspective,
+    moves up to ~250 px (fast: motion blur along the motion), the skin bends, a shadow sweeps over it, the mark sits up to
+    ~amp px off where the skin pattern puts it, phone-quality encoding. No object."""
+    frames, clean, marks, occs = [], [], [], []
+    r = np.random.default_rng(31)
+    lay = np.zeros(skin.shape[:2] + (4,), np.float32)
+    lh, lw = layer.shape[:2]
+    y0, x0 = centre[1] - lc[1], centre[0] - lc[0]
+    lay[y0:y0 + lh, x0:x0 + lw] = layer
+    gy, gx = np.mgrid[0:H, 0:W].astype(np.float32)
+    ph = r.uniform(0, 6.28, 4)
+    prev_c = None
+    for i in range(N):
+        t = i / FPS
+        tx, ty = 230 * np.sin(2 * np.pi * t / 2.6), 70 * np.sin(2 * np.pi * t / 1.9 + 0.7)
+        ang = 32.0 * np.sin(2 * np.pi * t / 3.4)
+        sc = 1.05 + 0.30 * np.sin(2 * np.pi * t / 2.9 + 0.3)
+        M = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, sc)
+        M[0, 2] += W / 2 - centre[0] + tx
+        M[1, 2] += H / 2 - centre[1] + ty
+        P = np.vstack([M, [0, 0, 1]]).astype(np.float64)
+        P[2, 0] = 2.2e-4 * np.sin(2 * np.pi * t / 2.2 + ph[0])          # perspective (keystone)
+        P[2, 1] = 1.6e-4 * np.sin(2 * np.pi * t / 2.7 + ph[1])
+        jx = amp * (0.6 * np.sin(2 * np.pi * t / 1.2 + ph[2]) + 0.4 * np.sin(2 * np.pi * t / 0.45 + ph[3]))
+        jy = amp * (0.6 * np.sin(2 * np.pi * t / 1.0 + ph[3]) + 0.4 * np.sin(2 * np.pi * t / 0.5 + ph[2]))
+        Pm = P.copy(); Pm[0, 2] += jx; Pm[1, 2] += jy
+        bend = 3.0 * np.sin(2 * np.pi * t / 2.9 + 0.4)
+        mx = (gx + bend * np.sin(2 * np.pi * (gy / 210.0 + t / 3.1))).astype(np.float32)
+        my = (gy + bend * np.cos(2 * np.pi * (gx / 190.0 + t / 2.6))).astype(np.float32)
+        S = cv2.remap(cv2.warpPerspective(skin.astype(np.float32), P, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        Lw = cv2.remap(cv2.warpPerspective(lay, Pm, (W, H), flags=cv2.INTER_LINEAR), mx, my, cv2.INTER_LINEAR)
+        a = Lw[..., 3:]
+        p0 = P @ np.array([centre[0], centre[1], 1.0]); p0 = p0[:2] / p0[2]
+        sweep = p0[0] - 160 + 320 * ((t / 2.5) % 1.0)
+        shade = 1.0 - 0.14 / (1.0 + np.exp(-((gx - sweep) * 0.8 + (gy - p0[1]) * 0.6) / 25.0))
+        f_m = (S * (1 - a) + Lw[..., :3] * a) * shade[..., None]
+        f_c = S * shade[..., None]
+        if blur and prev_c is not None:                                   # motion blur along the motion of this frame
+            d = p0 - prev_c; sp = float(np.hypot(*d))
+            L_ = int(min(17, round(0.7 * sp)))
+            if L_ >= 3:
+                k = np.zeros((L_, L_), np.float32)
+                cv2.line(k, (0, 0), (L_ - 1, L_ - 1), 1.0, 1)
+                th = np.degrees(np.arctan2(d[1], d[0]))
+                Rk = cv2.getRotationMatrix2D(((L_ - 1) / 2.0, (L_ - 1) / 2.0), th - 45.0, 1.0)
+                k = cv2.warpAffine(k, Rk, (L_, L_)); k /= max(float(k.sum()), 1e-6)
+                f_m = cv2.filter2D(f_m, -1, k); f_c = cv2.filter2D(f_c, -1, k)
+        prev_c = p0
+        noise = r.normal(0, 1.5, (H, W, 3)).astype(np.float32)
+        frames.append(np.clip(f_m + noise, 0, 255).astype(np.uint8))
+        clean.append(np.clip(f_c + noise, 0, 255).astype(np.uint8))
+        marks.append(Lw[..., 3] > 0.03)
+        occs.append(np.zeros((H, W), bool))
+    return frames, clean, marks, occs
+
+
+if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("hard"):
+    os.makedirs(OUT, exist_ok=True)
+    ps = proc_skin()
+    asx, acen = astro_skin()
+    for name, skin, cen, kind in [("hard_mole", ps, (900, 600), "mole"), ("hard_birth", ps, (900, 600), "birth"),
+                                  ("hard_tattoo", ps, (900, 600), "tattoo"), ("hard_astro", asx, acen["cheek"], "mole")]:
+        layer, lc = mark_layer(kind)
+        frames, clean, marks, occs = render_hard(skin, cen, layer, lc)
+        write(name, frames, crf=24)
+        write(name + "_clean", clean, crf=24)
+        ri = 20
+        np.savez_compressed(os.path.join(OUT, f"pr_{name}_gt.npz"), mark=np.array(marks), occ=np.array(occs),
+                            ref=frames[ri], refmask=finger_mask(marks[ri]), ref_t=ri / FPS)
+        print(name, "ok")
+elif __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("multi"):
     os.makedirs(OUT, exist_ok=True)
     ps = proc_skin()
     kinds = ["mole", "birth", "mole", "mole", "birth", "mole", "mole", "birth", "mole", "mole"]
