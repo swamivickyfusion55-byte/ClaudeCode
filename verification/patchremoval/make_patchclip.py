@@ -9,7 +9,7 @@ Skins: 'proc' (procedural skin: shading, mottling, pores, fine noise) and 'astro
 astronaut portrait, 2x: a mole on the cheek, and one on the jaw line where skin meets the shadow/collar - an edge case). Marks: 'mole' (dark brown, soft edge, ~16 px), 'tattoo' (blue-black ink
 strokes, ~150x90 px), 'birth' (irregular light-brown birthmark, ~60 px)."""
 import sys, os, subprocess, cv2, numpy as np
-OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...] | make_patchclip.py OUTDIR cut | make_patchclip.py OUTDIR warp
+OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...] | make_patchclip.py OUTDIR cut | make_patchclip.py OUTDIR warp | make_patchclip.py OUTDIR jit | make_patchclip.py OUTDIR multi
 FF = "/tmp/claude-0/bin/ffmpeg"
 W, H, N, FPS = 1280, 720, 150, 30
 
@@ -210,7 +210,106 @@ def render_warp(skin, centre, layer, lc, crf_note=None):
     return frames, clean, marks, occs
 
 
-if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("warp"):
+def render_jitter(skin, centre, layer, lc, amp=3.0):
+    """v11.2.100: the mark is not glued to the skin the tracker follows - it sits a little off its anchored place on
+    every frame (relief, skin sliding over it, tracking error of 1-3 px): the mark layer is displaced against the skin
+    by a smooth random-walk (up to ~amp px, with a slight turn), phone-quality encoding, no object."""
+    frames, clean, marks, occs = [], [], [], []
+    r = np.random.default_rng(23)
+    lay = np.zeros(skin.shape[:2] + (4,), np.float32)
+    lh, lw = layer.shape[:2]
+    y0, x0 = centre[1] - lc[1], centre[0] - lc[0]
+    lay[y0:y0 + lh, x0:x0 + lw] = layer
+    ph = r.uniform(0, 6.28, 6)
+    for i in range(N):
+        t = i / FPS
+        tx, ty = 130 * np.sin(2 * np.pi * t / 3.2), 45 * np.sin(2 * np.pi * t / 2.3 + 0.7)
+        ang, sc = 7.0 * np.sin(2 * np.pi * t / 4.1), 1.0 + 0.07 * np.sin(2 * np.pi * t / 3.7 + 0.3)
+        M = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, sc)
+        M[0, 2] += W / 2 - centre[0] + tx
+        M[1, 2] += H / 2 - centre[1] + ty
+        jx = amp * (0.6 * np.sin(2 * np.pi * t / 1.3 + ph[0]) + 0.4 * np.sin(2 * np.pi * t / 0.47 + ph[1]))
+        jy = amp * (0.6 * np.sin(2 * np.pi * t / 1.1 + ph[2]) + 0.4 * np.sin(2 * np.pi * t / 0.53 + ph[3]))
+        Mm = M.copy(); Mm[0, 2] += jx; Mm[1, 2] += jy
+        S = cv2.warpAffine(skin.astype(np.float32), M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        Lw = cv2.warpAffine(lay, Mm, (W, H), flags=cv2.INTER_LINEAR)
+        a = Lw[..., 3:]
+        bright = 1.0 + 0.08 * np.sin(2 * np.pi * i / 70.0)
+        f_m = (S * (1 - a) + Lw[..., :3] * a) * bright
+        f_c = S * bright
+        noise = r.normal(0, 1.5, (H, W, 3)).astype(np.float32)
+        frames.append(np.clip(f_m + noise, 0, 255).astype(np.uint8))
+        clean.append(np.clip(f_c + noise, 0, 255).astype(np.uint8))
+        marks.append(Lw[..., 3] > 0.03)
+        occs.append(np.zeros((H, W), bool))
+    return frames, clean, marks, occs
+
+
+def render_multi(skin, centre, layers, offs):
+    """v11.2.100: several marks on the same skin (up to 10): layers[i] is placed at centre + offs[i]. Same motion as the
+    plain clips (the whole skin moves, turns, changes brightness, an object passes at frames 40-59)."""
+    frames, clean, marks, occs = [], [], [], []
+    r = np.random.default_rng(11)
+    lay = np.zeros(skin.shape[:2] + (4,), np.float32)
+    per = []
+    for (layer, lc), (dx, dy) in zip(layers, offs):
+        one = np.zeros(skin.shape[:2] + (4,), np.float32)
+        lh, lw = layer.shape[:2]
+        y0, x0 = centre[1] + dy - lc[1], centre[0] + dx - lc[0]
+        one[y0:y0 + lh, x0:x0 + lw] = layer
+        per.append(one)
+        a = one[..., 3:]
+        lay[..., :3] = lay[..., :3] * (1 - a) + one[..., :3] * a
+        lay[..., 3] = np.maximum(lay[..., 3], one[..., 3])
+    marked = skin.astype(np.float32) * (1 - lay[..., 3:]) + lay[..., :3] * lay[..., 3:]
+    for i in range(N):
+        tx, ty, ang, sc = motion(i, "multi")
+        ang, sc = ang * 0.7, 1.0 + (sc - 1.0) * 0.7
+        M = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, sc)
+        M[0, 2] += W / 2 - centre[0] + tx * 0.35
+        M[1, 2] += H / 2 - centre[1] + ty * 0.35
+        bright = 1.0 + 0.10 * np.sin(2 * np.pi * i / 70.0)
+        f_m = cv2.warpAffine(marked, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT) * bright
+        f_c = cv2.warpAffine(skin.astype(np.float32), M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT) * bright
+        mk = [cv2.warpAffine(o[..., 3], M, (W, H), flags=cv2.INTER_LINEAR) > 0.03 for o in per]
+        noise = r.normal(0, 1.5, (H, W, 3)).astype(np.float32)
+        frames.append(np.clip(f_m + noise, 0, 255).astype(np.uint8))
+        clean.append(np.clip(f_c + noise, 0, 255).astype(np.uint8))
+        marks.append(mk)
+        occs.append(np.zeros((H, W), bool))
+    return frames, clean, marks, occs
+
+
+if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("multi"):
+    os.makedirs(OUT, exist_ok=True)
+    ps = proc_skin()
+    kinds = ["mole", "birth", "mole", "mole", "birth", "mole", "mole", "birth", "mole", "mole"]
+    layers = [mark_layer(k, seed=5 + i) for i, k in enumerate(kinds)]
+    offs = [(-300, -150), (-120, -170), (60, -160), (240, -150), (330, -20), (-330, 20), (-170, 60), (40, 70), (190, 60), (-40, 190)]
+    frames, clean, marks, occs = render_multi(ps, (900, 600), layers, offs)
+    write("multi", frames, crf=24)
+    write("multi_clean", clean, crf=24)
+    ri = 20
+    d = dict(mark=np.array([np.any(m, axis=0) for m in marks]), occ=np.array(occs), ref=frames[ri],
+             refmask=finger_mask(marks[ri][0]), ref_t=ri / FPS, nmarks=len(offs), marks_all=np.array([[m[k] for m in marks] for k in range(len(offs))]))
+    for k in range(len(offs)):
+        d[f"refmask_{k}"] = finger_mask(marks[ri][k], seed=2 + k)
+    np.savez_compressed(os.path.join(OUT, "pr_multi_gt.npz"), **d)
+    print("multi ok")
+elif __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("jit"):
+    os.makedirs(OUT, exist_ok=True)
+    ps = proc_skin()
+    asx, acen = astro_skin()
+    for name, skin, cen, kind in [("jit_mole", ps, (900, 600), "mole"), ("jit_tattoo", ps, (900, 600), "tattoo"),
+                                  ("jit_astro", asx, acen["cheek"], "mole")]:
+        layer, lc = mark_layer(kind)
+        frames, clean, marks, occs = render_jitter(skin, cen, layer, lc)
+        write(name, frames, crf=24)
+        write(name + "_clean", clean, crf=24)
+        np.savez_compressed(os.path.join(OUT, f"pr_{name}_gt.npz"), mark=np.array(marks), occ=np.array(occs),
+                            ref=frames[20], refmask=finger_mask(marks[20]), ref_t=20 / FPS)
+        print(name, "ok")
+elif __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("warp"):
     os.makedirs(OUT, exist_ok=True)
     ps = proc_skin()
     asx, acen = astro_skin()

@@ -61,10 +61,16 @@ b = lambda im, ext: base64.b64encode(cv2.imencode(ext, im)[1].tobytes()).decode(
 v = lambda grp_, t: {"group": grp_, "image_b64": b(gt["ref"], ".jpg"), "mask_b64": b(gt["refmask"], ".png"), "t": t}
 pl, err = ad._load_patches({"patches": [v("mA", 0.6), v("mA", 3.1), v("mB", 1.0)]})
 check("settings: 3 positions of 2 marks are accepted, group kept", err is None and [p["group"] for p in pl] == ["mA", "mA", "mB"], str(err))
-_, e5 = ad._load_patches({"patches": [v(f"m{k}", 0.1) for k in range(5)]})
-_, e13 = ad._load_patches({"patches": [v("mA", 0.1)] * 13})
-check("settings: 5 marks, or 13 positions, are refused with a reason", e5 is not None and e13 is not None,
+import config as _cf                                            # (v11.2.100: the limits are the config's - 4 / 12 before, 10 / 20 now)
+NM, NV = int(_cf.PATCH_MAX), int(_cf.PATCH_MAX_VIEWS)
+_, e5 = ad._load_patches({"patches": [v(f"m{k}", 0.1) for k in range(NM + 1)]})
+_, e13 = ad._load_patches({"patches": [v("mA", 0.1)] * (NV + 1)})
+_ok_m, e_m = ad._load_patches({"patches": [v(f"m{k}", 0.1) for k in range(NM)]})
+_ok_v, e_v = ad._load_patches({"patches": [v(f"m{k % NM}", 0.1) for k in range(NV)]})
+check(f"settings: {NM + 1} marks, or {NV + 1} positions, are refused with a reason", e5 is not None and e13 is not None,
       f"{(e5 or {}).get('error')} | {(e13 or {}).get('error')}")
+check(f"settings: exactly {NM} marks, and {NV} positions over {NM} marks, are accepted",
+      e_m is None and len(_ok_m) == NM and e_v is None and len(_ok_v) == NV, f"{e_m} | {e_v}")
 pl1, _ = ad._load_patches({"patches": [{"image_b64": b(gt["ref"], ".jpg"), "mask_b64": b(gt["refmask"], ".png"), "t": 1}]})
 check("settings: an entry without a group (app 1.2.25) is its own mark", pl1 and pl1[0]["group"] is None)
 sp = cp._patch_specs({"patches": pl})
