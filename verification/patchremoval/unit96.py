@@ -63,7 +63,8 @@ check("settings.patches: the app's mask (opaque ARGB PNG, white strokes on black
       mm3 is not None and int((mm3 > 127).sum()) == int((rmask > 127).sum()) and abs(pl3[0]["t"] - 2.5) < 1e-9)
 _, e1 = ad._load_patches({"patches": [{"image_b64": b(ref, ".jpg"), "mask_b64": b(np.zeros_like(rmask), ".png")}]})
 _, e2 = ad._load_patches({"patches": [{"image_b64": "not base64 !!", "mask_b64": b(rmask, ".png")}]})
-_, e3 = ad._load_patches({"patches": [good["patches"][0]] * 5})
+import config as _cf96                                           # (v11.2.100: the limit is the config's - 4 marks before, 10 now)
+_, e3 = ad._load_patches({"patches": [good["patches"][0]] * (int(_cf96.PATCH_MAX_VIEWS) + 1)})
 _, e4 = ad._load_patches({"patches": "{bad json"})
 check("settings.patches: empty mask / unreadable image / too many / bad JSON are refused with a reason",
       all(e is not None and not e.get("ok", True) for e in (e1, e2, e3, e4)),
