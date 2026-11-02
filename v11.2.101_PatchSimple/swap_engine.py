@@ -4339,7 +4339,7 @@ def _pr_cover(roi, res, hole, core, ok):
     else:
         low, den = _pr_lowpass(e * mv, mv, sig)
         fld = _pr_pushpull(low, (mv & (den > 0.2)).astype(np.float32))
-    ramp = np.clip(cv2.distanceTransform(hole.astype(np.uint8), cv2.DIST_L2, 3) / 3.0, 0.0, 1.0)
+    ramp = np.clip((cv2.distanceTransform(hole.astype(np.uint8), cv2.DIST_L2, 3) - 0.5) / 5.0, 0.0, 1.0)   # full 5.5 px in
     add = np.clip(fld, 0.0, float(PATCH_CFG.get("cover_max", 8.0))) * k * ramp * hole
     COVER_STATS["n"] += 1
     COVER_STATS["sum"] += float(add[hole].mean())

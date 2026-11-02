@@ -131,6 +131,11 @@ if KW.get("patches"):          # Patch Removal (v11.2.96): make_patchclip.py gro
     _g = np.load(KW["patches"]); _pi, _pm = WORK + "/patch_frame.jpg", WORK + "/patch_mask.png"
     cv2.imwrite(_pi, _g["ref"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm, _g["refmask"])
     cfg["patches"] = [dict(image=_pi, mask=_pm, t=float(_g["ref_t"]), group="m1")]
+    if "nmarks" in _g.files:                          # v11.2.100: make_patchclip.py multi - one mark per painted mask, all on the same frame
+        cfg["patches"] = []
+        for _k in range(int(_g["nmarks"])):
+            _pmk = WORK + f"/patch_mask_{_k}.png"; cv2.imwrite(_pmk, _g[f"refmask_{_k}"])
+            cfg["patches"].append(dict(image=_pi, mask=_pmk, t=float(_g["ref_t"]), group=f"m{_k}"))
     if KW.get("views") == "2" and "ref2" in _g:     # v11.2.97: the same mark painted at a second position
         _pi2, _pm2 = WORK + "/patch_frame2.jpg", WORK + "/patch_mask2.png"
         cv2.imwrite(_pi2, _g["ref2"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm2, _g["refmask2"])
