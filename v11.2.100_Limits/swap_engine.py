@@ -4035,11 +4035,11 @@ def validate_detection_confidence(bbox, frame_shape, landmarks=None):
 # =====================================================================================================================
 
 PATCH_CFG = {
-    "max_patches": 4,
+    "max_patches": 10,         # marks per job (v11.2.100: was 4 - the config's PATCH_MAX only gated the settings, this one the engine)
     "halo_px": 2,              # the painted hole is grown by this (1 measured worse: brighter fill, misplaced frames)
     "peek_band": 0.0,          # v11.2.97 edge repair outside the hole; v11.2.98: OFF (nothing outside the painted area changes)
     "bridge_max": 3,           # gaps of up to this many frames between followed frames are bridged (no 1-frame "opening")
-    "max_views": 12,           # painted positions in all (several per mark)
+    "max_views": 20,           # painted positions in all (several per mark) (v11.2.100: was 12)
     "grow_band": 0.0,          # dark rim outside the painted area joined to it; v11.2.98: OFF (outside stays as it is)
     "lift": 1.0,               # v11.2.98: no faint dark blob may remain under the mark: the fill is lifted (inside the
     "lift_max": 6.0,           #   painted area only, very smoothly, by at most this many levels) to the level around it.
@@ -5201,14 +5201,19 @@ def plan_tracks(specs, size_wh, n, thumbs, gray_at, bgr_at, log=None):
     one mark at different positions. -> list of PatchGroup ready to apply (by frame index)."""
     groups = {}
     order = []
-    for sp in specs[:int(PATCH_CFG.get("max_views", 12))]:
+    dropped = max(0, len(specs) - int(PATCH_CFG.get("max_views", 20)))
+    for sp in specs[:int(PATCH_CFG.get("max_views", 20))]:
         gk = sp[4] if len(sp) > 4 and sp[4] is not None else ("_v%d" % len(order))
         if gk not in groups:
             if len(groups) >= PATCH_CFG["max_patches"]:
+                dropped += 1
                 continue
             groups[gk] = []
             order.append(gk)
         groups[gk].append(sp[:4])
+    if dropped and log:                                      # never silent: the job log says what was left out
+        log("WARNING: %d painted position(s) were left out - the engine takes at most %d marks and %d positions per job"
+            % (dropped, int(PATCH_CFG["max_patches"]), int(PATCH_CFG.get("max_views", 20))))
     out = []
     for m, gk in enumerate(order):
         PATCH_STATS["patches"] += 1

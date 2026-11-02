@@ -40,3 +40,14 @@ one mark cost about ten times one position in planning time, and the per-frame w
 
 - Space: upload the 8 files (or "Push to all Spaces"). Log: `Phoenix v11.2.100`.
 - App: upload the 6 files of `Phoenix_APK_Builder_1.2.28.zip` to the APK Builder Space and build; install over 1.2.27.
+
+## ERRATA (found afterwards, fixed in v11.2.101)
+
+The v11.2.100 zip that was sent raised the limits in the app and in the Space's settings check (`config.py`, adapter, core), but the
+engine has its own caps in `swap_engine.py` (`PATCH_CFG["max_patches"] = 4`, `["max_views"] = 12`) that were not raised. Effect of the
+sent zip:
+- **One mark painted at up to 10 positions: works** (10 is within the engine's 12).
+- More than 4 marks, or more than 12 positions in all: accepted by the settings check, then **silently left out** by the engine.
+
+Fixed in v11.2.101 (engine caps 10 / 20, and a `WARNING: ... left out` line in the job log whenever anything is dropped). The
+repo copy of this folder has the fix too; the zip that was sent does not.
