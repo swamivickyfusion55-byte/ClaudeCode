@@ -89,16 +89,18 @@ L = lambda a: a.astype(np.float32).mean(axis=2)
 clean = np.clip(np.dstack([150 + 0 * xx, 170 + 0 * xx, 210 + 0 * xx]) * sh[..., None], 0, 255)
 left = float((L(clean) - L(o))[mk].mean()) / float((L(clean) - L(f_sh))[mk].mean())
 check("a 40 % shadow edge over the mark: the mark is still removed (not taken for an object)", left < 0.12, f"{100 * left:.1f} % of the mark left")
-E.PATCH_CFG["light_local"] = False
+E.PATCH_CFG["light_local"] = False; E.PATCH_CFG["lift"] = 1.0               # v11.2.98 lighting and lift
 o_old = t.apply(f_sh, 1)
-E.PATCH_CFG["light_local"] = True
+E.PATCH_CFG["light_local"] = True; E.PATCH_CFG["lift"] = 0.0
 left_old = float((L(clean) - L(o_old))[mk].mean()) / float((L(clean) - L(f_sh))[mk].mean())
 pin = cv2.erode(paint.astype(np.uint8), E._pr_disk(2)).astype(bool)
 e_new = float(np.abs(L(o) - L(clean))[pin].mean()); e_old = float(np.abs(L(o_old) - L(clean))[pin].mean())
 check("...and the fill takes the shadow's shape: it matches the clean shadowed skin over the painted area",
-      e_new < 3.0 and e_new < 0.6 * e_old, f"mean error {e_new:.1f} levels (v11.2.98 lighting: {e_old:.1f}; {100 * left_old:.1f} % of the mark left)")
+      e_new < 2.5 and e_new < 0.7 * e_old, f"mean error {e_new:.1f} levels (v11.2.98 lighting: {e_old:.1f}; {100 * left_old:.1f} % of the mark left)")
 chg = int((np.abs(o.astype(np.int16) - f_sh.astype(np.int16)).max(axis=2)[~cv2.dilate(paint.astype(np.uint8), E._pr_disk(2)).astype(bool)] > 0).sum())
 check("...and nothing outside the painted area (+2 px halo) changes", chg == 0, f"{chg} px")
+
+check("the v11.2.98 lift is off in jobs (the relighting no longer leaves the darkness it was for)", float(E.PATCH_CFG["lift"]) == 0.0)
 
 # --- 5. skin texture: a smooth fill gets the grain of the skin around it, inside the painted area only ---------------
 tex = np.dstack([150 + 0 * xx, 170 + 0 * xx, 210 + 0 * xx]).astype(np.float32) + cv2.GaussianBlur(rng.normal(0, 6, (H, W)).astype(np.float32), (0, 0), 0.8)[..., None]

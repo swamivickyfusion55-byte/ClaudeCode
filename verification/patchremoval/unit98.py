@@ -9,7 +9,8 @@ hf = types.ModuleType("huggingface_hub"); hf.hf_hub_download = lambda *a, **k: N
 os.environ.setdefault("PHOENIX_MODEL_DIR", "/tmp/claude-0/occmodels")
 import core_pipeline as cp
 E = cp._E
-fails = 0
+E.PATCH_CFG["lift"] = max(1.0, float(E.PATCH_CFG.get("lift", 0.0) or 0.0))   # v11.2.99 switches the lift off in jobs;
+fails = 0                                                                         # the function itself is still checked
 
 
 def check(name, ok, info=""):
