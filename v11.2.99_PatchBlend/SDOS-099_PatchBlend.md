@@ -63,7 +63,7 @@ This is very likely the residue you saw: real footage has light changing across 
 | Clip | v11.2.98 | **v11.2.99** |
 |---|---|---|
 | mole, moving shadow, bending | 36.3 % / 50 / 15.5 | **−1.6 % / 0 / 1.2** |
-| birthmark, moving shadow, bending | 46.2 % / 74 / 10.3 | **−3.1 % / 0 / 1.1** |
+| birthmark, moving shadow, bending | 46.2 % / 74 / 10.3 | **−2.8 % / 0 / 1.0** |
 | tattoo, moving shadow, bending | 8.4 % / 6 / 7.5 | **−3.3 % / 0 / 2.6** |
 | cheek mole (photo), moving shadow, bending | −0.9 % / 0 / 6.4 | **−1.1 % / 0 / 6.2** |
 | procedural mole | 10.4 % / 13 / 5.0 | **5.5 % / 6 / 3.2** |
@@ -132,7 +132,7 @@ The kiss without a dropout is unchanged: `REVERTS=0 blind=0`, and frame-to-frame
 
 ## 6. Verification
 
-- `verification/patchremoval/unit99.py`: 18 checks, all pass. They cover:
+- `verification/patchremoval/unit99.py`: 17 checks, all pass. They cover:
   - the lighting-free view;
   - the light field under a shadow edge and with an object in the ring;
   - tracking under a moving shadow (all 130 frames; plain view 94);
@@ -141,12 +141,13 @@ The kiss without a dropout is unchanged: `REVERTS=0 blind=0`, and frame-to-frame
   - the lift under shading;
   - texture matching (adds grain to a smooth fill, nothing to a textured one, nothing outside, no level shift);
   - the contact hold (old behaviour without contact, full strength and bridging with contact).
-- Earlier suites on this pack: unit98 all pass, unit97 16/16, unit96 18/18.
+- Earlier suites, run on the zip's own files: unit98 11/11, unit97 16/16, unit96 18/18, unit95 17/17, unit94 29/29.
 - New test material:
   - `make_patchclip.py OUT warp`: the bending, moving-shadow, CRF 24 clips;
   - `bench_pipeline.py DROP_CONTACT=both DROP_RUN=lo:hi:per`: the detector made to lose the faces in contact, including its close-up re-checks.
 - **Full jobs from the zip** (the real render path):
   - mole under a moving shadow on bending skin: removed on 150 of 150 frames, 1.9 % of the mark left after the final encode, missed on none;
+  - tattoo under a moving shadow on bending skin: removed on 150 of 150 frames, −0.1 % left, missed on none;
   - cheek mole with a face swap in the same job: faces on 150 of 150 frames; the mark removed on every frame where it is in the picture except the 6 of the clip's out-of-picture swing (−3.2 % left: very slightly lighter);
   - the kiss with the detector losing both faces for 40 frames of contact: faces painted on 120 of 120 frames, `REVERTS=0 faint=0 contact_hold=474/56`, no frame below half strength.
 
