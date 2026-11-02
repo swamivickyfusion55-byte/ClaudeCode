@@ -4093,20 +4093,39 @@ def _pr_disk(r):
 def _pr_harmonic(img, known, iters=None):
     """v11.2.99: fill where ``known`` is False by a membrane (Laplace) interpolation of the known values - the smoothest
     surface that meets them, which carries a soft edge crossing the gap straight across instead of blurring it out.
-    Start from push-pull, then Jacobi sweeps (meant for small, reduced-size images)."""
+    Solved coarse to fine (the half-size solution starts each level, then a few Jacobi sweeps)."""
     squeeze = img.ndim == 2
     x = (img[..., None] if squeeze else img).astype(np.float32)
-    x = _pr_pushpull(x, known.astype(np.float32)).reshape(x.shape).astype(np.float32)
+    known = known.astype(bool)
     unk = ~known
-    if unk.any():
-        if iters is None:
-            ys, xs = np.nonzero(unk)
-            iters = int(min(400, 3 * max(int(np.ptp(ys)), int(np.ptp(xs)), 4)))
+    H, W = known.shape
+    if not unk.any():
+        out = x.copy()
+    elif known.sum() < 1:
+        out = _pr_pushpull(x, known.astype(np.float32)).reshape(x.shape).astype(np.float32)
+    else:
+        if min(H, W) > 12:
+            sz2 = ((W + 1) // 2, (H + 1) // 2)
+            kf = cv2.resize(known.astype(np.float32), sz2, interpolation=cv2.INTER_AREA)
+            xs = cv2.resize(x * known[..., None], sz2, interpolation=cv2.INTER_AREA).reshape(sz2[1], sz2[0], -1)
+            kd = kf > 0.99                                     # only cells wholly known carry a value down
+            if kd.any():
+                xd = xs / np.maximum(kf, 1e-6)[..., None]
+                coarse = _pr_harmonic(xd, kd).reshape(sz2[1], sz2[0], -1)
+                out = cv2.resize(coarse, (W, H), interpolation=cv2.INTER_LINEAR).reshape(H, W, -1).astype(np.float32)
+            else:
+                out = _pr_pushpull(x, known.astype(np.float32)).reshape(x.shape).astype(np.float32)
+            n = 40 if iters is None else int(iters)
+        else:
+            out = _pr_pushpull(x, known.astype(np.float32)).reshape(x.shape).astype(np.float32)
+            n = int(min(60, 3 * max(H, W))) if iters is None else int(iters)
+        np.copyto(out, x, where=known[..., None])
         k = np.array([[0, 0.25, 0], [0.25, 0, 0.25], [0, 0.25, 0]], np.float32)
-        for _ in range(iters):
-            nb = cv2.filter2D(x, -1, k, borderType=cv2.BORDER_REPLICATE).reshape(x.shape)
-            x[unk] = nb[unk]
-    return x[..., 0] if squeeze else x
+        um = np.repeat(unk[..., None], out.shape[2], axis=2)
+        for _ in range(n):
+            nb = cv2.filter2D(out, -1, k, borderType=cv2.BORDER_REPLICATE).reshape(out.shape)
+            np.copyto(out, nb, where=um)
+    return out[..., 0] if squeeze else out
 
 
 def _pr_light_field(roi, orig, hole, inside, skin_in=None):

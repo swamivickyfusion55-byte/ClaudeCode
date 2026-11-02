@@ -128,7 +128,7 @@ The kiss without a dropout is unchanged: `REVERTS=0 blind=0`, and frame-to-frame
 - **Tattoos under strong bending:** the 2 px tolerance covers ordinary skin movement, not a fold.
 - **Jaw-line clip:** the part of the mark beyond the paint stays, as in v11.2.98. Paint a little past the edge.
 - **A hard-edged shadow** (direct sun) across the mark is followed less sharply than a soft one.
-- **Speed:** relighting and texture add about 15–30 ms per frame per mark. The big tattoo (150 × 90 px) is about SPEED.
+- **Speed** (per frame per mark, 2 cores): a mole 16 → 22–30 ms; the big tattoo (150 × 90 px) 132 → 175 ms. The texture is made once, not per frame. The relighting is solved at 1/4 size and coarse-to-fine.
 
 ## 6. Verification
 
