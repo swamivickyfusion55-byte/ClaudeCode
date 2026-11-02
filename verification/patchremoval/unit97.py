@@ -44,16 +44,25 @@ check("positions: a nearer view with clearly lower confidence gives way", E.Patc
 # --- gap bridging -------------------------------------------------------------------------------------------------------
 tr = E.PatchTrack.__new__(E.PatchTrack)
 tr.box, tr.size = (100, 200, 100, 200), 40
+tr.weak = set()                                        # (v11.2.102: every track has it)
 A0 = np.array([[1, 0, 0], [0, 1, 0]], float); A3 = np.array([[1, 0, 6.0], [0, 1, 3.0]], float)
 tr.A, tr.conf = {10: A0, 13: A3}, {10: 0.9, 13: 0.9}
 tr.bridge()
 check("bridging: a 2-frame gap between agreeing poses is filled, in between", 11 in tr.A and 12 in tr.A and abs(tr.A[11][0, 2] - 2.0) < 1e-6)
 tr.A, tr.conf = {10: A0, 20: A3}, {10: 0.9, 20: 0.9}
 tr.bridge()
-check("bridging: a long gap (9 frames) is not filled", 15 not in tr.A)
+check("bridging (v11.2.102): a 9-frame gap is bridged, but only as a WEAK pose (paints where the mark itself is found)", 15 in tr.A and 15 in tr.weak)
+tr.weak = set()
+tr.A, tr.conf = {10: A0, 90: A3}, {10: 0.9, 90: 0.9}
+tr.bridge()
+check("bridging: a gap beyond bridge_max (80 frames) is not bridged across: the middle is empty, the ends are held (weak)",
+      50 not in tr.A and 11 in tr.weak and 89 in tr.weak)
+tr.weak = set()
 tr.A, tr.conf = {10: A0, 12: np.array([[1, 0, 400.0], [0, 1, 0]], float)}, {10: 0.9, 12: 0.9}
 tr.bridge()
-check("bridging: poses that disagree (a jump) are not bridged", 11 not in tr.A)
+check("bridging: poses that disagree (a jump) are not interpolated (the frame between keeps an end's pose, weak)",
+      11 not in tr.A or (11 in tr.weak and float(tr.A[11][0, 2]) in (0.0, 400.0)))
+tr.weak = set()
 
 # --- the job settings: groups --------------------------------------------------------------------------------------------
 gt = np.load(os.path.join(CLIPS, "pr_proc_mole_gt.npz"))

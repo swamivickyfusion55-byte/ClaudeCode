@@ -133,7 +133,8 @@ if os.path.exists(clip):
     trk = E.plan_tracks(sp4, (fr4[0].shape[1], fr4[0].shape[0]), len(fr4), th4, lambda i: gr4[i], lambda i: fr4[i], log=msgs4.append, progress=prog4.append)
     t_full = _t.time() - t0
     tracks4 = trk[0].tracks if trk else []
-    bounds = {15: (0, 55), 45: (5, 85), 75: (35, 89)}               # anchor -> (lo, hi): to the neighbours' anchors + the margin
+    hm = int(E.PATCH_CFG.get("hold_max", 0) or 0)                  # (v11.2.102: a run's end pose is held that many frames, weak)
+    bounds = {15: (0, 55 + hm), 45: (max(0, 5 - hm), 85 + hm), 75: (35 - hm, 89 + hm)}   # anchor -> (lo, hi): to the neighbours' anchors + the margin
     ok_b = len(tracks4) == 3 and all(min(t.A) >= bounds[t.anchor_idx][0] and max(t.A) <= bounds[t.anchor_idx][1] for t in tracks4)
     check("planner: 3 positions of a mark are each followed only through their own stretch (neighbour anchors + margin)", ok_b,
           ", ".join(f"{t.anchor_idx}: {min(t.A)}..{max(t.A)}" for t in tracks4))

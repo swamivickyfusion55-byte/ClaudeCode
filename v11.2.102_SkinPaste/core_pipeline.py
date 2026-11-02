@@ -7848,11 +7848,15 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 _ps = _E.PATCH_STATS
                 logging.info("PATCH-REMOVAL: %d mark(s) from %d painted position(s), %d anchored; removed on %d frames "
                              "(area followed on %d, lost on %d, short gaps bridged on %d; an object over the mark left "
-                             "untouched on %d; refused - mark not where expected - on %d; mark edge repaired on %d); "
+                             "untouched on %d; refused - mark not where expected - on %d; mark edge repaired on %d; "
+                             "mark itself found on %d, paint re-centred on it on %d, followed by the mark alone on %d, "
+                             "bridged / held poses left unpainted - mark not seen - on %d); "
                              "fill %.0f ms, tracking %.0f ms in total",
                              int(_ps["patches"]), int(_ps["views"]), int(_ps["anchored"]), int(_ps["frames_filled"]),
                              int(_ps["frames_tracked"]), int(_ps["frames_lost"]), int(_ps["frames_bridged"]),
                              int(_ps["frames_gated"]), int(_ps["frames_refused"]), int(_ps["frames_peek"]),
+                             int(_ps["frames_found"]), int(_ps["frames_shifted"]), int(_ps["frames_rescued"]),
+                             int(_ps["frames_weak_skipped"]),
                              float(_ps["fill_ms"]), float(_ps["track_ms"]))
             logging.info("OCCLUSION-PRO: objects arriving at a face's edge cut on %d of %d face-frames; two faces kept "
                          "apart (one face per pixel) on %d face-frames; occluder net calmed next to the other face on %d "
