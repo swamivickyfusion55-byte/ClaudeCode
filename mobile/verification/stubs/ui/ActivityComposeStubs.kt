@@ -18,3 +18,6 @@ fun <I, O> rememberLauncherForActivityResult(
     contract: ActivityResultContract<I, O>,
     onResult: (O) -> Unit
 ): ManagedActivityResultLauncher<I, O> = ManagedActivityResultLauncher()
+
+@Composable
+fun BackHandler(enabled: Boolean = true, onBack: () -> Unit) {}

@@ -98,10 +98,19 @@ for name in NAMES:
             if outside[-1] > 50 and os.environ.get("SHOW_OUT"):
                 print(f"    frame {i + START}: {outside[-1]} px changed away from the mark")
         prev = (lo, lc, reg)
+    # v11.2.98: on the painted frame, nothing outside the painted area (+1 px) may change
+    ai = int(round(float(g["ref_t"]) * 30)) - START
+    if 0 <= ai < n:
+        pa = cv2.dilate((g["refmask"] > 127).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        dpx = np.abs(out[ai].astype(np.int16) - inp[ai].astype(np.int16)).max(axis=2)
+        outside_paint = int((dpx[~pa] > 3).sum())
+    else:
+        outside_paint = -1
     left = np.array(left)
     print(f"{name}: planned in {t_plan:.1f}s, {t_apply*1000:.0f} ms/frame | left {100*left.mean():.1f}% of the mark, worst {100*left.max():.1f}%, "
           f"missed {missed}/{len(left)} frames | error {np.mean(err):.1f} L | shimmer {np.mean(shim):.2f} L | "
-          f"object changed {100*np.mean(objc) if objc else 0:.1f}% (worst {100*np.max(objc) if objc else 0:.1f}%) | outside {max(outside)} px")
+          f"object changed {100*np.mean(objc) if objc else 0:.1f}% (worst {100*np.max(objc) if objc else 0:.1f}%) | outside {max(outside)} px"
+          f" | changed outside the painted area on the painted frame {outside_paint} px")
     for m_ in msgs:
         print("   ", m_)
     print("    stats:", {k: (round(v) if isinstance(v, float) else v) for k, v in E.PATCH_STATS.items()})
