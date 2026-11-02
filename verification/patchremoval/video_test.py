@@ -19,6 +19,10 @@ VIEWS = int(next((a.split("=")[1] for a in sys.argv if a.startswith("--views="))
 sys.path.insert(0, ENGINE)
 import importlib
 E = importlib.import_module(os.environ.get("PATCH_MODULE", "patchfix"))
+if os.environ.get("PATCH_CFG"):                 # v11.2.99: e.g. PATCH_CFG='{"lift": 0}' - try a setting
+    import json
+    E.PATCH_CFG.update(json.loads(os.environ["PATCH_CFG"]))
+OUTDIR = os.environ.get("OUTDIR", "/tmp/claude-0")
 if not NOMODEL:
     import onnxruntime as ort
     so = ort.SessionOptions(); so.intra_op_num_threads = 2; so.log_severity_level = 3
@@ -115,8 +119,8 @@ for name in NAMES:
         print("   ", m_)
     print("    stats:", {k: (round(v) if isinstance(v, float) else v) for k, v in E.PATCH_STATS.items()})
     if SAVE:
-        vw = cv2.VideoWriter(f"/tmp/claude-0/prout_{name}.avi", cv2.VideoWriter_fourcc(*"MJPG"), 30, (inp[0].shape[1], inp[0].shape[0]))
+        vw = cv2.VideoWriter(f"{OUTDIR}/prout_{name}.avi", cv2.VideoWriter_fourcc(*"MJPG"), 30, (inp[0].shape[1], inp[0].shape[0]))
         for f in out:
             vw.write(f)
         vw.release()
-        np.save(f"/tmp/claude-0/prout_{name}_left.npy", left)
+        np.save(f"{OUTDIR}/prout_{name}_left.npy", left)

@@ -9,7 +9,7 @@ Skins: 'proc' (procedural skin: shading, mottling, pores, fine noise) and 'astro
 astronaut portrait, 2x: a mole on the cheek, and one on the jaw line where skin meets the shadow/collar - an edge case). Marks: 'mole' (dark brown, soft edge, ~16 px), 'tattoo' (blue-black ink
 strokes, ~150x90 px), 'birth' (irregular light-brown birthmark, ~60 px)."""
 import sys, os, subprocess, cv2, numpy as np
-OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...] | make_patchclip.py OUTDIR cut
+OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...] | make_patchclip.py OUTDIR cut | make_patchclip.py OUTDIR warp
 FF = "/tmp/claude-0/bin/ffmpeg"
 W, H, N, FPS = 1280, 720, 150, 30
 
@@ -127,13 +127,13 @@ def finger_mask(markmask, seed=2):
     return m.astype(np.uint8) * 255
 
 
-def write(name, frames):
+def write(name, frames, crf=14):
     tmp = os.path.join(OUT, f"pr_{name}.avi")
     vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"MJPG"), FPS, (W, H))
     for f in frames:
         vw.write(f)
     vw.release()
-    subprocess.run([FF, "-y", "-loglevel", "error", "-i", tmp, "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p",
+    subprocess.run([FF, "-y", "-loglevel", "error", "-i", tmp, "-c:v", "libx264", "-crf", str(crf), "-pix_fmt", "yuv420p",
                     os.path.join(OUT, f"pr_{name}.mp4")], check=True)
     os.remove(tmp)
 
@@ -170,7 +170,60 @@ def render_cut(skin, centre, layer, lc):
     return frames, clean, marks, occs
 
 
-if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("cut"):
+def render_warp(skin, centre, layer, lc, crf_note=None):
+    """v11.2.99: closer to real footage - the skin also BENDS (a smooth non-rigid displacement, up to ~3 px, changing
+    over time: an affine track cannot follow it exactly), a soft shadow edge sweeps across the mark, and the clip is
+    encoded at phone quality (CRF 24). No object, no out-of-picture swing."""
+    frames, clean, marks, occs = [], [], [], []
+    r = np.random.default_rng(17)
+    lay = np.zeros(skin.shape[:2] + (4,), np.float32)
+    lh, lw = layer.shape[:2]
+    y0, x0 = centre[1] - lc[1], centre[0] - lc[0]
+    lay[y0:y0 + lh, x0:x0 + lw] = layer
+    marked = skin.astype(np.float32) * (1 - lay[..., 3:]) + lay[..., :3] * lay[..., 3:]
+    gy, gx = np.mgrid[0:H, 0:W].astype(np.float32)
+    for i in range(N):
+        t = i / FPS
+        tx, ty = 140 * np.sin(2 * np.pi * t / 3.2), 50 * np.sin(2 * np.pi * t / 2.3 + 0.7)
+        ang, sc = 8.0 * np.sin(2 * np.pi * t / 4.1), 1.0 + 0.08 * np.sin(2 * np.pi * t / 3.7 + 0.3)
+        M = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, sc)
+        M[0, 2] += W / 2 - centre[0] + tx
+        M[1, 2] += H / 2 - centre[1] + ty
+        amp = 3.0 * np.sin(2 * np.pi * t / 2.9 + 0.4)
+        mx = gx + amp * np.sin(2 * np.pi * (gy / 210.0 + t / 3.1))
+        my = (gy + amp * np.cos(2 * np.pi * (gx / 190.0 + t / 2.6))).astype(np.float32)
+        mx = mx.astype(np.float32)
+        p = M @ np.array([centre[0], centre[1], 1.0])
+        sweep = p[0] - 160 + 320 * ((t / 2.5) % 1.0)
+        shade = 1.0 - 0.16 / (1.0 + np.exp(-((gx - sweep) * 0.8 + (gy - p[1]) * 0.6) / 25.0))
+        def go(img, interp=cv2.INTER_LINEAR):
+            a = cv2.warpAffine(img, M, (W, H), flags=interp, borderMode=cv2.BORDER_REFLECT)
+            return cv2.remap(a, mx, my, interp, borderMode=cv2.BORDER_REFLECT)
+        f_m = go(marked) * shade[..., None]
+        f_c = go(skin.astype(np.float32)) * shade[..., None]
+        mk = go(lay[..., 3]) > 0.03
+        noise = r.normal(0, 1.5, (H, W, 3)).astype(np.float32)
+        frames.append(np.clip(f_m + noise, 0, 255).astype(np.uint8))
+        clean.append(np.clip(f_c + noise, 0, 255).astype(np.uint8))
+        marks.append(mk)
+        occs.append(np.zeros((H, W), bool))
+    return frames, clean, marks, occs
+
+
+if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("warp"):
+    os.makedirs(OUT, exist_ok=True)
+    ps = proc_skin()
+    asx, acen = astro_skin()
+    for name, skin, cen, kind in [("warp_mole", ps, (900, 600), "mole"), ("warp_birth", ps, (900, 600), "birth"),
+                                  ("warp_tattoo", ps, (900, 600), "tattoo"), ("warp_astro", asx, acen["cheek"], "mole")]:
+        layer, lc = mark_layer(kind)
+        frames, clean, marks, occs = render_warp(skin, cen, layer, lc)
+        write(name, frames, crf=24)
+        write(name + "_clean", clean, crf=24)
+        np.savez_compressed(os.path.join(OUT, f"pr_{name}_gt.npz"), mark=np.array(marks), occ=np.array(occs),
+                            ref=frames[20], refmask=finger_mask(marks[20]), ref_t=20 / FPS)
+        print(name, "ok")
+elif __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("cut"):
     os.makedirs(OUT, exist_ok=True)
     ps = proc_skin()
     asx, acen = astro_skin()

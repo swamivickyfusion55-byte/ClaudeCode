@@ -57,6 +57,45 @@ if hasattr(cp, "_timeline_strip"):
         json.dump(list(tl), open(WORK + "/tl.json", "w")); return _orig_tl(tl, fps, nslots, bucket_sec)
     cp._timeline_strip = _tl_wrap
 t_load = time.perf_counter(); cp._load(prefer_gpu=False); t_load = time.perf_counter() - t_load
+# v11.2.99: emulate the detector losing faces while two faces are in contact (a kiss): DROP_CONTACT=b drops the right-hand
+# face, =both drops both, on full-frame detector calls k of each contact run with lo <= k % per < hi (DROP_RUN="lo:hi:per");
+# while a full-frame call is being dropped, the pipeline's crop re-detections in that frame find nothing either.
+if os.environ.get("DROP_CONTACT"):
+    _orig_fa_get = cp._fa_get
+    _DROP = {"k": 0, "dropped": 0, "calls": 0, "active": False, "crop_dropped": 0, "full": 0, "right_x": None}
+    _lo, _hi, _per = (int(v) for v in os.environ.get("DROP_RUN", "8:26:60").split(":"))
+    def _fa_get_drop(img, *a, **k):
+        faces = _orig_fa_get(img, *a, **k)
+        try:
+            fl = list(faces or [])
+        except Exception:
+            return faces
+        full = img is not None and img.shape[0] * img.shape[1] >= _DROP["full"]
+        if full:
+            _DROP["full"] = max(_DROP["full"], img.shape[0] * img.shape[1])
+            _DROP["active"] = False
+            if len(fl) >= 2:
+                bb = sorted(fl, key=lambda f: float(f.bbox[0]))
+                l, r = bb[0].bbox, bb[-1].bbox
+                if float(r[0] - l[2]) < 0.15 * float(l[2] - l[0]):          # touching / overlapping
+                    _DROP["calls"] += 1
+                    kk = _DROP["k"]; _DROP["k"] += 1
+                    if _lo <= kk % _per < _hi:
+                        _DROP["dropped"] += 1
+                        _DROP["active"] = True
+                        if os.environ["DROP_CONTACT"] == "both":
+                            return [] if not isinstance(faces, tuple) else tuple()
+                        keep = [f for f in fl if f is not bb[-1]]
+                        return keep if not isinstance(faces, tuple) else tuple(keep)
+            return faces
+        if _DROP["active"]:                                                   # a crop re-detection in a dropped frame
+            _DROP["crop_dropped"] += 1
+            if os.environ["DROP_CONTACT"] == "both" or not fl:
+                return [] if not isinstance(faces, tuple) else tuple()
+        return faces
+    cp._fa_get = _fa_get_drop
+    import atexit
+    atexit.register(lambda: print("DROP_CONTACT", os.environ["DROP_CONTACT"], _DROP, flush=True))
 # wrap the ORT-level models once they exist
 fa, sw = cp._fa, cp._sw
 def wrap_method(obj, meth, label):

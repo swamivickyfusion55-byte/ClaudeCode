@@ -12,7 +12,7 @@ def frames(p):
 L = lambda im: cv2.cvtColor(im, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
 for name in sys.argv[2:]:
     g = np.load(f"{sys.argv[1]}/pr_{name}_gt.npz"); mark, occ = g["mark"], g["occ"]
-    out, cl, inp = frames(f"/tmp/claude-0/prout_{name}.avi"), frames(f"{sys.argv[1]}/pr_{name}_clean.mp4"), frames(f"{sys.argv[1]}/pr_{name}.mp4")
+    out, cl, inp = frames(f"{__import__('os').environ.get('OUTDIR', '/tmp/claude-0')}/prout_{name}.avi"), frames(f"{sys.argv[1]}/pr_{name}_clean.mp4"), frames(f"{sys.argv[1]}/pr_{name}.mp4")
     rin, rrim, rout, cin, n = [], [], [], [], 0
     k = np.ones((5, 5), np.uint8)
     for i in range(min(len(out), len(mark))):
