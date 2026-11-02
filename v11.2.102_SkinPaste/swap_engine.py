@@ -5135,7 +5135,7 @@ class PatchTrack:
                 found = _pr_find_mark(gcur_, hole, core, self.mark_pol, self.mark_con, self.core_area * scale * scale,
                                       int(min(80, 2 * reach + 10)), zone_r=int(reach))
                 wide = found is not None
-                unsure = found is None and evid0 < 0.3
+                unsure = found is None and evid0 < 0.12
             if found is not None:
                 mnow, cen, area, mstrong = found
                 yy_, xx_ = np.nonzero(core)
@@ -5216,8 +5216,8 @@ class PatchTrack:
         if want >= 12 and float(core.sum()) < 0.3 * want:          # the mark is (mostly) outside the picture
             PATCH_STATS["frames_refused"] += 1
             return frame
-        if core.sum() >= 12 and float((keep[core] < 0.5).mean()) < 0.3:
-            PATCH_STATS["frames_refused"] += 1
+        if core.sum() >= 12 and float((keep[core] < 0.5).mean()) < (0.15 if PATCH_CFG.get("opaque", False) else 0.3):
+            PATCH_STATS["frames_refused"] += 1                  # (v11.2.102: only when the object covers nearly all of the core)
             return frame
         # lighting: (current - anchor) on the clean ring, spread smoothly over the hole
         valid = ~hole & inside & (keep < 0.5)
