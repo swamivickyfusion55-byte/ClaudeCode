@@ -4476,7 +4476,7 @@ def _pr_find_mark(g, hole, core, pol, con, area_exp, reach, zone_r=3):
     keep = cand & cv2.dilate(seeds.astype(np.uint8), _pr_disk(rg)).astype(bool)
     keep |= seeds
     area = int(keep.sum())
-    if area < 0.12 * area_exp or area > 3.5 * area_exp:
+    if area < 0.12 * area_exp or area > 2.4 * area_exp:          # (a blob 3x the mark is the scene's structure, not the mark)
         return None
     y2, x2 = np.nonzero(keep)
     full = np.zeros((Hg, Wg), bool)
@@ -5001,10 +5001,11 @@ class PatchTrack:
                 continue
             Aa, Ab = self.A[a], self.A[b]
             if gmax > 0 and g <= gmax and np.linalg.norm(Aa @ c - Ab @ c) <= tol + 40.0 * (g + 1):
+                ends_weak = a in self.weak or b in self.weak     # (a rescued end is a guess: what lies between is too)
                 for j in range(1, g + 1):
                     w = j / float(g + 1)
                     new[a + j] = ((1.0 - w) * Aa + w * Ab, 0.55 if g <= 6 else 0.4)
-                    if g > 6:                                    # (a short bridge is as good as a followed frame)
+                    if g > 6 or ends_weak:                       # (a short bridge between two followed frames is as good as one)
                         strong_skip.add(a + j)
                     PATCH_STATS["frames_bridged"] += 1
             elif hmax > 0:                                       # a longer gap: hold both ends' poses into it
@@ -5170,6 +5171,11 @@ class PatchTrack:
                             perp = np.sqrt(np.maximum(0.0, np.sum(dv * dv, axis=1) - t * t * nu))
                             lm = np.zeros(near.shape, bool)
                             lm[nyx] = (t > 0.1) & (t < 1.3) & (perp < 30.0)
+                if (idx in self.weak or wide) and self.mark_bgr is not None:
+                    n_all, n_ok = int((mstrong & near).sum()), int((mstrong & near & lm).sum())
+                    if n_all >= 4 and n_ok < 0.6 * n_all:       # not the mark's colour: structure of the scene, not the mark
+                        PATCH_STATS["frames_weak_skipped"] += 1
+                        return frame
                 near = near & lm
                 found = (found[0] & near, found[1], found[2], mstrong & near)        # only what is at the mark itself
                 hole = hole | (cv2.dilate(mstrong.astype(np.uint8) & near.astype(np.uint8), _pr_disk(2)).astype(bool)
@@ -5206,7 +5212,7 @@ class PatchTrack:
             PATCH_STATS["frames_gated"] += 1
         # nothing like the mark was found where the pose puts it, the core does not look like it, and no object explains that:
         # the pose is wrong here - paint NOTHING (a patch of skin on the wrong place is worse than a frame without the patch)
-        if unsure and float(keep[core].mean() if core.any() else 0.0) < 0.3:
+        if unsure and (PATCH_CFG.get("opaque", False) or float(keep[core].mean() if core.any() else 0.0) < 0.3):
             PATCH_STATS["frames_refused"] += 1
             return frame
         # last safeguard: the mark's own core must still look like the mark. If it does not (covered by an object,
