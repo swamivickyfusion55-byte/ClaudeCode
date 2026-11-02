@@ -7048,10 +7048,12 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # v11.2.99 (SDOS-099): lost while touching another face (a kiss): held at full strength,
                         # bridged across a gap of up to CONTACT_HOLD_SEC, never cut short by a blind span
                         stats["contact_hold"] = stats.get("contact_hold", 0) + 1
+                        # (held at the LAST REAL position from the first held frame: heads in a kiss do not move
+                        #  ballistically - a few extrapolated frames and then the snap back to it was a visible jump)
                         rec = _geom_for_frame(_tl, g, max(taper, _contact_hold),
                                               max_bracket=max(max_bracket_frames, _contact_hold),
                                               end_gap=end_gap,
-                                              hold_after=_cadence_taper,
+                                              hold_after=0.5,
                                               flat=_contact_flat)
                         if rec is not None and (not rec.get("det") or _cgap > max_bracket_frames):
                             rec = dict(rec)                  # (a gap the plain path would not have bridged)
