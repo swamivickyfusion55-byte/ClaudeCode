@@ -1,5 +1,5 @@
 """usage: video_test.py ENGINE_DIR CLIPDIR name[,name...] [--nomodel] [--save] [--start=N]
---start=N: only frames N.. (a later part of a split job: the painted frame is not in it).
+--views=2: also the second painted position (make_patchclip.py cut clips); --start=N: only frames N.. (a later part of a split job: the painted frame is not in it).
 PATCH_MODULE=swap_engine with ENGINE_DIR = a pack folder tests the pack's own copy.
 Runs Patch Removal (the engine's own planner + per-frame removal) on make_patchclip.py clips and scores it against the
 clean twin (synthetic + public photos, no user footage). Per clip, over the frames where the mark is in the picture:
@@ -15,6 +15,7 @@ ENGINE, CLIPS, NAMES = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
 NOMODEL = "--nomodel" in sys.argv
 SAVE = "--save" in sys.argv
 START = int(next((a.split("=")[1] for a in sys.argv if a.startswith("--start=")), "0"))
+VIEWS = int(next((a.split("=")[1] for a in sys.argv if a.startswith("--views=")), "1"))
 sys.path.insert(0, ENGINE)
 import importlib
 E = importlib.import_module(os.environ.get("PATCH_MODULE", "patchfix"))
@@ -57,7 +58,10 @@ for name in NAMES:
     thumbs = [E._pr_thumb(x) for x in grays]
     t0 = time.time()
     msgs = []
-    tracks = E.plan_tracks([(g["ref"], g["refmask"], int(round(float(g["ref_t"]) * 30)) - START, 45)], (inp[0].shape[1], inp[0].shape[0]),
+    specs = [(g["ref"], g["refmask"], int(round(float(g["ref_t"]) * 30)) - START, 45, "m1")]
+    if VIEWS >= 2 and "ref2" in g:          # v11.2.97: the same mark painted at a second position
+        specs.append((g["ref2"], g["refmask2"], int(round(float(g["ref_t2"]) * 30)) - START, 45, "m1"))
+    tracks = E.plan_tracks(specs, (inp[0].shape[1], inp[0].shape[0]),
                            n, thumbs, lambda i: grays[i], lambda i: inp[i], log=msgs.append)
     t_plan = time.time() - t0
     t0 = time.time()

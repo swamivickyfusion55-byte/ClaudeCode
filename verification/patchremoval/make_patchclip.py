@@ -9,7 +9,7 @@ Skins: 'proc' (procedural skin: shading, mottling, pores, fine noise) and 'astro
 astronaut portrait, 2x: a mole on the cheek, and one on the jaw line where skin meets the shadow/collar - an edge case). Marks: 'mole' (dark brown, soft edge, ~16 px), 'tattoo' (blue-black ink
 strokes, ~150x90 px), 'birth' (irregular light-brown birthmark, ~60 px)."""
 import sys, os, subprocess, cv2, numpy as np
-OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...]
+OUT = sys.argv[1] if len(sys.argv) > 1 else "."      # usage: make_patchclip.py OUTDIR [name,name...] | make_patchclip.py OUTDIR cut
 FF = "/tmp/claude-0/bin/ffmpeg"
 W, H, N, FPS = 1280, 720, 150, 30
 
@@ -138,7 +138,52 @@ def write(name, frames):
     os.remove(tmp)
 
 
-if __name__ == "__main__":
+def render_cut(skin, centre, layer, lc):
+    """v11.2.97: the person's position changes - a shot change at frame 75 to the same skin turned 35 deg, 1.7x larger,
+    darker, moving on. One painted position cannot know what the mark looks like after the cut; a second one can."""
+    frames, clean, marks, occs = [], [], [], []
+    r = np.random.default_rng(13)
+    lay = np.zeros(skin.shape[:2] + (4,), np.float32)
+    lh, lw = layer.shape[:2]
+    y0, x0 = centre[1] - lc[1], centre[0] - lc[0]
+    lay[y0:y0 + lh, x0:x0 + lw] = layer
+    marked = skin.astype(np.float32) * (1 - lay[..., 3:]) + lay[..., :3] * lay[..., 3:]
+    for i in range(N):
+        t = i / FPS
+        if i < 75:
+            ang, sc, br = 5.0 * np.sin(2 * np.pi * t / 3.0), 1.0, 1.0
+            tx, ty = 120 * np.sin(2 * np.pi * t / 2.7), 40 * np.sin(2 * np.pi * t / 2.1)
+        else:
+            ang, sc, br = 35.0 + 6.0 * np.sin(2 * np.pi * t / 2.5), 1.7 + 0.08 * np.sin(2 * np.pi * t / 1.9), 0.82
+            tx, ty = -180 + 90 * np.sin(2 * np.pi * t / 2.3), 60 + 30 * np.sin(2 * np.pi * t / 1.7)
+        M = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, sc)
+        M[0, 2] += W / 2 - centre[0] + tx
+        M[1, 2] += H / 2 - centre[1] + ty
+        f_m = cv2.warpAffine(marked, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT) * br
+        f_c = cv2.warpAffine(skin.astype(np.float32), M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT) * br
+        mk = cv2.warpAffine(lay[..., 3], M, (W, H), flags=cv2.INTER_LINEAR) > 0.03
+        noise = r.normal(0, 1.5, (H, W, 3)).astype(np.float32)
+        frames.append(np.clip(f_m + noise, 0, 255).astype(np.uint8))
+        clean.append(np.clip(f_c + noise, 0, 255).astype(np.uint8))
+        marks.append(mk)
+        occs.append(np.zeros((H, W), bool))
+    return frames, clean, marks, occs
+
+
+if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("cut"):
+    os.makedirs(OUT, exist_ok=True)
+    ps = proc_skin()
+    asx, acen = astro_skin()
+    for name, skin, cen, kind in [("cut_tattoo", ps, (900, 600), "tattoo"), ("cut_mole", asx, acen["cheek"], "mole")]:
+        layer, lc = mark_layer(kind)
+        frames, clean, marks, occs = render_cut(skin, cen, layer, lc)
+        write(name, frames)
+        write(name + "_clean", clean)
+        np.savez_compressed(os.path.join(OUT, f"pr_{name}_gt.npz"), mark=np.array(marks), occ=np.array(occs),
+                            ref=frames[20], refmask=finger_mask(marks[20]), ref_t=20 / FPS,
+                            ref2=frames[110], refmask2=finger_mask(marks[110], seed=4), ref_t2=110 / FPS)
+        print(name, "ok")
+elif __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     ps = proc_skin()
     asx, acen = astro_skin()

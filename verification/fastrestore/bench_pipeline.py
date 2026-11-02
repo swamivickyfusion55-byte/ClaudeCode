@@ -91,7 +91,11 @@ cfg = dict(max_seconds=int(KW.get("secs", 360)), fps=int(KW.get("fps", 30)), res
 if KW.get("patches"):          # Patch Removal (v11.2.96): make_patchclip.py ground truth -> the app's frame + mask
     _g = np.load(KW["patches"]); _pi, _pm = WORK + "/patch_frame.jpg", WORK + "/patch_mask.png"
     cv2.imwrite(_pi, _g["ref"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm, _g["refmask"])
-    cfg["patches"] = [dict(image=_pi, mask=_pm, t=float(_g["ref_t"]))]
+    cfg["patches"] = [dict(image=_pi, mask=_pm, t=float(_g["ref_t"]), group="m1")]
+    if KW.get("views") == "2" and "ref2" in _g:     # v11.2.97: the same mark painted at a second position
+        _pi2, _pm2 = WORK + "/patch_frame2.jpg", WORK + "/patch_mask2.png"
+        cv2.imwrite(_pi2, _g["ref2"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm2, _g["refmask2"])
+        cfg["patches"].append(dict(image=_pi2, mask=_pm2, t=float(_g["ref_t2"]), group="m1"))
 t0 = time.perf_counter()
 for _kv in filter(None, os.environ.get("OVR", "").split(",")):
     _k, _v = _kv.split("="); swap_engine._P[_k] = float(_v)

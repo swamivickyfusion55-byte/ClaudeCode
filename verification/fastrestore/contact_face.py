@@ -7,7 +7,7 @@ and moved into every frame by the exact similarity the clip used (fitted from th
   B on A's face       = B's paint on A's visible face, % (B is painted last, so all of it is seen)
   own face painted    = each face's paint on its own visible face (eroded 6 px), %
 Contact frames only (the two people within 12 px)."""
-import sys, cv2, numpy as np
+import sys, os, cv2, numpy as np
 sys.path.insert(0, "/home/user/ClaudeCode/v11.2.95_OcclusionPro"); import swap_engine as E
 from insightface.app import FaceAnalysis
 B = "/tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/bench/"
@@ -56,6 +56,16 @@ for arg in sys.argv[1:]:
         if fa_v.sum() > 1500:
             R["b_on_a"].append(float(W[1][fa_v & ~b].mean()) * 100 if (fa_v & ~b).any() else 0.0)
             R["own_a"].append(float(W[0][cv2.erode(fa_v.astype(np.uint8), ero).astype(bool)].mean()) * 100)
+    if os.environ.get("SERIES"):            # per-frame own-face paint of A and B, and the dips (flicker) in it
+        for key in ("own_a", "own_b"):
+            v = np.array(R[key])
+            if len(v) < 7:
+                continue
+            med = np.array([np.median(v[max(0, i - 3):i + 4]) for i in range(len(v))])
+            dips = int(((med - v) > 8.0).sum())
+            jump = np.abs(np.diff(v))
+            print(f"   {key}: frame-to-frame change mean {jump.mean():.2f} pts, max {jump.max():.1f}; dips > 8 pts below the "
+                  f"local median on {dips} frames; series: " + " ".join(f"{x:.0f}" for x in v))
     s = lambda k: f"{np.mean(R[k]):.1f}% (worst {np.max(R[k]):.1f}%)" if R[k] else "-"
     print(f"{run}: A's paint seen on B's face {s('seen')} [A raw {s('a_on_b')}]; B's paint on A's face {s('b_on_a')}; "
           f"own face painted A {np.mean(R['own_a']):.0f}% (lowest {np.min(R['own_a']):.0f}%), B {np.mean(R['own_b']):.0f}% (lowest {np.min(R['own_b']):.0f}%)")

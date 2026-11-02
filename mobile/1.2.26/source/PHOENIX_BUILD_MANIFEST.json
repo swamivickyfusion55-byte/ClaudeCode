@@ -1,0 +1,29 @@
+{
+  "product": "Phoenix Mobile 2",
+  "version": "1.1.0",
+  "client_release": "1.1.0-speed-optimized",
+  "modes": [
+    "local",
+    "huggingface"
+  ],
+  "local": {
+    "runtime": "onnxruntime-android",
+    "model_pack": "private HF repository, SHA-256 verified",
+    "video_compositor": "M3 pending exact licensed model graph"
+  },
+  "remote": {
+    "protocol": "Gradio Space REST queue API",
+    "token_storage": "Android Keystore AES-GCM",
+    "ui": "Image + Video + persistent History; file-only video input/output"
+  },
+  "performance": {
+    "release": "SDOS speed optimization",
+    "features": [
+      "incremental Gradle builds",
+      "bounded Gradle workers",
+      "cached HF discovery",
+      "compile-safe image quality setter",
+      "no forced clean build"
+    ]
+  }
+}
