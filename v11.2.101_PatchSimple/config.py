@@ -285,7 +285,7 @@ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
 VERSION = "v11.2.101"
-BUILD = "PatchSimple (work in progress, not released) · simpler, faster Patch Removal with stronger cover"
+BUILD = "PatchSimple · simpler, faster Patch Removal with a stronger cover; faces held through a kiss; up to 10 positions per mark"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

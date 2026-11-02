@@ -4041,8 +4041,8 @@ PATCH_CFG = {
     "bridge_max": 3,           # gaps of up to this many frames between followed frames are bridged (no 1-frame "opening")
     "max_views": 12,           # painted positions in all (several per mark)
     "grow_band": 0.0,          # dark rim outside the painted area joined to it; v11.2.98: OFF (outside stays as it is)
-    "cover": 1.15,             # v11.2.100: stronger cover - the fill is matched UP to the frame's own skin on the stroke's
-    "cover_max": 8.0,          #   margin (it is never darker than that skin; at most this many levels; 1.15 = a little over)
+    "cover": 1.5,              # v11.2.101: stronger cover - the fill is matched UP to the frame's own skin on the stroke's
+    "cover_max": 10.0,         #   margin (it is never darker than that skin; at most this many levels; 1.5 = over by half)
     "lift": 1.0,               # v11.2.98: no faint dark blob may remain under the mark: the fill is lifted (inside the
     "lift_max": 6.0,           #   painted area only, very smoothly, by at most this many levels) to the level around it
     "feather_px": 1.5,         # soft edge of the fill
