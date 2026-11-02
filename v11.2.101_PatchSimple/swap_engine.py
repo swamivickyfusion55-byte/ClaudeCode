@@ -4041,6 +4041,8 @@ PATCH_CFG = {
     "bridge_max": 3,           # gaps of up to this many frames between followed frames are bridged (no 1-frame "opening")
     "max_views": 20,           # painted positions in all (several per mark) (v11.2.100: was 12)
     "grow_band": 0.0,          # dark rim outside the painted area joined to it; v11.2.98: OFF (outside stays as it is)
+    "follow_margin": 45,       # v11.2.101: a painted position is followed from its anchor to the NEXT painted position and this many
+                               #   frames past it (not through the whole video): 10 positions cost ~2-3 x one, not 10 x
     "cover": 1.5,              # v11.2.101: stronger cover - the fill is matched UP to the frame's own skin on the stroke's
     "cover_max": 10.0,         #   margin (it is never darker than that skin; at most this many levels; 1.5 = over by half)
     "lift": 1.0,               # v11.2.98: no faint dark blob may remain under the mark: the fill is lifted (inside the
@@ -4736,13 +4738,16 @@ class PatchTrack:
             return A1, q, fpts, fapts
         return A1, q, None, None
 
-    def track(self, gray_at, idxs):
+    def track(self, gray_at, idxs, tick=None):
         """Follow the area over the frame indices idxs (moving away from the anchor, the anchor first). After a
-        gap, the area found again is also followed back into the gap."""
+        gap, the area found again is also followed back into the gap. tick() is called once per frame; if it returns
+        True the following stops (progress reporting and cancelling, v11.2.101)."""
         t0 = cv2.getTickCount()
         prev, pts, apts, lastA, velA = None, None, None, None, None
         lost = 0
         for p, idx in enumerate(idxs):
+            if tick is not None and tick():
+                break
             gray = gray_at(idx)
             if idx == self.anchor_idx:
                 A = np.eye(2, 3, dtype=np.float64)
@@ -5085,9 +5090,11 @@ class PatchGroup:
         return frame
 
 
-def plan_tracks(specs, size_wh, n, thumbs, gray_at, bgr_at, log=None):
+def plan_tracks(specs, size_wh, n, thumbs, gray_at, bgr_at, log=None, progress=None, stop=None):
     """specs: [(ref_bgr, mask_uint8, hint_index, window[, group])] - several entries with the same group are views of
-    one mark at different positions. -> list of PatchGroup ready to apply (by frame index)."""
+    one mark at different positions. -> list of PatchGroup ready to apply (by frame index).
+    progress(text): called about once a second while following (v11.2.101: the job no longer sits silent);
+    stop(): True cancels (the result is then an empty list)."""
     groups = {}
     order = []
     dropped = max(0, len(specs) - int(PATCH_CFG.get("max_views", 20)))
@@ -5103,10 +5110,35 @@ def plan_tracks(specs, size_wh, n, thumbs, gray_at, bgr_at, log=None):
     if dropped and log:                                      # never silent: the job log says what was left out
         log("WARNING: %d painted position(s) were left out - the engine takes at most %d marks and %d positions per job"
             % (dropped, int(PATCH_CFG["max_patches"]), int(PATCH_CFG.get("max_views", 20))))
+    # 1) find every painted position in this video (cheap), 2) follow each through its own stretch
+    located = []
+    for m, gk in enumerate(order):
+        if stop is not None and stop():
+            return []
+        located.append(_locate_views(groups[gk], m + 1, size_wh, n, thumbs, gray_at, log, stop))
+    total = max(1, sum(f["hi"] - f["lo"] + 1 for fl in located for f in fl))
+    st = {"done": 0, "t0": time.time(), "last": 0.0, "mark": 0, "marks": len(order)}
+
+    def tick():
+        if stop is not None and stop():
+            return True
+        st["done"] += 1
+        now = time.time()
+        if progress is not None and now - st["last"] >= 1.0:
+            st["last"] = now
+            frac = min(1.0, st["done"] / float(total))
+            eta = (now - st["t0"]) * (1.0 - frac) / max(frac, 1e-3)
+            progress("Patch removal: following mark %d of %d · %d%% · about %s left"
+                     % (st["mark"], st["marks"], int(100 * frac), ("%d min" % int(eta / 60 + 0.5)) if eta >= 90 else ("%d s" % int(eta))))
+        return False
+
     out = []
     for m, gk in enumerate(order):
+        st["mark"] = m + 1
         PATCH_STATS["patches"] += 1
-        tracks = _plan_views(groups[gk], m + 1, size_wh, n, thumbs, gray_at, bgr_at, log)
+        tracks = _follow_views(located[m], m + 1, n, gray_at, bgr_at, log, tick, stop)
+        if stop is not None and stop():
+            return []
         if tracks:
             out.append(PatchGroup(tracks))
             if log and len(tracks) > 1:
@@ -5117,10 +5149,14 @@ def plan_tracks(specs, size_wh, n, thumbs, gray_at, bgr_at, log=None):
     return out
 
 
-def _plan_views(views, mark_no, size_wh, n, thumbs, gray_at, bgr_at, log):
-    tracks = []
+def _locate_views(views, mark_no, size_wh, n, thumbs, gray_at, log, stop=None):
+    """Where is each painted position of this mark in this video? -> [{anchor, hole, score, tag, lo, hi}], by anchor frame,
+    with the stretch each one is to be followed over: from the previous painted position (and follow_margin frames
+    before it) to the next one (and follow_margin frames past it); the first goes back to frame 0, the last to the end."""
+    found = []
     for v, (ref, rmask, hint, window) in enumerate(views):
-        k = mark_no - 1
+        if stop is not None and stop():
+            return []
         tag = "%d" % mark_no if len(views) == 1 else "%d.%d" % (mark_no, v + 1)
         PATCH_STATS["views"] += 1
         hint = int(np.clip(hint, 0, max(0, n - 1)))
@@ -5134,15 +5170,30 @@ def _plan_views(views, mark_no, size_wh, n, thumbs, gray_at, bgr_at, log):
                 log("patch %s: neither the painted frame nor the painted area was found in this video - skipped" % tag)
             continue
         i, hole, sc = loc
-        if any(t.anchor_idx == i for t in tracks):              # (two positions painted on the same frame)
+        if any(f["anchor"] == i for f in found):                # (two positions painted on the same frame)
             continue
+        found.append({"anchor": i, "hole": hole, "score": sc, "tag": tag})
+    found.sort(key=lambda f: f["anchor"])
+    mg = int(PATCH_CFG.get("follow_margin", 45))
+    for j, f in enumerate(found):
+        f["lo"] = 0 if j == 0 else max(0, found[j - 1]["anchor"] - mg)
+        f["hi"] = n - 1 if j == len(found) - 1 else min(n - 1, found[j + 1]["anchor"] + mg)
+    return found
+
+
+def _follow_views(found, mark_no, n, gray_at, bgr_at, log, tick, stop=None):
+    tracks = []
+    for f in found:                                              # ascending anchors: one pass over the video serves bgr_at
+        if stop is not None and stop():
+            break
+        i = f["anchor"]
         PATCH_STATS["anchored"] += 1
-        tr = PatchTrack(i, bgr_at(i), hole)
-        tr.track(gray_at, list(range(i, n)))
-        tr.track(gray_at, list(range(i, -1, -1)))
+        tr = PatchTrack(i, bgr_at(i), f["hole"])
+        tr.track(gray_at, list(range(i, f["hi"] + 1)), tick)
+        tr.track(gray_at, list(range(i, f["lo"] - 1, -1)), tick)
         tr.smooth()
         if log:
             log("patch %s: anchored on frame %d (match %.2f), %d px, followed on %d of %d frames"
-                % (tag, i, sc, int(tr.hole_roi.sum()), len(tr.A), n))
+                % (f["tag"], i, f["score"], int(tr.hole_roi.sum()), len(tr.A), f["hi"] - f["lo"] + 1 if len(found) > 1 else n))
         tracks.append(tr)
     return tracks

@@ -2635,19 +2635,37 @@ def _patch_prepare(vp, specs, start_frame, end_frame, step, lim, ow, oh, upright
     def gray_at(i):
         return cv2.imdecode(grays[i], cv2.IMREAD_GRAYSCALE)
 
+    _scan = {"gen": None, "pos": -1}
+
     def bgr_at(i):
         if i in keep_bgr:
             return cv2.imdecode(keep_bgr[i], cv2.IMREAD_COLOR)
-        for j, f in _frames():                       # (only when the mark was found far from the app's time)
+        # (only when the mark was found far from the app's time) - one forward pass serves every such request in
+        # ascending order (v11.2.101: it used to decode the video from its start for each one)
+        if _scan["gen"] is None or i <= _scan["pos"]:
+            if _scan["gen"] is not None:
+                _scan["gen"].close()
+            _scan["gen"], _scan["pos"] = _frames(), -1
+        for j, f in _scan["gen"]:
+            _scan["pos"] = j
             if j == i:
                 return f
+            if j > i:
+                break
         return None
 
     nmarks = len({sp[3] if sp[3] is not None else ("_v%d" % k) for k, sp in enumerate(specs)})
     u(11, f"Patch removal: finding and following {nmarks} mark(s) ({len(specs)} painted position(s))…")
     msgs = []
-    tracks = _E.plan_tracks([(sp[0], sp[1], h, win, sp[3]) for sp, h in zip(specs, hints)], (ow, oh), n, thumbs, gray_at,
-                            bgr_at, log=msgs.append)
+    def _progress(text):
+        u(11, text)
+
+    try:
+        tracks = _E.plan_tracks([(sp[0], sp[1], h, win, sp[3]) for sp, h in zip(specs, hints)], (ow, oh), n, thumbs, gray_at,
+                                bgr_at, log=msgs.append, progress=_progress, stop=cxl)
+    finally:
+        if _scan["gen"] is not None:
+            _scan["gen"].close()
     for m_ in msgs:
         logging.info("PATCH-REMOVAL %s", m_)
     logging.info("PATCH-REMOVAL planned in %.1fs (%d frames read; inpainter: %s)", time.perf_counter() - t0, n,
