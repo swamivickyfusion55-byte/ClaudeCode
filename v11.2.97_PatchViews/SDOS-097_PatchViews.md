@@ -33,19 +33,28 @@ The second position mostly improves the fill: after the cut, the fill matches th
 
 On real footage the gain should be larger: there a 3-D turn changes how the area looks, not just its size and angle. Here even one position was found again after the cut.
 
-Full job with two positions (from the pack): RESULT_PV.
+**Full jobs from the zip** (the real render path; tattoo on procedural skin, no face):
 
-**The earlier clips are unchanged or better** (v11.2.96 → v11.2.97, frames where the mark stayed):
-
-| Clip | v11.2.96 | v11.2.97 |
+| | Mark left | Frames where the mark stayed |
 |---|---|---|
-| procedural mole | 13 | 10 |
-| soft birthmark | 21 | 13 |
-| tattoo | 6 | 6 |
-| mole on the cheek | 6 | 6 |
-| mole on the lip edge | 6 | 6 |
+| 1 position | 4.7 % | 2 of 150 |
+| 2 positions | 4.2 % | 2 of 150 |
 
-The mark left on average is within 0.7 points of v11.2.96 on every clip, and nothing changed away from the mark anywhere. I also tried a wider painted halo (3 px). It measured worse (4.0 % → 7.1 % left), so it stays at 2 px.
+With a face swap in the same job (the mole on the cheek), both positions anchored and together followed the mark on 150 of 150 frames.
+
+**Earlier clips: identical to v11.2.96** on the final engine, run from the zip:
+
+| Clip | Mark left | Frames where the mark stayed |
+|---|---|---|
+| procedural mole | 10.6 % | 13 of 136 |
+| mole on the cheek | 4.0 % | 6 of 136 |
+| tattoo | 5.0 % | 6 of 140 |
+| birthmark | 17.3 % | 21 of 140 |
+| mole on the lip edge | 7.2 % | 6 of 136 |
+
+Nothing changed away from the mark, and objects stay untouched (0.0–1.7 %). The gap bridging and the edge repair seldom trigger on these synthetic clips (the edge repair acted on 3–27 frames per job). They target the openings seen on real footage and cost nothing where they don't trigger.
+
+**A wider halo was measured and not taken.** A 3-px halo cut the frames where the mark stayed on the procedural mole (13 → 10) and the birthmark (21 → 13). But it left more of the mark on the photo clips (cheek 4.0 → 7.1 %, lip edge 7.2 → 8.4 %, tattoo 5.0 → 5.7 %). It stays at 2 px; `halo_px` in `swap_engine.py` is the tunable.
 
 ## 2. App 1.2.26: the editor
 
@@ -84,9 +93,23 @@ In A's crop, most of what the occluder net (XSeg) sees is the **other** face. Tr
 - In **full contact**, when that zone covers 15 % or more of the crop, the net is off for the whole face. The face-against-face rule (one face per pixel, held front/behind order) decides alone.
 - Faces not touching another face are unchanged: objects are still cut on the frame they arrive.
 
+A first version only calmed the net within that zone next to the other face. It changed nothing (the per-frame series was identical), because the net's cuts fell on the face behind's own visible strip, not on the contact line. Hence the whole-face rule in full contact.
+
 Results:
 
-CONTACT_TABLE
+| Clip | Face behind: frame-to-frame change, mean / largest jump (v11.2.95 → v11.2.97) | Face behind painted, average (lowest) | Front face painted |
+|---|---|---|---|
+| **smooch** | 1.31 / 11.9 → **0.48 / 2.3** | 75 % (58) → **80 % (70)** | 89 % → 89 % |
+| deep overlap | 0.89 / 14.8 → **0.54 / 2.7** | 77 % (63) → 78 % (67) | 89 % → 89 % |
+| face mostly hidden | 1.05 / 5.7 → 0.99 / 5.6 | 68 % (46) → 69 % (46) | 89 % → 89 % |
+| cheek to cheek | 0.16 / 2.6 → 0.16 / 2.6 | 88 % → 88 % | 90 % → 90 % |
+
+On all four clips:
+- **0 reverted frames.**
+- **The face behind does not show on the front face** (0.3 % at most), as in v11.2.95.
+- **Overall flicker against the footage** ×1.03–1.11, as before.
+
+Objects, run from the zip: hand over the eye 0.4 % still painted while it holds, the same as v11.2.95.
 
 ## 4. Limits
 
