@@ -4041,10 +4041,10 @@ PATCH_CFG = {
     "bridge_max": 3,           # gaps of up to this many frames between followed frames are bridged (no 1-frame "opening")
     "max_views": 12,           # painted positions in all (several per mark)
     "grow_band": 0.0,          # dark rim outside the painted area joined to it; v11.2.98: OFF (outside stays as it is)
-    "lift": 0.0,               # v11.2.98: no faint dark blob may remain under the mark: the fill is lifted (inside the
+    "lift": 1.0,               # v11.2.98: no faint dark blob may remain under the mark: the fill is lifted (inside the
     "lift_max": 6.0,           #   painted area only, very smoothly, by at most this many levels) to the level around it.
-                               #   v11.2.99: OFF - the local multiplicative relighting no longer builds up that darkness
-                               #   (cheek clip 0.00 L without it), and the lift misread a shading gradient as residue
+                               #   v11.2.99: judged with the frame's lighting divided out (a shadow gradient over the
+                               #   mark was read as residue and over-lifted)
     "feather_px": 1.5,         # soft edge of the fill
     "light_sigma": 4.0,        # lighting change is measured on the ring at this smoothness
     "gate_thr": 22.0,          # object gate: colour distance (0-255) to the anchor's appearance, 2 px tolerance
@@ -5025,7 +5025,12 @@ class PatchTrack:
             fill = lf + (fill - lf) * g
         res = fill + dl
         core_now = (cv2.warpAffine(self.core_roi.astype(np.uint8) * 255, Mr, sz, flags=cv2.INTER_LINEAR) > 127) & hole
-        res = _pr_lift(np.where(valid[..., None], roi, res), res, hole & (keep < 0.5), core_now & (keep < 0.5))
+        if light is not None:                                   # v11.2.99: the lift looks at the content with this
+            un = lambda x: (x + 8.0) / light - 8.0              #   frame's lighting divided out - a shadow gradient
+            res = (_pr_lift(un(np.where(valid[..., None], roi, res)), un(res), hole & (keep < 0.5),   # over the mark is
+                            core_now & (keep < 0.5)) + 8.0) * light - 8.0                             # not "residue"
+        else:
+            res = _pr_lift(np.where(valid[..., None], roi, res), res, hole & (keep < 0.5), core_now & (keep < 0.5))
         a = _pr_alpha(hole) * (1.0 - keep)
         # edge repair (v11.2.97): dark mark pixels just outside the hole (skin bent a little, a pixel of tracking
         # error) are covered with the relit skin of the painted frame - the "opening" at the mark's edge

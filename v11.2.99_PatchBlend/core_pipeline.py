@@ -6998,8 +6998,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 return False
 
             def _contact_gap(slot, tl, g):
-                """True when frame g lies in a gap of this face's real sightings and the face was touching another face
-                at the sighting before the gap or the one after it."""
+                """Frame g lies in a gap of this face's real sightings and the face was touching another face at the
+                sighting before the gap or the one after it -> the gap's length in frames (0: not such a gap)."""
                 lo = hi = None
                 for gg, rr in tl:
                     if not rr.get("det"):
@@ -7010,9 +7010,13 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         hi = (gg, rr)
                         break
                 if lo is not None and lo[0] == g:
-                    return False
-                return bool((lo is not None and _touching(slot, lo[0], lo[1]))
-                            or (hi is not None and _touching(slot, hi[0], hi[1])))
+                    return 0
+                if not ((lo is not None and _touching(slot, lo[0], lo[1]))
+                        or (hi is not None and _touching(slot, hi[0], hi[1]))):
+                    return 0
+                if lo is not None and hi is not None:
+                    return max(1, hi[0] - lo[0])
+                return max(1, (g - lo[0]) if lo is not None else (hi[0] - g))
 
             def _records_at(g):
                 """Every slot's geometry for output frame ``g``."""
@@ -7039,7 +7043,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     _tl = _geom_hist.get(slot) or []
                     if _cut_list:
                         _tl = [(gg, rr) for (gg, rr) in _tl if _lo <= gg < _hi]
-                    if len(smap) > 1 and _contact_gap(slot, _tl, g):
+                    _cgap = _contact_gap(slot, _tl, g) if len(smap) > 1 else 0
+                    if _cgap:
                         # v11.2.99 (SDOS-099): lost while touching another face (a kiss): held at full strength,
                         # bridged across a gap of up to CONTACT_HOLD_SEC, never cut short by a blind span
                         stats["contact_hold"] = stats.get("contact_hold", 0) + 1
@@ -7048,6 +7053,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                               end_gap=end_gap,
                                               hold_after=_cadence_taper,
                                               flat=_contact_flat)
+                        if rec is not None and (not rec.get("det") or _cgap > max_bracket_frames):
+                            rec = dict(rec)                  # (a gap the plain path would not have bridged)
+                            rec["contact_held"] = True
                     else:
                         rec = _geom_for_frame(_tl, g, eff_taper,
                                               max_bracket=max_bracket_frames,
@@ -7100,6 +7108,26 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             _FMK.commit(forced)
                         _FMK.mark_swap(recs, g)
             key_indices_for_swap = selected
+
+            # v11.2.99 (SDOS-099): a face HELD through a contact gap is not swapped again on its held (interpolated)
+            # geometry - that crop is cut a little off the moving head and differs from the last real one, so the
+            # face jumped at every swap frame of the hold. The nearest crop from a real sighting is reused instead,
+            # when there is one (an earlier chunk's, or a real sighting among this chunk's swap frames).
+            _contact_skip = {}
+            try:
+                _real_in_chunk = set()
+                for _k in selected:
+                    for _sl, _r in (_records_at(gidx[_k]) or {}).items():
+                        if _r.get("det"):
+                            _real_in_chunk.add(_sl)
+                for _k in selected:
+                    for _sl, _r in (_records_at(gidx[_k]) or {}).items():
+                        if _r.get("contact_held") and (_sl in _real_in_chunk or _aligned_hist.get(_sl)):
+                            _contact_skip.setdefault(_k, set()).add(_sl)
+                            stats["contact_reuse"] = stats.get("contact_reuse", 0) + 1
+            except Exception as _e_cs:
+                logging.debug("contact reuse plan skipped: %s", _e_cs)
+                _contact_skip = {}
 
             # ---------------------------------------------------------------
             # Phase 2a (parallel) — run ONLY the swap network on the selected
@@ -7215,6 +7243,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 produced_crops = []
                 seen_src = set()
                 for slot, rec in records.items():
+                    if slot in _contact_skip.get(k, ()):
+                        continue                          # v11.2.99: held through contact - the real crop is reused
                     src = rec.get("src")
                     if src is None or id(src) in seen_src:
                         continue
@@ -7744,7 +7774,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             "detector_calls=%d (empty=%d); swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d; det_faces_avg=%.2f max=%d; "
             "det_passes=%d raw_faces=%d embeds=%d (%.2f embeds per raw face%s); "
             "shot_cuts=%d; "
-            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d occ_cut=%d/%d; "
+            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d/%d occ_cut=%d/%d; "
             "geom_errors=%d; "
             "PER-PERSON painted=%s recorded=%s picker_calls=%d picker_dropped_ref=%d; "
             "weak_kept=%d weak_dropped=%d; ID-GATE %s",
@@ -7763,7 +7793,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             "" if _DEFER_EMB_ON else " · deferral OFF",
             _CUT_STATS["cuts"],
             stats.get("revert_frames", 0), stats.get("blind_frames", 0),
-            stats.get("faint_frames", 0), stats.get("vis_reject_calls", 0), stats.get("contact_hold", 0),
+            stats.get("faint_frames", 0), stats.get("vis_reject_calls", 0), stats.get("contact_hold", 0), stats.get("contact_reuse", 0),
             _E.OCC_STATS.get("cut_frames", 0), _E.OCC_STATS.get("frames", 0),
             stats.get("record_geom_errors", 0),
             dict(sorted((stats.get("slot_painted") or {}).items())),
