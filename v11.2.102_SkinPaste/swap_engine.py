@@ -4048,7 +4048,8 @@ PATCH_CFG = {
     "opaque": True,            # the paste is opaque (no partial transparency): only strong evidence of an object holds it back
     "clone_texture": True,     # at the anchor: the fill gets the fine texture of clean skin beside the mark (copied, not synthetic)
     "max_views": 20,           # painted positions in all (several per mark) (v11.2.100: was 12)
-    "grow_band": 0.06,         # darker-than-skin rim around the painted area joins it (anchor; v11.2.102: back on)
+    "grow_band": 0.0,          # dark rim around the painted area joins it (v11.2.97; OFF: on a face it ate creases and shadows
+                               #   beside the mark - the per-frame mark finder covers the mark's own rim instead)
     "follow_margin": 45,       # v11.2.101: a painted position is followed from its anchor to the NEXT painted position and this many
                                #   frames past it (not through the whole video): 10 positions cost ~2-3 x one, not 10 x
     "cover": 1.5,              # v11.2.101: stronger cover - the fill is matched UP to the frame's own skin on the stroke's
@@ -4412,46 +4413,77 @@ def _pr_model_fill(img, hole):
     return out
 
 
-def _pr_find_mark(g, hole, core, pol, con, area_exp, reach):
+_PR_EVID = {"v": 1.0}          # how much like the mark the predicted core looks (share of its anchor contrast), set by _pr_find_mark
+
+
+def _pr_find_mark(g, hole, core, pol, con, area_exp, reach, zone_r=3):
     """v11.2.102: where is the MARK ITSELF in this picture? A mole, a tattoo, a birthmark differs from the skin around it by
     about ``con`` levels (darker when pol = +1, lighter when -1). Around the PREDICTED place (``hole``, searching ``reach`` px
-    further) the skin level is taken from OUTSIDE the search area (a smooth interpolation of it), and what departs from it with
-    the mark's polarity by a good part of ``con`` - in pieces that touch the predicted place, of about the mark's size - is the
-    mark. -> (mask bool, (x, y) centroid, area) or None."""
+    further) the skin level is taken from OUTSIDE the search area (a smooth interpolation of it); what departs from it with the
+    mark's polarity by half of ``con`` or more, in pieces that touch the mark's own predicted core, are the mark's strong
+    pixels (seeds), and the mark is those plus its soft edge (candidate pixels a few px from a seed at 30 % of ``con``).
+    Works on a crop around the predicted place. -> (mask, (x, y) centroid, area, seeds) in ``g``'s coordinates, or None."""
+    Hg, Wg = hole.shape
     ys, xs = np.nonzero(hole)
     if len(ys) < 4:
         return None
     size = max(int(np.ptp(ys)), int(np.ptp(xs))) + 1
-    srch = cv2.dilate(hole.astype(np.uint8), _pr_disk(reach)).astype(bool)
-    outer = cv2.dilate(srch.astype(np.uint8), _pr_disk(6)).astype(bool) & ~srch
+    pad = int(reach) + 12
+    cy0, cy1 = max(0, int(ys.min()) - pad), min(Hg, int(ys.max()) + 1 + pad)
+    cx0, cx1 = max(0, int(xs.min()) - pad), min(Wg, int(xs.max()) + 1 + pad)
+    hl = hole[cy0:cy1, cx0:cx1]
+    gc = g[cy0:cy1, cx0:cx1].astype(np.float32)
+    cr = None if core is None else core[cy0:cy1, cx0:cx1]
+    dist = cv2.distanceTransform((~hl).astype(np.uint8), cv2.DIST_L2, 3)
+    srch = dist <= reach
+    outer = (dist > reach) & (dist <= reach + 6)
     if outer.sum() < 40:
         return None
-    lo, den = _pr_lowpass(g, outer, max(3.0, size / 6.0))
-    sl = _pr_pushpull(lo, (outer & (den > 0.15)).astype(np.float32))
-    c = cv2.GaussianBlur((pol * (sl - g)).astype(np.float32), (0, 0), 0.8)
+    q = 2 if size >= 48 else 1                                  # the skin's level is smooth: work at half size on big marks
+    if q > 1:
+        sm = (max(4, gc.shape[1] // q), max(4, gc.shape[0] // q))
+        o_lo = cv2.resize(outer.astype(np.float32), sm, interpolation=cv2.INTER_AREA) > 0.5
+        g_lo = cv2.resize(gc, sm, interpolation=cv2.INTER_AREA)
+        lo, den = _pr_lowpass(g_lo, o_lo, max(2.0, size / (6.0 * q)))
+        sl = cv2.resize(_pr_pushpull(lo, (o_lo & (den > 0.15)).astype(np.float32)).astype(np.float32),
+                        (gc.shape[1], gc.shape[0]), interpolation=cv2.INTER_LINEAR)
+    else:
+        lo, den = _pr_lowpass(gc, outer, max(3.0, size / 6.0))
+        sl = _pr_pushpull(lo, (outer & (den > 0.15)).astype(np.float32))
+    c = cv2.GaussianBlur((pol * (sl - gc)).astype(np.float32), (0, 0), 0.8)
     med = float(np.median(c[outer]))
-    # the threshold follows the picture's NOISE (its fine residual), not the scene's structure (shading, a nostril, the
-    # lips) - a spread measured from the smooth skin level is poisoned by those and would hide a faint, blurred mark
-    fine = g - cv2.GaussianBlur(g.astype(np.float32), (0, 0), 1.5)
+    if cr is not None and int(cr.sum()) >= 4:
+        _PR_EVID["v"] = float(np.percentile(c[cr] - med, 75)) / max(con, 1e-3)
+    # the threshold follows the picture's NOISE (its fine residual), not the scene's structure (shading, a nostril, the lips)
+    fine = gc - cv2.GaussianBlur(gc, (0, 0), 1.5)
     sn = float(np.median(np.abs(fine[outer] - float(np.median(fine[outer]))))) * 1.4826
     thr = max(0.30 * con, 3.0 * sn + 1.5)
     cand = ((c - med) > thr) & srch
     if not cand.any():
         return None
-    n, lab, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
-    # a piece counts only if it touches the mark's own predicted core (a hair, a shadow or a facial feature near the painted
-    # stroke is not the mark); a mark with no core known is judged by the painted area
-    zone = cv2.dilate((core if core is not None and int(core.sum()) >= 4 else hole).astype(np.uint8), _pr_disk(3)).astype(bool)
-    amin = max(4.0, 0.04 * area_exp)
-    keep = np.zeros(cand.shape, bool)
-    for k in range(1, n):
-        if st[k, cv2.CC_STAT_AREA] >= amin and zone[lab == k].any():
-            keep |= lab == k
+    seed = ((c - med) > max(0.5 * con, thr)) & srch
+    n, lab, st, _ = cv2.connectedComponentsWithStats(seed.astype(np.uint8), connectivity=8)
+    zsrc = cr if cr is not None and int(cr.sum()) >= 4 else hl
+    zone = cv2.distanceTransform((~zsrc).astype(np.uint8), cv2.DIST_L2, 3) <= zone_r
+    amin = max(4.0, 0.03 * area_exp)
+    pieces = [k for k in range(1, n) if st[k, cv2.CC_STAT_AREA] >= amin and zone[lab == k].any()]
+    if zone_r > 12 and len(pieces) > 1:                         # a wide search: the piece nearest the expected size
+        pieces = [min(pieces, key=lambda k: abs(math.log(max(1.0, st[k, cv2.CC_STAT_AREA]) / max(1.0, area_exp))))]
+    if not pieces:
+        return None
+    seeds = np.isin(lab, pieces)
+    rg = max(1, int(round(0.25 * math.sqrt(float(seeds.sum()) / math.pi))))             # the soft edge: a quarter of the seeds' radius
+    keep = cand & cv2.dilate(seeds.astype(np.uint8), _pr_disk(rg)).astype(bool)
+    keep |= seeds
     area = int(keep.sum())
     if area < 0.12 * area_exp or area > 3.5 * area_exp:
         return None
     y2, x2 = np.nonzero(keep)
-    return keep, (float(x2.mean()), float(y2.mean())), area
+    full = np.zeros((Hg, Wg), bool)
+    full[cy0:cy1, cx0:cx1] = keep
+    fseed = np.zeros((Hg, Wg), bool)
+    fseed[cy0:cy1, cx0:cx1] = seeds
+    return full, (float(x2.mean()) + cx0, float(y2.mean()) + cy0), area, fseed
 
 
 def _pr_texture_clone(img, filled, hole):
@@ -4608,11 +4640,17 @@ class PatchTrack:
         # what the mark looks like against the skin around it (v11.2.102): polarity and strength, in grey levels
         self.core_area = float(self.core_roi.sum())
         self.mark_pol, self.mark_con = 1.0, 20.0
+        self.mark_bgr = None
         if self.core_area >= 6:
             dd = (filled.mean(axis=2) - roi.mean(axis=2))[self.core_roi]
             self.mark_pol = 1.0 if float(np.median(dd)) >= 0 else -1.0
-            self.mark_con = float(max(8.0, abs(float(np.median(dd)))))
+            # how strongly the mark's CENTRE differs from the skin (the core's outer part is the soft edge): a high percentile
+            self.mark_con = float(max(8.0, np.percentile(self.mark_pol * dd, 80)))
+            strong = self.core_roi & ((self.mark_pol * (filled.mean(axis=2) - roi.mean(axis=2))) >= 0.6 * self.mark_con)
+            self.mark_bgr = roi[strong].mean(axis=0) if int(strong.sum()) >= 4 else roi[self.core_roi].mean(axis=0)
         self.weak = set()                                      # frames whose pose is a bridge / hold / rescue: paints only where the mark is found
+        yh_, xh_ = np.nonzero(used)
+        self._hbox = (int(xh_.min()), int(yh_.min()), int(xh_.max()), int(yh_.max())) if len(yh_) else (0, 0, 1, 1)
         full = np.zeros((Hf, Wf), bool)
         full[fy0:fy1, fx0:fx1] = used
         ys, xs = np.nonzero(full)
@@ -5012,7 +5050,7 @@ class PatchTrack:
                           self.core_area * scale * scale, reach)
         if r is None:
             return None
-        _, cen, area = r
+        _, cen, area, _s = r
         if not (0.5 <= area / max(1.0, float(core_c.sum())) <= 2.0):
             return None
         yy, xx = np.nonzero(core_c)
@@ -5056,6 +5094,15 @@ class PatchTrack:
         x1, y1 = int(min(W, np.ceil(quad[:, 0].max()))), int(min(H, np.ceil(quad[:, 1].max())))
         if x1 - x0 < 8 or y1 - y0 < 8:
             return frame
+        # v11.2.102: work on the painted area and the skin around it, not the whole (much larger) fill window
+        hb = self._hbox
+        qh = np.array([[hb[0], hb[1]], [hb[2], hb[1]], [hb[2], hb[3]], [hb[0], hb[3]]], np.float64) @ M[:, :2].T + M[:, 2]
+        sc0 = math.sqrt(abs(float(np.linalg.det(A[:, :2]))))
+        pad2 = int(max(36, 0.9 * self.size * sc0 + 16))
+        x0, y0 = max(x0, int(np.floor(qh[:, 0].min())) - pad2), max(y0, int(np.floor(qh[:, 1].min())) - pad2)
+        x1, y1 = min(x1, int(np.ceil(qh[:, 0].max())) + pad2), min(y1, int(np.ceil(qh[:, 1].max())) + pad2)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return frame
         Mr = M.copy()
         Mr[:, 2] -= (x0, y0)                                   # fill ROI -> this ROI
         sz = (x1 - x0, y1 - y0)
@@ -5073,28 +5120,60 @@ class PatchTrack:
         # v11.2.102: look for the MARK ITSELF in this frame, near where the pose puts it. It is found by what it is (it differs
         # from the skin around it, with the anchor's polarity and about its size), not by matching the anchor's texture - so a turn,
         # blur or a change of light that spoils the match does not hide it. The paint is centred on what is found and covers all of it.
-        found = None
+        found, unsure = None, False
         scale = math.sqrt(abs(float(np.linalg.det(A[:, :2]))))
         if PATCH_CFG.get("find_mark", False) and self.core_area >= 6:
             reach = int(np.clip(0.5 * self.size * scale + 6, 6, 45))
             if idx in self.weak:
                 reach = int(min(70, reach * 1.8))
-            found = _pr_find_mark(roi.mean(axis=2), hole, core, self.mark_pol, self.mark_con, self.core_area * scale * scale, reach)
+            gcur_ = roi.mean(axis=2)
+            found = _pr_find_mark(gcur_, hole, core, self.mark_pol, self.mark_con, self.core_area * scale * scale, reach)
+            evid0, wide, unsure = _PR_EVID["v"], False, False
+            if found is None and idx not in self.weak:
+                # the mark is not where the pose says: look further (the pose may be off), and where it is not found at all and
+                # the predicted core does not look like the mark, paint NOTHING - a patch of skin on the wrong place is worse
+                found = _pr_find_mark(gcur_, hole, core, self.mark_pol, self.mark_con, self.core_area * scale * scale,
+                                      int(min(80, 2 * reach + 10)), zone_r=int(reach))
+                wide = found is not None
+                unsure = found is None and evid0 < 0.3
             if found is not None:
-                mnow, cen, area = found
+                mnow, cen, area, mstrong = found
                 yy_, xx_ = np.nonzero(core)
                 if len(yy_) >= 4:
                     sh = np.array([cen[0] - float(xx_.mean()), cen[1] - float(yy_.mean())])
                     ar = area / max(1.0, float(core.sum()))
-                    lim = (0.6 if idx in self.weak else 0.3) * self.size * scale + 4.0     # (a faint pose error, not a different feature)
+                    lim = (0.6 if (idx in self.weak or wide) else 0.3) * self.size * scale + 4.0   # (a pose error, not a different feature)
+                    if wide:
+                        lim = 1.3 * self.size * scale + 4.0
                     if 0.35 <= ar <= 2.0 and 1.0 <= float(np.hypot(*sh)) <= lim:
                         Mr = Mr.copy()
                         Mr[:, 2] += sh                          # centre the pose on the mark that was found
                         inside, hole, core = _warp_all(Mr)
                         PATCH_STATS["frames_shifted"] += 1
                 PATCH_STATS["frames_found"] += 1
-                hole = hole | (cv2.dilate(mnow.astype(np.uint8), _pr_disk(2)).astype(bool)
-                               & cv2.dilate(hole.astype(np.uint8), _pr_disk(5)).astype(bool) & inside)   # ...all of it, a little margin
+                # ...all of it: the mark's own strong pixels (not a faint shadow joined to it), a little margin, and never further
+                # than 4 px from where the pose puts the painted area
+                near = cv2.dilate(core.astype(np.uint8), _pr_disk(max(4, int(0.2 * self.size * scale)))).astype(bool)
+                # ...and only pixels of the mark's own colour: on the line from the skin around to the mark's ink / pigment (blur and
+                # edges mix the two), not a hand, a cup or a dark object of another hue passing over it
+                lm = np.ones(near.shape, bool)
+                if self.mark_bgr is not None:
+                    ringc = cv2.dilate(hole.astype(np.uint8), _pr_disk(6)).astype(bool) & ~hole & inside
+                    if int(ringc.sum()) >= 30:
+                        skin_c = np.median(roi[ringc], axis=0)
+                        u = np.asarray(self.mark_bgr, np.float32) - skin_c
+                        nu = float(np.dot(u, u))
+                        if nu > 400.0:
+                            nyx = np.nonzero(near)                    # (only where it matters: the pixels near the mark)
+                            dv = roi[nyx] - skin_c
+                            t = (dv @ u) / nu
+                            perp = np.sqrt(np.maximum(0.0, np.sum(dv * dv, axis=1) - t * t * nu))
+                            lm = np.zeros(near.shape, bool)
+                            lm[nyx] = (t > 0.1) & (t < 1.3) & (perp < 30.0)
+                near = near & lm
+                found = (found[0] & near, found[1], found[2], mstrong & near)        # only what is at the mark itself
+                hole = hole | (cv2.dilate(mstrong.astype(np.uint8) & near.astype(np.uint8), _pr_disk(2)).astype(bool)
+                               & cv2.dilate(hole.astype(np.uint8), _pr_disk(4)).astype(bool) & inside)
             elif idx in self.weak:                              # a bridged / held pose paints only where the mark is seen
                 PATCH_STATS["frames_weak_skipped"] += 1
                 return frame
@@ -5125,6 +5204,11 @@ class PatchTrack:
         keep[~zone] = 0.0
         if float(keep[hole].mean()) > 0.02:
             PATCH_STATS["frames_gated"] += 1
+        # nothing like the mark was found where the pose puts it, the core does not look like it, and no object explains that:
+        # the pose is wrong here - paint NOTHING (a patch of skin on the wrong place is worse than a frame without the patch)
+        if unsure and float(keep[core].mean() if core.any() else 0.0) < 0.3:
+            PATCH_STATS["frames_refused"] += 1
+            return frame
         # last safeguard: the mark's own core must still look like the mark. If it does not (covered by an object,
         # or the pose is off and the core lands on plain skin), nothing of this patch is painted on this frame -
         # the skin part of the stroke would otherwise copy the anchor's skin onto some other part of the body.
