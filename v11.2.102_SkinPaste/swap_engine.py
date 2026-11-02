@@ -4436,7 +4436,9 @@ def _pr_find_mark(g, hole, core, pol, con, area_exp, reach):
     if not cand.any():
         return None
     n, lab, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
-    zone = cv2.dilate(hole.astype(np.uint8), _pr_disk(2)).astype(bool)
+    # a piece counts only if it touches the mark's own predicted core (a hair, a shadow or a facial feature near the painted
+    # stroke is not the mark); a mark with no core known is judged by the painted area
+    zone = cv2.dilate((core if core is not None and int(core.sum()) >= 4 else hole).astype(np.uint8), _pr_disk(3)).astype(bool)
     amin = max(4.0, 0.04 * area_exp)
     keep = np.zeros(cand.shape, bool)
     for k in range(1, n):
@@ -4460,7 +4462,7 @@ def _pr_texture_clone(img, filled, hole):
     ys, xs = np.nonzero(hole)
     size = max(int(np.ptp(ys)), int(np.ptp(xs))) + 1
     H, W = hole.shape
-    sig = 1.6
+    sig = 1.2
     hp = img - cv2.GaussianBlur(img, (0, 0), sig)
     known = ~cv2.dilate(hole.astype(np.uint8), _pr_disk(3)).astype(bool)
     g = img.mean(axis=2)
@@ -4484,7 +4486,10 @@ def _pr_texture_clone(img, filled, hole):
                 continue
             if float(bad[y2, x2].mean()) > 0.02:
                 continue
-            sd = float(np.std(hp_g[y2, x2]))
+            seg = hp_g[y2, x2]
+            if float(np.abs(seg).max()) > 5.0 * max(ref_sd, 1.0):        # a crease, an edge, a hair: not plain texture
+                continue
+            sd = float(np.std(seg))
             sc = abs(sd - ref_sd) / max(ref_sd, 1e-3) + 0.05 * rr
             if sc < best_sc:
                 best, best_sc = (dy, dx), sc
@@ -4493,7 +4498,8 @@ def _pr_texture_clone(img, filled, hole):
     dy, dx = best
     out = filled.copy()
     lo_f = cv2.GaussianBlur(filled, (0, 0), sig)
-    out[ys, xs] = lo_f[ys, xs] + hp[ys + dy, xs + dx]
+    cap = 4.0 * max(ref_sd, 1.0)
+    out[ys, xs] = lo_f[ys, xs] + np.clip(hp[ys + dy, xs + dx], -cap, cap)
     return out
 
 
@@ -4947,6 +4953,7 @@ class PatchTrack:
         c = np.array([cx, cy, 1.0])
         tol = 0.25 * self.size + 10.0
         new = {}
+        strong_skip = set()
         for a, b in zip(ks[:-1], ks[1:]):
             g = b - a - 1
             if g < 1:
@@ -4955,7 +4962,9 @@ class PatchTrack:
             if gmax > 0 and g <= gmax and np.linalg.norm(Aa @ c - Ab @ c) <= tol + 40.0 * (g + 1):
                 for j in range(1, g + 1):
                     w = j / float(g + 1)
-                    new[a + j] = ((1.0 - w) * Aa + w * Ab, 0.4)
+                    new[a + j] = ((1.0 - w) * Aa + w * Ab, 0.55 if g <= 6 else 0.4)
+                    if g > 6:                                    # (a short bridge is as good as a followed frame)
+                        strong_skip.add(a + j)
                     PATCH_STATS["frames_bridged"] += 1
             elif hmax > 0:                                       # a longer gap: hold both ends' poses into it
                 for j in range(1, min(hmax, g // 2 + 1) + 1):
@@ -4969,7 +4978,8 @@ class PatchTrack:
         for k, (Ak, cf) in new.items():
             if k not in self.A:
                 self.A[k], self.conf[k] = Ak, cf
-                self.weak.add(k)
+                if k in strong_skip or cf < 0.5:
+                    self.weak.add(k)
 
     def _rescue(self, gray, pred):
         """The patch's texture could not be matched on this frame (blur, a turn, a change of light), but the MARK may still be
@@ -5079,7 +5089,8 @@ class PatchTrack:
                         inside, hole, core = _warp_all(Mr)
                         PATCH_STATS["frames_shifted"] += 1
                 PATCH_STATS["frames_found"] += 1
-                hole = hole | (cv2.dilate(mnow.astype(np.uint8), _pr_disk(2)).astype(bool) & inside)   # ...all of it, and a margin
+                hole = hole | (cv2.dilate(mnow.astype(np.uint8), _pr_disk(2)).astype(bool)
+                               & cv2.dilate(hole.astype(np.uint8), _pr_disk(5)).astype(bool) & inside)   # ...all of it, a little margin
             elif idx in self.weak:                              # a bridged / held pose paints only where the mark is seen
                 PATCH_STATS["frames_weak_skipped"] += 1
                 return frame
