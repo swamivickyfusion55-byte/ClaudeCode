@@ -63,16 +63,16 @@ This is very likely the residue you saw: real footage has light changing across 
 | Clip | v11.2.98 | **v11.2.99** |
 |---|---|---|
 | mole, moving shadow, bending | 36.3 % / 50 / 15.5 | **−1.6 % / 0 / 1.2** |
-| birthmark, moving shadow, bending | 46.2 % / 74 / 10.3 | **WB** |
-| tattoo, moving shadow, bending | 8.4 % / 6 / 7.5 | **WT** |
+| birthmark, moving shadow, bending | 46.2 % / 74 / 10.3 | **−3.1 % / 0 / 1.1** |
+| tattoo, moving shadow, bending | 8.4 % / 6 / 7.5 | **−3.3 % / 0 / 2.6** |
 | cheek mole (photo), moving shadow, bending | −0.9 % / 0 / 6.4 | **−1.1 % / 0 / 6.2** |
 | procedural mole | 10.4 % / 13 / 5.0 | **5.5 % / 6 / 3.2** |
 | procedural birthmark | 16.9 % / 21 / 4.0 | **8.6 % / 10 / 2.6** |
-| procedural tattoo | 4.7 % / 6 / 3.9 | **PT** |
+| procedural tattoo | 4.7 % / 6 / 3.9 | **4.4 % / 6 / 3.8** |
 | cheek mole (photo) | −1.1 % / 6 / 9.8 | **−0.0 % / 6 / 9.3** |
 | jaw-line mole (photo; mark reaches past the paint) | 8.7 % / 6 / 16.2 | 9.8 % / 6 / 16.5 |
 | mole, two positions across a cut | — | **2.5 % / 1 / 7.0** |
-| tattoo, two positions across a cut | — | **CT** |
+| tattoo, two positions across a cut | — | **1.5 % / 2 / 2.2** |
 
 - The remaining missed frames on the procedural clips are where the mark is out of the picture or covered (the clip's swing at frames 92–112).
 - An object over the mark is still left untouched (0.0–0.2 % of its pixels changed).
@@ -115,7 +115,7 @@ This is very likely the residue you saw: real footage has light changing across 
 - 0 frames reverted, 0 faint (v11.2.98: 12 and 5 frames below half strength for the two faces);
 - log `REVERTS=0 faint=0 contact_hold=474/56`.
 
-The kiss without a dropout is unchanged: `REVERTS=0 blind=0`, and frame-to-frame change on the faces matches v11.2.98 (A 5.2/5.2, B 4.2/4.1).
+The kiss without a dropout is unchanged: `REVERTS=0 blind=0`, and frame-to-frame change on the faces matches v11.2.98 (mean 5.20 against 5.17 for one face, 4.17 against 4.13 for the other; one frame where the faces part reads 12 against 9.6).
 
 ## 5. Limits
 
@@ -146,7 +146,9 @@ The kiss without a dropout is unchanged: `REVERTS=0 blind=0`, and frame-to-frame
   - `make_patchclip.py OUT warp`: the bending, moving-shadow, CRF 24 clips;
   - `bench_pipeline.py DROP_CONTACT=both DROP_RUN=lo:hi:per`: the detector made to lose the faces in contact, including its close-up re-checks.
 - **Full jobs from the zip** (the real render path):
-  - FULLJOBS
+  - mole under a moving shadow on bending skin: removed on 150 of 150 frames, 1.9 % of the mark left after the final encode, missed on none;
+  - cheek mole with a face swap in the same job: faces on 150 of 150 frames; the mark removed on every frame where it is in the picture except the 6 of the clip's out-of-picture swing (−3.2 % left: very slightly lighter);
+  - the kiss with the detector losing both faces for 40 frames of contact: faces painted on 120 of 120 frames, `REVERTS=0 faint=0 contact_hold=474/56`, no frame below half strength.
 
 ## 7. Install
 
