@@ -530,6 +530,14 @@ def api_submit_video(video, face1, face2, face3, face4, settings=None):
         n_faces, defaults.get("face_mode"), defaults.get("smooth_motion"), bool(fe), len(defaults.get("patches") or []),
         (token[:6] + "…") if token else "-",
     )
+    try:                                   # v11.2.101: a second job on a busy Space shares its CPU cores - say so in the log
+        with _lock:
+            _act = sum(1 for j in jobs.values() if str(j.get("status") or "").lower() not in ("done", "error", "cancelled"))
+        if _act:
+            logging.warning("phoenix_submit_video: %d job(s) already running on this Space - this one shares its CPU cores "
+                            "with them and both will be slower (the app picks an idle Space itself since 1.2.29)", _act)
+    except Exception:
+        pass
 
     if raw.get("split_seconds") not in (None, "", 0):
         return _run_once_per_token(token, lambda: _submit_split(video, faces, defaults, raw, token),
