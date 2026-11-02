@@ -4430,8 +4430,11 @@ def _pr_find_mark(g, hole, core, pol, con, area_exp, reach):
     sl = _pr_pushpull(lo, (outer & (den > 0.15)).astype(np.float32))
     c = cv2.GaussianBlur((pol * (sl - g)).astype(np.float32), (0, 0), 0.8)
     med = float(np.median(c[outer]))
-    mad = float(np.median(np.abs(c[outer] - med))) * 1.4826
-    thr = max(0.30 * con, 3.0 * mad + 1.5)
+    # the threshold follows the picture's NOISE (its fine residual), not the scene's structure (shading, a nostril, the
+    # lips) - a spread measured from the smooth skin level is poisoned by those and would hide a faint, blurred mark
+    fine = g - cv2.GaussianBlur(g.astype(np.float32), (0, 0), 1.5)
+    sn = float(np.median(np.abs(fine[outer] - float(np.median(fine[outer]))))) * 1.4826
+    thr = max(0.30 * con, 3.0 * sn + 1.5)
     cand = ((c - med) > thr) & srch
     if not cand.any():
         return None
@@ -4445,7 +4448,7 @@ def _pr_find_mark(g, hole, core, pol, con, area_exp, reach):
         if st[k, cv2.CC_STAT_AREA] >= amin and zone[lab == k].any():
             keep |= lab == k
     area = int(keep.sum())
-    if area < 0.2 * area_exp or area > 3.5 * area_exp:
+    if area < 0.12 * area_exp or area > 3.5 * area_exp:
         return None
     y2, x2 = np.nonzero(keep)
     return keep, (float(x2.mean()), float(y2.mean())), area
@@ -5083,7 +5086,8 @@ class PatchTrack:
                 if len(yy_) >= 4:
                     sh = np.array([cen[0] - float(xx_.mean()), cen[1] - float(yy_.mean())])
                     ar = area / max(1.0, float(core.sum()))
-                    if 0.6 <= ar <= 1.7 and 1.0 <= float(np.hypot(*sh)) <= 0.6 * self.size * scale + 5.0:
+                    lim = (0.6 if idx in self.weak else 0.3) * self.size * scale + 4.0     # (a faint pose error, not a different feature)
+                    if 0.35 <= ar <= 2.0 and 1.0 <= float(np.hypot(*sh)) <= lim:
                         Mr = Mr.copy()
                         Mr[:, 2] += sh                          # centre the pose on the mark that was found
                         inside, hole, core = _warp_all(Mr)
