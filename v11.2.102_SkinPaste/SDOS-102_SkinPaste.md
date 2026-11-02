@@ -72,7 +72,16 @@ Every refinement below has its own switch in `PATCH_CFG` (`find_mark`, `rescue`,
 - Speed (one mark, 2 cores, clips running in parallel so noisy): mole 17-35 ms per frame, tattoo 90-132 ms (v11.2.101: 20 and 135).
 - Texture (unit test, noisy synthetic skin): fine-texture strength of the fill 0.17 of the skin's before, **0.67 of 0.94 (71 %)** after; level change -0.01.
 
-__JOBS__
+**Full jobs from the extracted zip** (the real render path, final encode; 720p, Balanced; scored against the clean clips on the mark):
+
+| Job | Result |
+|---|---|
+| hard mole | removed on 150 of 150 frames; 3.5 % of the mark left after the final encode; missed on 0 |
+| hard astronaut mole + a face swap in the same job | faces painted on 150 of 150 frames; removed on 150; **-10.5 %** left (lighter than clean); missed on 0; an object left untouched on 17 frames |
+| 10 marks on one frame | all 10 anchored and followed; removed on 1420 frames of 1500; 5.8 % left on average; 1 frame missed; "mark itself found" on 1424 |
+| kiss, the detector made blind for 40 frames of contact | both faces painted on 120 of 120 frames; `REVERTS=0`, `contact_hold=474/56` (same as v11.2.99 / 11.2.101) |
+
+(The hard mole and 10-mark clips contain no face, so those two jobs say "no faces were swapped"; Patch Removal ran as normal.)
 
 ## 5. Limits
 
