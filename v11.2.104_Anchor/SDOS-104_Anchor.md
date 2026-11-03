@@ -39,7 +39,15 @@ All tests use synthetic clips (public photos, procedural skin); no user footage.
 
 The control clip stays at 0: nothing triggers without an object.
 
-**Limits.** The rule needs the occlusion net to cut something *outside* the lips (at least 0.2 % of the face crop); an object inside the mouth line (an open mouth, a straw held between the lips) does not trigger it, by design. On held or extrapolated frames (no real detection near) it is still off. During eating the lips are the footage's, not the replacement's. If double lips still show at some seconds, the `EATING` count and the `FACE-EVENTS` lines will tell.
+**A side effect I found and handled.** With the rule running at last, it fired in my **kiss** clips (95, 74, 79 and 86 face-frames in four clips; before the fix 0): in a kiss the "object" at the lips is the other face, and showing the footage's own lips there puts the **original mouth** back. A size threshold cannot tell them apart (measured cut outside the lips: the strawberry 0.4-0.8 % of the crop on 66 frames, the false kiss frames 0.8-1.2 %). What works is knowing that another person is close: the pipeline now tells the compositor when another face's box is **within half a face width** of this one (touching or not; the existing rival test needed 6 % overlap and saw nothing in clips where the faces only touch), and the rule then stays off for **3 s** (`eat_rival_hold` 90 frames) after the last time another face was near. Result: all four kisses 0 face-frames, `REVERTS=0`; the bites unchanged.
+
+| Clip | EATING face-frames, rule never ran (v11.2.103) | rule running, no gate | **v11.2.104** |
+|---|---|---|---|
+| strawberry / caramel (object at the lips) | 0 / 0 | 72 / 72 | **72 / 72** |
+| no food | 0 | 0 | **0** |
+| kiss: smooch / deep / cheek / near | 0 / 0 / 0 / 0 | 95 / 74 / 79 / 86 | **0 / 0 / 0 / 0** |
+
+**Limits.** Two people sitting closer than half a face width, or eating within 3 s after a person's face was that close, do not get the rule (the swapped lips stay; double lips can show then). The rule needs the occlusion net to cut something *outside* the lips (at least 0.2 % of the face crop); an object inside the mouth line (an open mouth, a straw held between the lips) does not trigger it, by design. On held or extrapolated frames (no real detection near) it is still off. During eating the lips are the footage's, not the replacement's. If double lips still show at some seconds, the `EATING` count and the `FACE-EVENTS` lines will tell.
 
 ## 3. A mark that is not found: why, and a time limit
 
@@ -58,8 +66,8 @@ Not fixed, not reproduced: 5 synthetic kisses and 3 turn clips paint the face on
 ## 5. Verification (from the zip's own files)
 
 - `unit104.py` (new): the normal case still anchors; another video's frame is skipped inside the budget with numbers in the log; a frame of another shape is reported as "0 size match(es)"; with the total time used up nothing is searched and the log says so; the render path flags a face on a real detection as not predicted and a held one as predicted.
-- Earlier suites on the pack: `unit103` 12/12, `unit102` 28/28, `unit101` 21/21, `unit98` 11/11, `unit97` 18/18, `unit96` 18/18.
-- Bite clips before and after (table above).
+- `unit104` 12/12 (adds the proximity test: boxes 20 px apart are near, 90 px not, diagonal gaps, alone; the compositor's face carries it). Earlier suites on the pack: `unit103` 12/12, `unit102` 28/28, `unit101` 21/21, `unit98` 11/11, `unit97` 18/18, `unit96` 18/18.
+- Bite clips before and after, and four kisses before and after the gate (tables above).
 - Not clean: `verification/fastrestore/unit92.py` stops with `ValueError: too many values to unpack` after its first 16 checks (the side-view and eating checks, which all pass). It stops the same way on v11.2.101 and v11.2.95, so it is not from this build; I did not investigate it.
 
 __JOBS__
