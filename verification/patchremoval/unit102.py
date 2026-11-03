@@ -43,7 +43,7 @@ def disc(cx, cy, r):
 
 
 # --- 0. the pack ------------------------------------------------------------------------------------------------
-check("pack version strings", "102" in E.ENGINE_VERSION if hasattr(E, "ENGINE_VERSION") else True, getattr(E, "ENGINE_VERSION", "n/a"))
+check("pack version string is a 1.2.102+ engine", int(E.ENGINE_VERSION.split("-")[1].split(".")[2]) >= 102, E.ENGINE_VERSION)
 for k in ("find_mark", "rescue", "opaque", "clone_texture"):
     check(f"PATCH_CFG[{k!r}] is on", bool(E.PATCH_CFG.get(k)), str(E.PATCH_CFG.get(k)))
 check("limits: 10 marks / 20 positions", E.PATCH_CFG["max_patches"] == 10 and E.PATCH_CFG["max_views"] == 20)
