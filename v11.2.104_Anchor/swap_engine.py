@@ -2772,7 +2772,10 @@ class AlignedCompositor:
                 except Exception:
                     pass
                 mask = mask * nk
-                if float(_P.get("eat_mouth", 0.0) or 0.0) > 0.0 and not bool(getattr(face, "predicted", False)):
+                # v11.2.104: not while another face is in this crop (a kiss): there the "object" at the mouth is the other face, and
+                # showing the footage's own lips would put the ORIGINAL mouth back
+                if (float(_P.get("eat_mouth", 0.0) or 0.0) > 0.0 and not bool(getattr(face, "predicted", False))
+                        and (_rival_zone is None or float(_rival_zone.max()) < 0.05)):
                     # only on a real detection: a held / predicted face is not where its mouth was measured
                     mask = _eating_mouth(mask, nk, pts, size, track)
         if row is not None:
