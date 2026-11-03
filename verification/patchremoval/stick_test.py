@@ -50,6 +50,7 @@ for name in NAMES:
     specs = [(g["ref"], g["refmask"], int(round(float(g["ref_t"]) * 30)), 45, "m1")]
     tracks = E.plan_tracks(specs, (inp[0].shape[1], inp[0].shape[0]), n, thumbs, lambda i: grays[i], lambda i: inp[i])
     offs, dxy, painted, tot = [], [], 0, 0
+    cps, cgs, areas = [], [], []
     prev = None
     sizes = []
     for i in range(n):
@@ -74,10 +75,17 @@ for name in NAMES:
         yy, xx = np.nonzero(d)
         cp = np.array([xx.mean(), yy.mean()])
         o = cp - cg
+        cps.append(cp); cgs.append(cg); areas.append(float(d.sum()))
         offs.append(float(np.hypot(*o)))
         if prev is not None:
             dxy.append(float(np.hypot(*(o - prev))))
         prev = o
     offs, dxy = np.array(offs), np.array(dxy)
+    # wobble: second difference of the painted area's centre, beyond the body's own (mark ground truth); area flicker: how much the
+    # size of the painted area jumps from frame to frame (a fixed hole carried by the body changes only smoothly)
+    cps, cgs, areas = np.array(cps), np.array(cgs), np.array(areas)
+    sd2 = lambda c: np.linalg.norm(c[:-2] - 0.5 * (c[:-2] + c[2:]) * 0 - 0.5 * c[1:-1] * 2 + 0, axis=1) if False else np.linalg.norm(0.5 * (c[:-2] + c[2:]) - c[1:-1], axis=1)
+    wob = max(0.0, float(sd2(cps).mean() - sd2(cgs).mean())) if len(cps) > 4 else float("nan")
+    flick = float(np.abs(areas[1:-1] - 0.5 * (areas[:-2] + areas[2:])).mean() / max(1.0, areas.mean())) if len(areas) > 4 else float("nan")
     print(f"{name}: painted {painted}/{tot} frames | offset mean {offs.mean():.2f} p95 {np.percentile(offs, 95):.2f} px | "
-          f"slide mean {dxy.mean():.2f} p95 {np.percentile(dxy, 95):.2f} px | mark size {np.mean(sizes):.0f} px", flush=True)
+          f"slide mean {dxy.mean():.2f} p95 {np.percentile(dxy, 95):.2f} px | wobble {wob:.2f} px | area flicker {100 * flick:.1f} % | mark size {np.mean(sizes):.0f} px", flush=True)
