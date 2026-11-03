@@ -67,7 +67,8 @@ l2 = cp._patch_event_lines(clean, 30.0)
 check("log: a mark that never showed says so", len(l2) == 1 and "never showed" in l2[0], l2[0] if l2 else "none")
 edge = {2: dict([(i, "L") for i in range(10)] + [(i, "P") for i in range(10, 30)] + [(i, "X") for i in range(30, 45)])}
 l3 = cp._patch_event_lines(edge, 30.0)
-check("log: frames before the first and after the last removal (the mark not in the video yet / any more) are not counted", len(l3) == 1 and "never showed" in l3[0], l3[0] if l3 else "none")
+check("log: frames before the first and after the last removal are not counted as 'showed', but are reported separately",
+      len(l3) == 1 and "never showed" in l3[0] and "before 0.3 s (10 fr)" in l3[0] and "after 1.0 s (15 fr)" in l3[0], l3[0] if l3 else "none")
 check("log: a job without patches gives no lines", cp._patch_event_lines({}, 30.0) == [])
 
 # --- 4. a runaway predicted pose never hangs the job (cv2.warpAffine with an infinite matrix does not return) ------------------------

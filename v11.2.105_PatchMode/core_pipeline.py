@@ -838,12 +838,24 @@ def _patch_event_lines(events, fps, max_per_mark=10):
             tot = sum(b - a + 1 for a, b, _ in items)
             painted = sum(1 for c in seq.values() if c in ("P", "o"))
             head = "mark %d: removed on %d frames" % (mk, painted)
+            # before the first and after the last removed frame: not removed there either - the mark may be out of the picture, or it
+            # was not found (v11.2.105: said, not hidden)
+            n_lead = sum(1 for i in seq if i < first)
+            n_trail = sum(1 for i in seq if i > last)
+            edge = ""
+            if n_lead or n_trail:
+                parts = []
+                if n_lead:
+                    parts.append("before %.1f s (%d fr)" % (first / fps, n_lead))
+                if n_trail:
+                    parts.append("after %.1f s (%d fr)" % ((last + 1) / fps, n_trail))
+                edge = "; not removed " + " and ".join(parts) + " - the mark may be out of the picture there, or it was not found"
             if not items:
-                lines.append(head + "; never showed between its first and last frame")
+                lines.append(head + "; never showed between its first and last frame" + edge)
                 continue
             bits = ["%.1f-%.1f s %s, %d fr" % (a / fps, (b + 1) / fps, name[c], b - a + 1) for a, b, c in items[:max_per_mark]]
             more = len(items) - max_per_mark
-            lines.append("%s; SHOWED on %d frames: %s%s" % (head, tot, "; ".join(bits), ("; and %d more" % more) if more > 0 else ""))
+            lines.append("%s; SHOWED on %d frames: %s%s%s" % (head, tot, "; ".join(bits), ("; and %d more" % more) if more > 0 else "", edge))
     except Exception:
         return []
     return lines

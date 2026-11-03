@@ -81,7 +81,15 @@ Paint the **same mark several times, as positions of that mark** (not as new mar
 - Earlier suites on the pack: `unit104` 12/12, `unit103` 12/12, `unit102` 28/28, `unit101` 21/21, `unit98` 11/11, `unit97` 18/18, `unit96` 18/18.
 - `stick_test.py` (wobble, area flicker) and `video_test.py` (ring residue) extended.
 
-__JOBS__
+**Full jobs from the extracted zip** (the real render path, 720p, Balanced; scored against the clean clip):
+
+| Job | Result |
+|---|---|
+| hard mole, `PATCH_MODE = "auto"` | removed on 150 of 150 frames, 3.5 % left after the final encode, 0 missed; `PATCH-EVENTS mark 1: removed on 150 frames; never showed between its first and last frame` |
+| the same clip, `PATCH_MODE = "classic"` (set in `config.py`) | `PATCH-REMOVAL mode: classic`; removed on 92 frames, 42 % left, 59 missed; `PATCH-EVENTS mark 1: removed on 92 frames; SHOWED on 39 frames: 1.7-3.0 s not followed, 39 fr; not removed after 4.4 s (19 fr) - the mark may be out of the picture there, or it was not found` (the line names 58 of the 59 frames the scoring finds) |
+| mole moving 72 px per frame, auto | removed on 150 of 150, 4.5 % left, 1 missed; never showed |
+| 10 marks on one frame, auto | removed on 1496 of 1500 frames, 3.2 % left, 0 missed; mark 5: `SHOWED on 4 frames: 3.4-3.5 s refused` |
+| kiss, the detector made blind for 40 frames of contact | both faces painted 120/120; `REVERTS=0 faint=0`; `FACE-EVENTS none` |
 
 ## 7. Limits
 
