@@ -2626,6 +2626,21 @@ class AlignedCompositor:
         # each pixel; the occluder net saw the other face's lips / cheek as an "object" and cut a slightly different
         # piece of this face every frame - the flicker between original and swap in a full kiss
         _rival_zone = None
+        # v11.2.104: is another face close to this crop (touching or within about half a crop of it)? Used to keep the "footage's own
+        # lips around an object" rule off in a kiss, where the "object" at the mouth is the other face
+        _rival_near = False
+        if rivals:
+            for rv in rivals:
+                try:
+                    lm_ = rv.get("lmk") if isinstance(rv, dict) else rv
+                    rq_ = _landmarks_to_aligned(with_forehead(lm_), M, size)
+                    if rq_ is not None:
+                        q_ = np.asarray(rq_, np.float32).reshape(-1, 2)
+                        if bool(((q_[:, 0] > -0.6 * size) & (q_[:, 0] < 1.6 * size) & (q_[:, 1] > -0.6 * size) & (q_[:, 1] < 1.6 * size)).any()):
+                            _rival_near = True
+                            break
+                except Exception:
+                    pass
         _cz = float(_P.get("contact_calm", 0.0) or 0.0)
         if rivals and _cz > 0.0:
             _zw = int(max(1, round(size * _cz))) * 2 + 1
@@ -2775,7 +2790,7 @@ class AlignedCompositor:
                 # v11.2.104: not while another face is in this crop (a kiss): there the "object" at the mouth is the other face, and
                 # showing the footage's own lips would put the ORIGINAL mouth back
                 if (float(_P.get("eat_mouth", 0.0) or 0.0) > 0.0 and not bool(getattr(face, "predicted", False))
-                        and (_rival_zone is None or float(_rival_zone.max()) < 0.05)):
+                        and not _rival_near and (_rival_zone is None or float(_rival_zone.max()) < 0.05)):
                     # only on a real detection: a held / predicted face is not where its mouth was measured
                     mask = _eating_mouth(mask, nk, pts, size, track)
         if row is not None:
