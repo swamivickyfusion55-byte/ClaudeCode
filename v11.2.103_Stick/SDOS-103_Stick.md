@@ -83,7 +83,18 @@ No app change in this build. "Professional-grade" is wider than a fix; see the m
 - Clip suite above; `stick_test.py` (new) and the fast clips (`make_patchclip.py OUT fast`, new).
 - Face runs: 12 synthetic runs (section 3). The first attempt ran two jobs at once under the same job id and overwrote each other's files (two jobs came out empty); it was discarded and all 12 were rerun with unique ids.
 
-__JOBS__
+**Full jobs from the extracted zip** (the real render path, final encode, 720p, Balanced; scored against the clean clips on the mark):
+
+| Job | Result |
+|---|---|
+| hard mole | removed on 150 of 150 frames; 3.5 % of the mark left after the final encode; missed on 0 |
+| mole at 72 px/frame | removed on 150 of 150; 4.5 % left; missed on 1 (before: 73 missed of 150 in the engine test) |
+| tattoo at 72 px/frame | removed on 150 of 150; 6.0 % left; missed on 0; an object left untouched on 31 frames |
+| hard astronaut mole + a face swap in the same job | faces painted on 150 of 150; mark removed on 150; -10.5 % left (a little lighter than clean); missed on 0 |
+| 10 marks on one frame | all 10 followed; removed on **1496 of 1500** frames (v11.2.102: 1420); 3.2 % left; missed on 0 |
+| kiss, the detector made blind for 40 frames of contact | both faces painted on 120 of 120 frames; `REVERTS=0 faint=0`; `FACE-EVENTS none` |
+
+(The mole, tattoo and 10-mark clips contain no face, so those jobs say "no faces were swapped"; Patch Removal ran as normal.)
 
 ## 7. Install
 
