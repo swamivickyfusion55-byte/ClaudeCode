@@ -280,7 +280,7 @@ def render_multi(skin, centre, layers, offs):
     return frames, clean, marks, occs
 
 
-def render_hard(skin, centre, layer, lc, amp=4.0, blur=True):
+def render_hard(skin, centre, layer, lc, amp=4.0, blur=True, fast=1.0):
     """v11.2.102: footage that is hard to follow - the body part turns up to +-32 deg, scales 0.75-1.35, changes perspective,
     moves up to ~250 px (fast: motion blur along the motion), the skin bends, a shadow sweeps over it, the mark sits up to
     ~amp px off where the skin pattern puts it, phone-quality encoding. No object."""
@@ -295,8 +295,8 @@ def render_hard(skin, centre, layer, lc, amp=4.0, blur=True):
     prev_c = None
     for i in range(N):
         t = i / FPS
-        tx, ty = 230 * np.sin(2 * np.pi * t / 2.6), 70 * np.sin(2 * np.pi * t / 1.9 + 0.7)
-        ang = 32.0 * np.sin(2 * np.pi * t / 3.4)
+        tx, ty = 230 * np.sin(2 * np.pi * t * fast / 2.6), 70 * np.sin(2 * np.pi * t * fast / 1.9 + 0.7)     # (fast: x times the speed)
+        ang = 32.0 * np.sin(2 * np.pi * t * (1 + 0.5 * (fast - 1)) / 3.4)
         sc = 1.05 + 0.30 * np.sin(2 * np.pi * t / 2.9 + 0.3)
         M = cv2.getRotationMatrix2D((float(centre[0]), float(centre[1])), ang, sc)
         M[0, 2] += W / 2 - centre[0] + tx
@@ -351,6 +351,21 @@ if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("hard
         np.savez_compressed(os.path.join(OUT, f"pr_{name}_gt.npz"), mark=np.array(marks), occ=np.array(occs),
                             ref=frames[ri], refmask=finger_mask(marks[ri]), ref_t=ri / FPS)
         print(name, "ok")
+elif __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("fast"):
+    # v11.2.103: the hard clip moving 2.5 / 4 / 6 times as fast (peak about 45 / 72 / 108 px per frame) with motion blur
+    os.makedirs(OUT, exist_ok=True)
+    ps = proc_skin()
+    for fk in (2.5, 4.0, 6.0):
+        for kind in ("mole", "tattoo"):
+            name = f"fast{fk:g}_{kind}"
+            layer, lc = mark_layer(kind)
+            frames, clean, marks, occs = render_hard(ps, (900, 600), layer, lc, fast=fk)
+            write(name, frames, crf=24)
+            write(name + "_clean", clean, crf=24)
+            ri = 20
+            np.savez_compressed(os.path.join(OUT, f"pr_{name}_gt.npz"), mark=np.array(marks), occ=np.array(occs),
+                                ref=frames[ri], refmask=finger_mask(marks[ri]), ref_t=ri / FPS)
+            print(name, "ok")
 elif __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[2].startswith("multi"):
     os.makedirs(OUT, exist_ok=True)
     ps = proc_skin()
