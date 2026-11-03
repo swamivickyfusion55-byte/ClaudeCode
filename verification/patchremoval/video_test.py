@@ -77,11 +77,23 @@ for name in NAMES:
     t_apply = (time.time() - t0) / n
     left, err, shim, objc, outside, missed = [], [], [], [], [], 0
     prev = None
+    ring_f, ring_m, ring_fast, cprev = [], [], [], None
     for i in range(n):
         mk = mark[i]
         reg = cv2.dilate(mk.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
         lo, lc, li = L(out[i]), L(cln[i]), L(inp[i])
         if mk.sum() > 30:
+            # v11.2.105: the RING just outside the mark's outline (2-12 px): motion blur and the soft edge of a real mark put dark pixels
+            # there; "left" only looks inside the outline. ring_f: share of ring pixels still darker than the clean twin by > 6 levels
+            rg_ = cv2.dilate(mk.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))).astype(bool) & \
+                ~cv2.dilate(mk.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))).astype(bool)
+            if rg_.sum() > 50:
+                dr_ = (lc - lo)[rg_]
+                ys_, xs_ = np.nonzero(mk); cc_ = np.array([xs_.mean(), ys_.mean()])
+                spd_ = 0.0 if cprev is None else float(np.hypot(*(cc_ - cprev)))
+                ring_f.append(float((dr_ > 6).mean())); ring_m.append(float(dr_.mean()))
+                if spd_ > 15: ring_fast.append(float((dr_ > 6).mean()))
+                cprev = cc_
             con = float((lc - li)[mk].mean())
             rem = float((lc - lo)[mk].mean())
             frac = rem / con if con > 3 else 0.0
@@ -111,6 +123,8 @@ for name in NAMES:
     else:
         outside_paint = -1
     left = np.array(left)
+    rf = 100 * np.mean(ring_f) if ring_f else float("nan"); rfast = 100 * np.mean(ring_fast) if ring_fast else float("nan")
+    print(f"{name}: ring dark {rf:.1f}% (frames moving > 15 px: {rfast:.1f}%) mean {np.mean(ring_m) if ring_m else float('nan'):+.2f} L")
     print(f"{name}: planned in {t_plan:.1f}s, {t_apply*1000:.0f} ms/frame | left {100*left.mean():.1f}% of the mark, worst {100*left.max():.1f}%, "
           f"missed {missed}/{len(left)} frames | error {np.mean(err):.1f} L | shimmer {np.mean(shim):.2f} L | "
           f"object changed {100*np.mean(objc) if objc else 0:.1f}% (worst {100*np.max(objc) if objc else 0:.1f}%) | outside {max(outside)} px"
