@@ -805,6 +805,61 @@ def _timeline_strip(tl, fps, nslots, bucket_sec=2.0):
         return ""
 
 
+def _ev_codes(records, paint_alpha, paint, painted):
+    """v11.2.103: one character per person for THIS output frame, for the FACE-EVENTS log line.
+    P = painted (>= half strength) on a real detection, p = painted on a predicted / held geometry, f = faint (< half strength),
+    - = the tracker believes the person is there but nothing is painted (the original face shows), h = still fading out after the
+    record is gone. A person neither recorded nor painted has no entry."""
+    out = {}
+    try:
+        for sl in set(records.keys()) | set(painted) | {s_ for s_, a_ in paint_alpha.items() if a_ > 0.02}:
+            a_ = float(paint_alpha.get(sl, 0.0) or 0.0)
+            rec_in = sl in records
+            if sl in painted and a_ >= 0.5:
+                out[sl] = "P" if (rec_in and records[sl].get("det")) else ("p" if rec_in else "h")
+            elif sl in painted or a_ > 0.02:
+                out[sl] = "f" if rec_in else "h"
+            elif rec_in:
+                out[sl] = "-"
+    except Exception:
+        pass
+    return out
+
+
+def _face_events(ev, fps, max_per_person=10):
+    """v11.2.103: WHEN a person's face was not (fully) swapped, from the per-frame codes of _ev_codes. Text only. Lists, per person,
+    intervals (seconds) of: unpainted while present (a revert), faint, and long stretches painted only on a predicted geometry."""
+    lines = []
+    try:
+        fps = float(fps) or 30.0
+        slots = sorted({s_ for d in ev for s_ in d})
+        for sl in slots:
+            seq = [d.get(sl, ".") for d in ev]
+            items = []
+            i = 0
+            while i < len(seq):
+                c = seq[i]
+                if c in "-fp":
+                    j = i
+                    while j + 1 < len(seq) and seq[j + 1] == c:
+                        j += 1
+                    n = j - i + 1
+                    if c != "p" or n >= 8:
+                        items.append((i, j, c, n))
+                    i = j + 1
+                else:
+                    i += 1
+            if not items:
+                continue
+            name = {"-": "NOT swapped (original face shows)", "f": "faint (< half strength)", "p": "painted on a predicted geometry only"}
+            bits = ["%.1f-%.1f s %s, %d fr" % (a_ / fps, (b_ + 1) / fps, name[c_].split(" (")[0], n_) for a_, b_, c_, n_ in items[:max_per_person]]
+            more = len(items) - max_per_person
+            lines.append("person %d: %s%s" % (int(sl) + 1, "; ".join(bits), ("; and %d more" % more) if more > 0 else ""))
+    except Exception:
+        return []
+    return lines
+
+
 def _reset_job_counters():
     """Zero every module-level counter at the start of a job.
 
@@ -7509,6 +7564,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 if not records and not _active_fade:
                     stats["revert_frames"] += 1
                     stats["tl"].append(0)
+                    stats.setdefault("ev", []).append({})
                     # Genuinely nothing tracked here (before the first face
                     # appears, or long after the last one left), and nothing
                     # still fading out either.
@@ -7669,6 +7725,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 except Exception:
                     pass
                 stats["tl"].append(sum(1 << int(_s) for _s in _pn))
+                stats.setdefault("ev", []).append(_ev_codes(records, _paint_alpha, _paint, _pn))
                 writer_ok = _safe_result_put(out)
                 if writer_ok: stats["frames_out"] += 1
 
@@ -7885,6 +7942,15 @@ def _run_job_body(jid, src_paths, vp, cfg):
         try:
             logging.info("TIMELINE (2 s per char; . none, a=person 1, b=person 2, #=both): %s",
                          _timeline_strip(stats.get("tl", []), out_fps, len(smap)))
+        except Exception:
+            pass
+        try:                                   # v11.2.103: WHEN (seconds) a face was not fully swapped - text only, nothing of the picture
+            _fe = _face_events(stats.get("ev", []), out_fps)
+            if _fe:
+                for _l in _fe:
+                    logging.info("FACE-EVENTS %s", _l)
+            elif stats.get("ev"):
+                logging.info("FACE-EVENTS none: every person believed present was painted at half strength or more on every frame")
         except Exception:
             pass
 

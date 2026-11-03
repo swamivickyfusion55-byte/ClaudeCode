@@ -106,5 +106,20 @@ check("fast blurred move (peak ~47 px/frame, turning, zooming): followed within 
 check("...and clearly better than waiting for two lost frames", new >= old + 5 or new >= 68, f"{new} against {old}")
 check("config: redetect_now, blur_ok and smooth_err are on", bool(E.PATCH_CFG["redetect_now"]) and bool(E.PATCH_CFG["blur_ok"]) and float(E.PATCH_CFG["smooth_err"]) > 0)
 
+# --- 4. FACE-EVENTS: when a face was not fully swapped (log text) -----------------------------------------------------------
+recs = {0: {"det": True}, 1: {"det": False}}
+c1 = cp._ev_codes(recs, {0: 1.0, 1: 0.9}, {0: {}, 1: {}}, {0, 1})
+check("face events: painted on a detection = P, painted on a predicted geometry = p", c1 == {0: "P", 1: "p"}, str(c1))
+c2 = cp._ev_codes({0: {"det": True}}, {0: 0.0}, {}, set())
+check("face events: believed present but nothing painted = '-' (the original face shows)", c2 == {0: "-"}, str(c2))
+c3 = cp._ev_codes({0: {"det": True}}, {0: 0.3}, {0: {}}, {0})
+c4 = cp._ev_codes({}, {0: 0.3}, {0: {}}, {0})
+check("face events: faint = f; fading after the record is gone = h", c3 == {0: "f"} and c4 == {0: "h"}, f"{c3} {c4}")
+ev = [{0: "P"}] * 30 + [{0: "-"}] * 9 + [{0: "P"}] * 20 + [{0: "f"}] * 4 + [{0: "P"}] * 10 + [{0: "p"}] * 3 + [{0: "P"}] * 5 + [{0: "p"}] * 12 + [{0: "P"}] * 5
+lines = cp._face_events(ev, 30.0)
+check("face events: the revert (0.3 s at 1.0 s), the faint stretch and the long predicted stretch are listed with seconds; a 3-frame prediction is not",
+      len(lines) == 1 and "1.0-1.3 s NOT swapped" in lines[0] and "faint" in lines[0] and "predicted" in lines[0] and lines[0].count("predicted") == 1, lines[0] if lines else "none")
+check("face events: nothing to report gives no lines", cp._face_events([{0: "P"}] * 50, 30.0) == [])
+
 print("\n%d check(s) failed" % fails if fails else "\nall checks passed")
 sys.exit(1 if fails else 0)
