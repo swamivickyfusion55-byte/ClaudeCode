@@ -1769,7 +1769,7 @@ class PredictedFace:
     # but only by luck of a second code path existing) TrackState._frame_wh.
     __slots__ = ("bbox", "kps", "landmark_2d_106", "normed_embedding",
                  "embedding", "det_score", "predicted", "_track", "_slot",
-                 "_occlusion_guard", "_frame_shape")
+                 "_occlusion_guard", "_frame_shape", "near_other")
 
     def __init__(self, bbox, kps, lmk=None, emb=None, det_score=0.5):
         self.bbox = np.asarray(bbox, np.float32).reshape(4).copy()
@@ -1782,6 +1782,7 @@ class PredictedFace:
         self._track = None
         self._slot = None
         self._occlusion_guard = 0.0   # continuous weight, not a flag
+        self.near_other = False       # v11.2.104: another person's face is within half a face width of this one (set by the pipeline)
 
 
 # --------------------------------------------------------------------------
@@ -2643,6 +2644,8 @@ class AlignedCompositor:
                             break
                 except Exception:
                     pass
+        if bool(getattr(face, "near_other", False)):          # the pipeline's own test: boxes within half a face width (no overlap needed)
+            _rival_near = True
         _cz = float(_P.get("contact_calm", 0.0) or 0.0)
         if rivals and _cz > 0.0:
             _zw = int(max(1, round(size * _cz))) * 2 + 1

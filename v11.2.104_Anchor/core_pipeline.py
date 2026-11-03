@@ -1974,6 +1974,29 @@ def _in_front(slot_a, slot_b, area_a, area_b):
     return st[0] if key[0] == slot_a else not st[0]
 
 
+def _other_near(records, slot, gap_frac=0.5):
+    """v11.2.104: is another person's face within ``gap_frac`` of this face's width of it (touching, cheek to cheek, a kiss)? The
+    boxes need not overlap (_rival_landmarks asks for 6 % overlap); used to keep the 'footage's own lips around an object' rule off
+    where the 'object' at the mouth would be the other face."""
+    try:
+        me = records.get(slot)
+        if me is None:
+            return False
+        a = np.asarray(me["bbox"], np.float32).reshape(4)
+        w = float(max(1.0, a[2] - a[0]))
+        for s2, r2 in records.items():
+            if s2 == slot or r2 is None:
+                continue
+            b = np.asarray(r2["bbox"], np.float32).reshape(4)
+            gx = max(0.0, float(max(a[0], b[0]) - min(a[2], b[2])))
+            gy = max(0.0, float(max(a[1], b[1]) - min(a[3], b[3])))
+            if float(np.hypot(gx, gy)) < gap_frac * w:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _rival_landmarks(records, slot):
     """Landmarks of the faces painted AFTER ``slot`` (i.e. nearer the camera).
 
@@ -3339,6 +3362,7 @@ def _reuse_one(work, orig, rec, quality, *, rivals=None, cached=None):
     # face-frames on every log, including a job with food in the mouth): the swapped lips were drawn next to the footage's own.
     # A record between two real detections (or on one) has det=True; only a held / extrapolated one is really predicted.
     face.predicted = not bool(rec.get("det", True))
+    face.near_other = bool(rec.get("near_other", False))
     try:
         return comp.reuse(
             work, orig, rec["kps"], face,
@@ -7673,6 +7697,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     # the containment opacity ramp. All that survives here is
                     # the compositing itself.
                     rec = _paint[slot]
+                    rec["near_other"] = _other_near(records, slot)
                     rivals = _rival_landmarks(records, slot)
                     cached = _nearest_aligned(slot, g)
                     if cached is not None:
@@ -7689,6 +7714,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                 _emb = getattr(_src, "embedding", None)
                         face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], _emb, 0.5)
                         face.predicted = not bool(rec.get("det", True))
+                        face.near_other = bool(rec.get("near_other", False))
                         trial, ok = _swap_one(out, orig, face, _src, quality,
                                               alpha=rec["alpha"], rivals=rivals)
                     if not ok or trial is None:

@@ -87,5 +87,21 @@ cp._reuse_one(fr0, fr0, dict(base_rec, det=False), "Balanced")
 cp._compositor = _oc
 check("render path: a face on a real detection (or between two) is not 'predicted'; a held one is", _seen == [False, True], str(_seen))
 
+# 6. another person close to this face (kiss, cheek to cheek) is told to the compositor even when the boxes do not overlap
+bx = lambda x1, y1, x2, y2: dict(bbox=np.array([x1, y1, x2, y2], np.float32))
+check("near other: boxes 20 px apart (face 100 px wide) = near, even without overlap", cp._other_near({0: bx(0, 0, 100, 100), 1: bx(120, 10, 220, 110)}, 0) is True)
+check("near other: 90 px apart = not near", cp._other_near({0: bx(0, 0, 100, 100), 1: bx(190, 0, 290, 100)}, 0) is False)
+check("near other: a diagonal gap of 60 px is not near, 30 px is", cp._other_near({0: bx(0, 0, 100, 100), 1: bx(142, 142, 240, 240)}, 0) is False and cp._other_near({0: bx(0, 0, 100, 100), 1: bx(121, 121, 220, 220)}, 0) is True)
+check("near other: alone = not near", cp._other_near({0: bx(0, 0, 100, 100)}, 0) is False)
+_seen2 = []
+class _C2:
+    def reuse(self, work, orig, kps, face, **kw):
+        _seen2.append(bool(face.near_other)); return work, True
+cp._compositor = lambda: _C2()
+cp._reuse_one(fr0, fr0, dict(base_rec, det=True, near_other=True), "Balanced")
+cp._reuse_one(fr0, fr0, dict(base_rec, det=True), "Balanced")
+cp._compositor = _oc
+check("render path: the compositor's face carries near_other from the record", _seen2 == [True, False], str(_seen2))
+
 print("\n%d check(s) failed" % fails if fails else "\nall checks passed")
 sys.exit(1 if fails else 0)
