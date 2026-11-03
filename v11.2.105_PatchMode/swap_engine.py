@@ -4681,6 +4681,19 @@ def _pr_compose(A, B):
     return (np.vstack([A, [0, 0, 1]]) @ np.vstack([B, [0, 0, 1]]))[:2]
 
 
+def _pr_pose_ok(A, lo=0.25, hi=4.0):
+    """v11.2.105: a usable pose? Finite, and a scale between lo and hi. A prediction compounded from a wrong velocity can shrink to 0
+    or blow up to inf / nan, and cv2.warpAffine with an infinite matrix never returns (a job hung for over an hour on one)."""
+    try:
+        A = np.asarray(A, np.float64)
+        if A.shape != (2, 3) or not np.isfinite(A).all():
+            return False
+        sc = math.sqrt(abs(float(np.linalg.det(A[:, :2]))))
+        return lo <= sc <= hi and abs(float(A[0, 2])) < 1e6 and abs(float(A[1, 2])) < 1e6
+    except Exception:
+        return False
+
+
 class PatchTrack:
     """One mark: its anchor frame, its hole and fill (anchor coordinates); follows the area through the frames."""
 
@@ -4850,6 +4863,8 @@ class PatchTrack:
         ox0 = oy0 = 0
         gsrc = gray
         a0, s0 = 0.0, 1.0
+        if around is not None and not _pr_pose_ok(around):
+            around = None                                      # (v11.2.105: search the whole frame rather than around a broken pose)
         if around is not None:
             cx_a, cy_a = (x0 + x1) / 2.0, (y0 + y1) / 2.0
             pc = np.asarray(around, np.float64)[:, :2] @ np.array([cx_a, cy_a]) + np.asarray(around, np.float64)[:, 2]
@@ -4916,6 +4931,8 @@ class PatchTrack:
             for _ in range(min(lost, 12)):
                 if velA is not None:
                     pred = _pr_compose(velA, pred)
+            if not _pr_pose_ok(pred):                          # (v11.2.105: a runaway prediction - hold the last pose instead)
+                pred = lastA if _pr_pose_ok(lastA) else None
         flow, fpts, fapts = None, None, None
         if prev is not None and pts is not None and len(pts) >= 6:
             nxt, st, _ = cv2.calcOpticalFlowPyrLK(prev, gray, pts, None, winSize=(21, 21), maxLevel=3)
@@ -4962,6 +4979,8 @@ class PatchTrack:
         """Align each candidate pose by ECC, score it, return the best acceptable (q, A, kind) or None."""
         best = None
         for kind, A0 in cands:
+            if not _pr_pose_ok(A0):
+                continue
             sc0, inl0 = self._check(gray, A0)
             if inl0 is None and self._det:
                 sc0, inl0 = self._check(gray, A0, plain=True)
@@ -5032,7 +5051,9 @@ class PatchTrack:
                 for _ in range(min(lost, 12)):
                     if velA is not None:
                         pred = _pr_compose(velA, pred)
-                r = self._rescue(gray, pred)
+                if not _pr_pose_ok(pred):
+                    pred = lastA
+                r = self._rescue(gray, pred) if _pr_pose_ok(pred) else None
                 if r is not None:                                   # followed by the mark itself: weak, paints only where it is seen
                     A, sc, pts, apts = r, 0.45, None, None
                     self.weak.add(idx)

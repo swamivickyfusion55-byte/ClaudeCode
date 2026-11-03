@@ -70,5 +70,26 @@ l3 = cp._patch_event_lines(edge, 30.0)
 check("log: frames before the first and after the last removal (the mark not in the video yet / any more) are not counted", len(l3) == 1 and "never showed" in l3[0], l3[0] if l3 else "none")
 check("log: a job without patches gives no lines", cp._patch_event_lines({}, 30.0) == [])
 
+# --- 4. a runaway predicted pose never hangs the job (cv2.warpAffine with an infinite matrix does not return) ------------------------
+import time as _t
+check("pose check: a normal pose is usable; inf, nan, a collapsed or exploded scale are not",
+      E._pr_pose_ok(np.array([[1, 0, 5], [0, 1, 3]], float)) and not E._pr_pose_ok(np.array([[np.inf, 0, 0], [0, 1, 0]], float))
+      and not E._pr_pose_ok(np.array([[np.nan, 0, 0], [0, 1, 0]], float)) and not E._pr_pose_ok(np.array([[1e-4, 0, 0], [0, 1e-4, 0]], float))
+      and not E._pr_pose_ok(np.array([[50, 0, 0], [0, 50, 0]], float)))
+yy, xx = np.mgrid[0:240, 0:320].astype(np.float32)
+img = np.dstack([np.clip(150 + 20 * np.sin(xx / 7.0) * np.cos(yy / 9.0), 0, 255)] * 3).astype(np.uint8)
+hole = ((yy - 120) ** 2 + (xx - 160) ** 2) <= 12 ** 2
+E.PATCH_INPAINTER = lambda crop, mk: cv2.inpaint(crop, (mk > 0).astype(np.uint8) * 255, 5, cv2.INPAINT_TELEA)
+trk = E.PatchTrack(0, img, hole)
+t0 = _t.time()
+bad = np.array([[np.inf, 0, 0], [0, np.inf, 0]], float)
+r1 = trk._redetect_tm(E._pr_gray(img), around=bad, radius=160.0)
+r2 = trk._redetect_tm(E._pr_gray(img), around=np.array([[1e-4, 0, 0], [0, 1e-4, 0]], float), radius=160.0)
+check("template search around a broken pose returns at once (falls back to the whole frame)", _t.time() - t0 < 10.0, f"{_t.time() - t0:.2f} s")
+lastA = np.array([[1, 0, 0], [0, 1, 0]], float); velA = np.array([[1e-3, 0, 0], [0, 1e-3, 0]], float)
+t0 = _t.time()
+out = trk._step(E._pr_gray(img), None, None, None, lastA, velA, 6)
+check("a step whose velocity would shrink the pose to nothing does not hang and keeps a sane pose", _t.time() - t0 < 10.0 and (out[0] is None or E._pr_pose_ok(out[0])), f"{_t.time() - t0:.2f} s")
+
 print("\n%d check(s) failed" % fails if fails else "\nall checks passed")
 sys.exit(1 if fails else 0)
