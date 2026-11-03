@@ -213,6 +213,7 @@ _P = {
     # lips are shown with the object, so there is one set of lips around it instead of the swapped lips next to the
     # real ones. eat_lo/eat_hi: share of the crop cut outside the lips for the rule to start / be complete.
     "eat_mouth": 1.0,
+    "eat_rival_hold": 90,           # v11.2.104: the rule stays off this many frames (3 s) after another face was near this one (a kiss)
     "eat_lo": 0.002,
     "eat_hi": 0.008,
     "eat_attack": 0.6,
@@ -965,7 +966,7 @@ class TrackState:
                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
                  "skin_ref", "skin_hits", "kps_scale", "skin_miss",
                  "pose_ok", "occ_keep", "grain_ema", "mblur_ema",
-                 "occ_ref", "occ_nref", "occn_keep", "prof_w", "eat_w", "look_sig", "occ_map")
+                 "occ_ref", "occ_nref", "occn_keep", "prof_w", "eat_w", "look_sig", "occ_map", "rival_hold")
 
     def __init__(self, slot=0):
         self.slot = slot
@@ -1021,6 +1022,7 @@ class TrackState:
         self.occn_keep = None
         self.prof_w = None
         self.eat_w = 0.0
+        self.rival_hold = 0                      # v11.2.104: frames left in which another face was lately near (the eating rule stays off)
         self.look_sig = None
         self.occ_map = None
         # Slowly-smoothed SIZE of this identity's landmark constellation.
@@ -2789,8 +2791,15 @@ class AlignedCompositor:
                 mask = mask * nk
                 # v11.2.104: not while another face is in this crop (a kiss): there the "object" at the mouth is the other face, and
                 # showing the footage's own lips would put the ORIGINAL mouth back
-                if (float(_P.get("eat_mouth", 0.0) or 0.0) > 0.0 and not bool(getattr(face, "predicted", False))
-                        and not _rival_near and (_rival_zone is None or float(_rival_zone.max()) < 0.05)):
+                # (remembered for _P["eat_rival_hold"] calls: the other person is often not in this frame's records during a kiss)
+                _rh = int(getattr(track, "rival_hold", 0) or 0) if track is not None else 0
+                if _rival_near or (_rival_zone is not None and float(_rival_zone.max()) >= 0.05):
+                    _rh = int(_P.get("eat_rival_hold", 90))
+                elif _rh > 0:
+                    _rh -= 1
+                if track is not None:
+                    track.rival_hold = _rh
+                if (float(_P.get("eat_mouth", 0.0) or 0.0) > 0.0 and not bool(getattr(face, "predicted", False)) and _rh <= 0):
                     # only on a real detection: a held / predicted face is not where its mouth was measured
                     mask = _eating_mouth(mask, nk, pts, size, track)
         if row is not None:
