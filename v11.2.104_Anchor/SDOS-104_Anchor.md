@@ -70,7 +70,19 @@ Not fixed, not reproduced: 5 synthetic kisses and 3 turn clips paint the face on
 - Bite clips before and after, and four kisses before and after the gate (tables above).
 - Not clean: `verification/fastrestore/unit92.py` stops with `ValueError: too many values to unpack` after its first 16 checks (the side-view and eating checks, which all pass). It stops the same way on v11.2.101 and v11.2.95, so it is not from this build; I did not investigate it.
 
-__JOBS__
+**Full jobs from the extracted zip** (the real render path, 720p, Balanced; scored against the clean clips where there is a clean twin):
+
+| Job | Result |
+|---|---|
+| bite: strawberry at the lips | `EATING` on 72 face-frames; "two lips" 3 % (v11.2.103: 24 %) |
+| bite: no food (control) | `EATING` on 0 face-frames; face painted 100/100 |
+| kiss, the detector made blind for 40 frames of contact | both faces painted 120/120; `REVERTS=0 faint=0`; `contact_hold=474/56`; `EATING` 0; `FACE-EVENTS none` |
+| side-view photo clip | face painted 60/60; `REVERTS=0`; `EATING` 0; `FACE-EVENTS person 1: 0.3-1.2 s painted on a predicted geometry only, 27 fr` (the new line working: the face is painted, but with no real detection for 27 frames) |
+| fast turn clip | face painted 60/60; `REVERTS=0`; `EATING` 0 |
+| hard mole (patch removal) | removed on 150 of 150 frames; 3.5 % of the mark left after the final encode; missed on 0 |
+| 10 marks on one frame | all 10 anchored; removed on 1496 of 1500 frames; 3.2 % left; missed on 0 |
+
+(The mole and 10-mark clips contain no face, so those jobs say "no faces were swapped"; Patch Removal ran as normal.)
 
 ## 6. Install
 
