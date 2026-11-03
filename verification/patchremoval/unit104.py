@@ -71,5 +71,21 @@ t0 = time.time()
 trk = plan(gb["ref"], gb["refmask"], 20, msgs.append)
 check("total search time used up: not searched, and the log says so", len(trk) == 0 and "used up" in " ".join(msgs), f"{time.time() - t0:.1f} s")
 
+# 5. the "one mouth while an object is at the lips" rule runs on frames that carry a real detection (it ran on none before)
+class _T:
+    fake = np.zeros((128, 128, 3), np.uint8); fake_corr = None; fake_size = 128
+_seen = []
+class _C:
+    def reuse(self, work, orig, kps, face, **kw):
+        _seen.append(bool(face.predicted)); return work, True
+_oc = cp._compositor
+cp._compositor = lambda: _C()
+fr0 = np.zeros((64, 64, 3), np.uint8)
+base_rec = dict(bbox=np.array([0, 0, 10, 10], np.float32), kps=np.zeros((5, 2), np.float32), lmk=None, track=_T(), alpha=1.0, guard=0.0)
+cp._reuse_one(fr0, fr0, dict(base_rec, det=True), "Balanced")
+cp._reuse_one(fr0, fr0, dict(base_rec, det=False), "Balanced")
+cp._compositor = _oc
+check("render path: a face on a real detection (or between two) is not 'predicted'; a held one is", _seen == [False, True], str(_seen))
+
 print("\n%d check(s) failed" % fails if fails else "\nall checks passed")
 sys.exit(1 if fails else 0)

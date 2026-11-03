@@ -3334,6 +3334,11 @@ def _reuse_one(work, orig, rec, quality, *, rivals=None, cached=None):
         return work, False
     face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], None, 0.5)
     face._track = track
+    # v11.2.104: PredictedFace starts as predicted=True, and nearly every output frame is composited here. The "one mouth while an
+    # object is at the lips" rule (eat_mouth) only runs on a face that is not predicted, so it NEVER ran in a job (EATING: 0
+    # face-frames on every log, including a job with food in the mouth): the swapped lips were drawn next to the footage's own.
+    # A record between two real detections (or on one) has det=True; only a held / extrapolated one is really predicted.
+    face.predicted = not bool(rec.get("det", True))
     try:
         return comp.reuse(
             work, orig, rec["kps"], face,
