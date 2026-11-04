@@ -508,11 +508,8 @@ def api_belly_preview(image, settings=None):
                 smooth = float(getattr(_cfgb, "BELLY_SMOOTH", 0.5))
             except Exception:
                 smooth = 0.5
-        pose = _bc.MediaPipePose(still=True)
-        try:
-            lm = pose.detect(img)
-        finally:
-            pose.close()
+        pose = _bc.still_pose()                 # (kept loaded between previews)
+        lm = pose.detect(img)
         if pose.error:
             return None, None, json.dumps({"ok": False, "error": "the body-pose model is not available on this Space (" + pose.error[:120] + ")"})
         out, outlined, info = _bc.preview(img, lm, length, width, smooth, remove_fn=cp._E.remove_patch_image)

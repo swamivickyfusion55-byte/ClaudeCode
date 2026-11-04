@@ -103,6 +103,16 @@ def clamp_scale(v, rng):
     return float(min(rng[1], max(rng[0], v)))
 
 
+_STILL = {"cls": None, "pose": None}
+
+
+def still_pose():
+    """v11.2.111: one still-image pose model kept for the previews (loading it costs seconds; previews run one at a time)."""
+    if _STILL["pose"] is None or _STILL["cls"] is not MediaPipePose:
+        _STILL["pose"], _STILL["cls"] = MediaPipePose(still=True), MediaPipePose
+    return _STILL["pose"]
+
+
 def region_polygon(lm, length=1.0, width=1.0):
     """The band (4 points, float) from shoulder / hip landmarks, or None when they are not reliable.
     length / width (v11.2.111): scale the band's height (about its middle) and breadth (about the body's middle line); the band
