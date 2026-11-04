@@ -156,7 +156,7 @@ class StubPose:                                                # the body's true
     error = None
     def __init__(self):
         self.k = 0
-    def detect(self, bgr):
+    def detect(self, bgr, t_ms=None):
         best, bi = 1e18, 0
         for j, f in enumerate(dec):                             # (which frame is this? the decoded clip, nearest)
             d = float(np.abs(f[::16, ::16].astype(np.int16) - bgr[::16, ::16].astype(np.int16)).mean())
@@ -205,7 +205,7 @@ check("pipeline: the even-skin pass ran on every frame", BC.STATS["frames"] >= N
 # --- 6. without the pose model the job goes on --------------------------------------------------------------------------------------------
 class NoPose(StubPose):
     error = "ModuleNotFoundError: No module named 'mediapipe'"
-    def detect(self, bgr):
+    def detect(self, bgr, t_ms=None):
         return None
 BC.MediaPipePose = NoPose
 msgs.clear()

@@ -96,8 +96,31 @@ if os.environ.get("DROP_CONTACT"):
     cp._fa_get = _fa_get_drop
     import atexit
     atexit.register(lambda: print("DROP_CONTACT", os.environ["DROP_CONTACT"], _DROP, flush=True))
+# v11.2.112: BENCH_NO_FACES=1 - no face is found in the clip's frames (the replacement photos, read first, still are): for clips
+# made from a real person's picture, whose face must not be swapped (the belly-clean test on MediaPipe's own pose picture)
+if os.environ.get("BENCH_NO_FACES"):
+    _orig_fa_get_nf = cp._fa_get
+    _NF = {"on": False, "blind": 0}
+    def _fa_get_nf(img, *a, **k):
+        if img is not None and img.shape[0] * img.shape[1] > 120000:
+            _NF["on"] = True
+        if _NF["on"]:
+            _NF["blind"] += 1
+            return []
+        return _orig_fa_get_nf(img, *a, **k)
+    cp._fa_get = _fa_get_nf
+    import atexit
+    atexit.register(lambda: print("BENCH_NO_FACES", _NF, flush=True))
 # wrap the ORT-level models once they exist
 fa, sw = cp._fa, cp._sw
+if os.environ.get("BENCH_NO_FACES"):            # (and the detector itself, for the pipeline's other detection paths)
+    _orig_det_nf = fa.det_model.detect
+    def _det_nf(img, *a, **k):
+        if _NF["on"] or (img is not None and img.shape[0] * img.shape[1] > 120000):
+            _NF["on"] = True; _NF["blind"] += 1
+            return np.zeros((0, 5), np.float32), np.zeros((0, 5, 2), np.float32)
+        return _orig_det_nf(img, *a, **k)
+    fa.det_model.detect = _det_nf
 def wrap_method(obj, meth, label):
     f = getattr(obj, meth)
     def w(*a, **k):
@@ -142,6 +165,7 @@ if KW.get("patches"):          # Patch Removal (v11.2.96): make_patchclip.py gro
         cfg["patches"].append(dict(image=_pi2, mask=_pm2, t=float(_g["ref_t2"]), group="m1"))
 if KW.get("belly"):            # v11.2.110: lower-belly clear skin
     cfg["belly_clear"] = True
+    cfg["belly_length"] = float(KW.get("belly_len", 1.0)); cfg["belly_width"] = float(KW.get("belly_wid", 1.0))
 t0 = time.perf_counter()
 for _kv in filter(None, os.environ.get("OVR", "").split(",")):
     _k, _v = _kv.split("="); swap_engine._P[_k] = float(_v)
