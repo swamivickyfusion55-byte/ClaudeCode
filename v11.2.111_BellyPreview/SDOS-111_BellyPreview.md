@@ -55,7 +55,11 @@ and **Belly clean**. In Belly clean:
 - App 1.2.31: compile check 0 errors (kotlinc 2.0.21 + Compose plugin; the new screen, view model and API classes are in the
   output); the builder's static audit 44/44. **Not run on a phone.**
 
-__JOBS__
+**Full jobs from the extracted zip** (the real render path; this test machine has no MediaPipe, unlike the Space):
+- hard mole with a painted mark, `belly_clear` on, length x1.3, breadth x0.8: `BELLY-CLEAR: the pose model could not be loaded (...) - not
+  applied`, the painted mark removed as before (150 of 150 frames, 3.5 % left, 0 missed), the job completes;
+- the kiss with the detector blinded for 40 frames: both faces painted 120/120, `REVERTS=0`, `FACE-EVENTS none` (unchanged).
+- Not run: a full job or a preview with MediaPipe finding a real body (no test footage of a body here).
 
 ## 4. Limits
 
