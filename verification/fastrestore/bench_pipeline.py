@@ -140,6 +140,8 @@ if KW.get("patches"):          # Patch Removal (v11.2.96): make_patchclip.py gro
         _pi2, _pm2 = WORK + "/patch_frame2.jpg", WORK + "/patch_mask2.png"
         cv2.imwrite(_pi2, _g["ref2"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm2, _g["refmask2"])
         cfg["patches"].append(dict(image=_pi2, mask=_pm2, t=float(_g["ref_t2"]), group="m1"))
+if KW.get("belly"):            # v11.2.110: lower-belly clear skin
+    cfg["belly_clear"] = True
 t0 = time.perf_counter()
 for _kv in filter(None, os.environ.get("OVR", "").split(",")):
     _k, _v = _kv.split("="); swap_engine._P[_k] = float(_v)
