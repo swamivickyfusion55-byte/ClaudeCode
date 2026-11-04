@@ -62,7 +62,7 @@ def draw(with_marks=True, navel_in_band=False):
         img[molem] *= 0.55
         marks = inkm | molem
     # clothing: a waistband of dark denim across the band's lower part, reaching its bottom edge
-    wb = (yy > P(0.02, "l")[1] - 4) & band
+    wb = (yy > P(0.02, "l")[1] - 4) & (xx > 200) & (xx < 760)   # (cloth runs on past the band's sides, as real clothing does)
     img[wb] = np.array([110.0, 70.0, 45.0]) + 4.0 * np.sin(xx[wb] / 3.0)[:, None]
     # a mole OUTSIDE the band (above the navel): must stay
     up = 0.5 * (P(0.55, "l") + P(0.55, "r"))
