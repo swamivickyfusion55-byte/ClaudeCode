@@ -62,7 +62,7 @@ for name in NAMES:
     thumbs = [E._pr_thumb(x) for x in grays]
     t0 = time.time()
     msgs = []
-    specs = [(g["ref"], g["refmask"], int(round(float(g["ref_t"]) * 30)) - START, 45, "m1")]
+    specs = [(g["ref"], g["refmask"], int(round(float(g["ref_t"]) * 30)) - START, 45, os.environ.get("VT_GROUP", "m1"))]
     if VIEWS >= 2 and "ref2" in g:          # v11.2.97: the same mark painted at a second position
         specs.append((g["ref2"], g["refmask2"], int(round(float(g["ref_t2"]) * 30)) - START, 45, "m1"))
     tracks = E.plan_tracks(specs, (inp[0].shape[1], inp[0].shape[0]),
