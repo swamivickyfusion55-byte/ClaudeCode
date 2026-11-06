@@ -15,3 +15,15 @@ the 3DDFA repo's sample photo). **No user footage.** Paths are those of the sand
 | `make_sharpclip.py`, `restore_metrics.py` | sharp footage; Cinematic vs GPEN: sharpness, shimmer, flicker, identity |
 
 App: `mobile/verification/BusyTest.kt` + `busy_server.py` (the app's busy check against the Space's real routes, v11.2.92 and v11.2.91).
+
+## v11.2.141 ContactOrder (SDOS-141) - identity and painting through contact
+
+| Script | What it does |
+|---|---|
+| `make_cross.py` | two contact clips where the people end on the other side: `cross` (A walks behind B) and `hug` (cheek to cheek, half a turn) |
+| `identity_check.py OUT CLIP GT SRC_A SRC_B [MASK_DUMP]` | per person and frame: which replacement is on the face (ArcFace on the person's own visible pixels at the true 5 points; mix-up), and how much paint covers the visible face (the engine's paste mask over the true 106-point outline; revert / weak) |
+| `geom_offset.py GT DUMP...` | how far each run's paint crop sits from the person's true face, frame by frame |
+| `unit141.py PACK` | the ordering rule (a face not seen on a frame is never in front) and the app's per-person gender values |
+
+`bench_pipeline.py` takes `pg=0,1` (the app's M / F per slot). Models for the bench: InsightFace buffalo_l (GitHub release v0.7),
+xseg_2 and inswapper_128 from FaceFusion's GitHub assets (huggingface.co was not reachable from this sandbox).

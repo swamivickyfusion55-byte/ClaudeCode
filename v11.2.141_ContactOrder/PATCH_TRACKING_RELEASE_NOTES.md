@@ -1,0 +1,46 @@
+# Phoenix v11.2.141 — ContactOrder
+
+- Kiss / hug / one person passing behind the other: a face nobody can see on a frame (lost behind the other, held at a guessed
+  position) is never ranked in front of the face that is seen. On the cross and hug test clips the front person lost its paint for
+  11 and 8 frames while the other was hidden behind it; now 0.
+- Gender for placing a person who joins late comes from the TARGET person (the app's M / F under each Detect face, or learned from
+  the person's own clean frames), never from the replacement photo. A soft cue only, never a reason to drop a face.
+- Tested on six synthetic contact clips (two new ones where the people end on the other side): no identity mix-up, no revert, the
+  person behind fully painted except as a thin sliver (SDOS-141). Research: reports/Face swap contact identity binding.md.
+
+# Phoenix v11.2.140 — BellyTattoo
+
+- Belly clean (job setting `clean_belly`, preview `phoenix_clean_belly_preview`) covers the **whole belly**: from just under the
+  chest (0.56 of the way from the hip joints to the shoulders) down to 0.10 above the hip line, parallel to it (the bikini line, a
+  hard limit: nothing below it changes). Tattoos and marks above, beside and below the navel are removed; 118 found 0 % of a
+  tattoo above or beside the navel.
+- The navel is recognised wherever it sits on the middle line (also with a tattoo stroke touching it); shaded skin at the waist's
+  sides is no longer taken for ink (a non-skin piece must be clearly darker than its skin, or far from its colour).
+- Built on v11.2.118 (changes 119-139 are not in it). App 1.2.44 works unchanged. Synthetic tests only (SDOS-140).
+
+# Phoenix v11.2.118 — LockFinder
+
+- BodyLock no longer switches off the mark finder for painted dark marks (moles, tattoos). Fast motion: a mole 36 % -> 16 % still
+  visible, a tattoo 17 % -> 1 %. Hair and the one-go belly clean are unchanged (the one-go positions keep the v11.2.117 behaviour).
+- Known: a fast-moving mole still loses its hold on ~24 of 150 frames; the v11.2.112 base holds it (SDOS-118).
+
+# Phoenix v11.2.117 — OneGoBelly
+
+- The one-go belly clean (job setting `clean_belly`) works on the Space: MediaPipe Pose Tasks (0.10.35), the band from just below the
+  navel to the hip line, the navel and clothing left alone (`belly_clear.py`). Before, it failed on `mp.solutions` and painted nothing.
+- New route `phoenix_clean_belly_preview`: one frame -> the frame with the marks removed, the band outlined, and the info.
+- `requirements.txt`: `mediapipe==0.10.35`; `packages.txt`: `libgles2`, `libegl1`.
+- Tested on synthetic skin with MediaPipe's test photo (SDOS-117). Fast motion under BodyLock is not yet tested on this pack.
+
+# Phoenix v11.2.112 — BodyLock
+
+The paint is placed from the surface **around** the stroke, then smoothed. It is no longer driven by the dark texture inside the stroke, which is what made a removal sit still or flicker while the body moved.
+
+- Dark-on-skin strokes (body hair and similar patches) are detected on the anchor frame.
+- Their motion is an ECC fit of the surrounding ring, with the stroke excluded.
+- That pose is smoothed on a wider window than the global track.
+- The per-frame "find the dark mark and snap to it" step is off for these strokes, so strands cannot yank the paint.
+- The filled area is grown by 5 px so the soft fringe is covered.
+- Other marks (moles, tattoos, ink) still use the existing local fit and mark finder.
+
+Synthetic check: a dark patch translating 3 px / 2 px per frame on a textured plate stayed within 2.9 px of the true position (mean 0.8 px), with frame-to-frame residual jitter of 0.5 px mean.

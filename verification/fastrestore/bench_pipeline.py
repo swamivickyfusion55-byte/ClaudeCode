@@ -163,6 +163,8 @@ if KW.get("patches"):          # Patch Removal (v11.2.96): make_patchclip.py gro
         _pi2, _pm2 = WORK + "/patch_frame2.jpg", WORK + "/patch_mask2.png"
         cv2.imwrite(_pi2, _g["ref2"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm2, _g["refmask2"])
         cfg["patches"].append(dict(image=_pi2, mask=_pm2, t=float(_g["ref_t2"]), group="m1"))
+if KW.get("pg"):               # v11.2.141: the app's M / F per slot (settings.person_gender), e.g. pg=0,1
+    cfg["person_gender"] = [None if v in ("", "x") else int(v) for v in KW["pg"].split(",")]
 if KW.get("belly"):            # v11.2.110: lower-belly clear skin
     cfg["belly_clear"] = True
     cfg["belly_length"] = float(KW.get("belly_len", 1.0)); cfg["belly_width"] = float(KW.get("belly_wid", 1.0))
