@@ -14,7 +14,8 @@ src, out = sys.argv[1], sys.argv[2]
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 90
 HEAD = sys.argv[4] if len(sys.argv) > 4 else "pixelate"
 NAVEL_T = float(sys.argv[6]) if len(sys.argv) > 6 else 0.27
-WAIST = len(sys.argv) > 7 and sys.argv[7] == "waistband"   # a dark waistband across the belly (t 0.11-0.15) and a stroke running into it
+WAIST = len(sys.argv) > 7 and sys.argv[7] == "waistband"
+FAST = "motion=fast" in sys.argv          # v11.2.142: 3 x the shift, turn and zoom, twice as fast   # a dark waistband across the belly (t 0.11-0.15) and a stroke running into it
 SKIN = sys.argv[5] if len(sys.argv) > 5 else "proc"     # proc: make_patchclip.py's procedural skin texture (pores, mottling); flat: none
 os.makedirs(out, exist_ok=True)
 im = cv2.imread(src)
@@ -105,9 +106,10 @@ masks, lms, pmasks, navs, wbs = [], [], [], [], []
 REF = {11: (546, 320), 12: (449, 324), 23: (522, 472), 24: (464, 466)}     # MediaPipe on the untouched picture
 ref = np.array([P(*REF[k]) for k in (11, 12, 23, 24)], np.float32)
 for t in range(N):
-    ph = 2 * np.pi * t / N
-    M = cv2.getRotationMatrix2D((W / 2, H / 2), 3.0 * np.sin(ph), 1.0 + 0.05 * np.sin(2 * ph))
-    M[0, 2] += 24 * np.sin(ph); M[1, 2] += 10 * np.sin(2 * ph + 0.5)
+    ph = 2 * np.pi * t / N * (2.0 if FAST else 1.0)
+    k = 3.0 if FAST else 1.0
+    M = cv2.getRotationMatrix2D((W / 2, H / 2), k * 3.0 * np.sin(ph), 1.0 + (0.12 if FAST else 0.05) * np.sin(2 * ph))
+    M[0, 2] += k * 24 * np.sin(ph); M[1, 2] += k * 10 * np.sin(2 * ph + 0.5)
     vw.write(cv2.warpAffine(marked, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT))
     vc.write(cv2.warpAffine(clean, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT))
     masks.append(cv2.warpAffine(tat, M, (W, H), flags=cv2.INTER_NEAREST) > 127)

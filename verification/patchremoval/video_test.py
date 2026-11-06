@@ -67,6 +67,36 @@ for name in NAMES:
         specs.append((g["ref2"], g["refmask2"], int(round(float(g["ref_t2"]) * 30)) - START, 45, "m1"))
     tracks = E.plan_tracks(specs, (inp[0].shape[1], inp[0].shape[0]),
                            n, thumbs, lambda i: grays[i], lambda i: inp[i], log=msgs.append)
+    # v11.2.142 stress: make the image tracker FAIL on purpose over frames a..b - VT_FREEZE (it holds the position of frame a while
+    # the body moves on: "hanging") or VT_DROP (it has lost the patch) - to test what the body anchor does when the image fails
+    for _env, _how in (("VT_FREEZE", "freeze"), ("VT_DROP", "drop")):
+        if os.environ.get(_env):
+            _a, _b = (int(x) for x in os.environ[_env].split(":"))
+            for _g in tracks:
+                for _tr in getattr(_g, "tracks", []):
+                    if _a not in _tr.A:
+                        continue
+                    for _i in range(_a + 1, _b + 1):
+                        if _how == "freeze":
+                            _tr.A[_i] = np.array(_tr.A[_a]).copy(); _tr.local_A[_i] = np.array(_tr.local_A.get(_a, _tr.A[_a])).copy()
+                        else:
+                            _tr.A.pop(_i, None); _tr.local_A.pop(_i, None)
+            msgs.append("stress: image tracker %s on frames %d-%d" % (_how, _a, _b))
+    if os.environ.get("VT_BODY") and hasattr(E, "anchor_to_body"):
+        # v11.2.142: the belly tracks placed by the body, as core_pipeline._patch_prepare does (pose every 2nd frame, video mode)
+        import belly_clear as _BC
+        _pose = _BC.MediaPipePose(still=False); _smp = {}
+        for _i in range(0, n, 2):
+            _lm = _pose.detect(inp[_i], t_ms=int(round(_i * 1000.0 / 30.0)))
+            if _lm is not None and _BC.region_polygon(_lm) is not None:
+                _smp[_i] = _lm
+        _pose.close()
+        _bp = _BC.BodyPath(_smp, n, 30.0)
+        msgs.append("body anchor: body on %d sampled frames, %d dropped" % (_bp.sample_count, _bp.dropped))
+        for _g in tracks:
+            for _tr in getattr(_g, "tracks", []):
+                if getattr(_tr, "group", None) == "belly":
+                    E.anchor_to_body(_tr, _bp.affine, log=msgs.append, gray_at=lambda i: grays[i])
     t_plan = time.time() - t0
     t0 = time.time()
     out = []
@@ -123,6 +153,10 @@ for name in NAMES:
     else:
         outside_paint = -1
     left = np.array(left)
+    if os.environ.get("VT_WINDOW"):
+        _a, _b = (int(x) for x in os.environ["VT_WINDOW"].split(":"))
+        _w = left[_a:_b + 1]
+        print(f"{name}: frames {_a}-{_b}: left mean {100*_w.mean():.1f}%, worst {100*_w.max():.1f}%, over 25 %: {int((_w > 0.25).sum())} frames")
     rf = 100 * np.mean(ring_f) if ring_f else float("nan"); rfast = 100 * np.mean(ring_fast) if ring_fast else float("nan")
     print(f"{name}: ring dark {rf:.1f}% (frames moving > 15 px: {rfast:.1f}%) mean {np.mean(ring_m) if ring_m else float('nan'):+.2f} L")
     print(f"{name}: planned in {t_plan:.1f}s, {t_apply*1000:.0f} ms/frame | left {100*left.mean():.1f}% of the mark, worst {100*left.max():.1f}%, "

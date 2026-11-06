@@ -1,0 +1,72 @@
+---
+title: APKBuilder
+emoji: 🤖
+colorFrom: blue
+colorTo: pink
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
+# Phoenix APK Builder 1.2.45
+
+Upload every file in this pack, including `source.zip`, replacing the old ones.
+Then open the Space and press Build APK.
+
+**Builder fix (1.2.24):** a build that was stopped half way used to leave a cut-off APK that made the next build
+fail at the very end ("Unexpected end of ZLIB input stream"). Packaging now always starts fresh, and a failed
+build is retried once from a clean tree.
+
+**1.2.45**: Belly clean outlines the belly's tattoos and marks with a **pentagon** after Preview belly (Space v11.2.142).
+Drag a corner, drag inside it to move the whole pentagon, or pinch to stretch it, then **Preview belly** again: only the marks
+inside it are cleaned. The pentagon and the marks the preview took go with the job (in body coordinates): the video takes exactly
+what the preview took, and the Space checks the cover against the body's shoulders and hips on every frame. **Auto pentagon** goes
+back to the one the Space finds. The pentagon stays on the belly: it
+cannot go below a line a little above the hip line (the Space puts any corner dragged lower back on that line).
+
+**1.2.44** (built from the 1.2.43 pack):
+- **Kept from 1.2.38-1.2.43:** Detect shows **M or F** under each face (tap the letter if it is wrong; it goes with the job as
+  `person_gender`; needs a Space that reports it, v11.2.130 or newer - older Spaces show no letter). One video is uploaded at a
+  time, in 1 MB pieces; thumbnails are decoded lighter; the full-size frame is not kept once its scaled copy exists; the low-memory
+  message is clearer. The APK's file name follows the app version.
+- **Fixed:** split parts were deleted from the phone right after their upload, so **Retry part** after a failed render could not
+  find the part. They are kept again (in the app's cache, as in 1.2.37). Closing the Patch Removal editor no longer recycles the
+  frame a preview may still be saving. The upload buffer is a normal heap buffer again.
+- **Belly screen:** as in 1.2.37 (Preview belly, band Length / Breadth, on / off for the video). The finger-drawn hair box, the
+  shift slider and the "fence" rules of 1.2.39-1.2.43 are **not** in this build.
+
+**1.2.32**: the **Belly clean** buttons work with Space v11.2.117 (one-go belly clean): **Preview belly** sends the frame to the Space as PNG (lossless) and shows the cleaned frame with the band outlined; **Use for this video** sends the one-go setting with the job. Needs Space v11.2.117 or newer.
+
+**1.2.31**: **Belly clean** in the Patch Removal frame screen: a second mode next to "Paint a mark" with the on / off switch for the video, **Length** and **Breadth** of the band (50-150 %), **Preview belly** on the chosen frame (the cleaned skin, with the band outlined), Before / After and the outline on / off. Needs Space v11.2.111 or newer for the preview and the length / breadth.
+
+**1.2.30**: a **Lower belly: clear skin** switch in the job options: every tattoo or mark on the uncovered skin from below the navel to the waistline is removed and the skin evened (Space v11.2.110 or newer; off by default).
+
+**1.2.29**: a second job can be started while a job is split across Spaces: it uses an idle Space (checked with the Space itself), and a split uses as many idle Spaces as there are. Use with Space v11.2.101.
+
+**1.2.28**: one Patch Removal mark can be painted at up to **10 positions** (was 6), up to 10 marks (was 4) and 20 positions in all (was 12). Use with Space v11.2.100.
+
+**1.2.27**: the Patch Removal editor keeps every button on the screen (it is now drawn inside the app's own window,
+inside the system bars, with a margin) and works in portrait and in landscape. Use with Space v11.2.98.
+
+**1.2.26**: Patch Removal can take **several positions of the same mark** (+ Position) for when the person moves or
+turns; the editor is landscape-only and no longer closes when the phone turns; controls in a side panel with the
+action buttons always visible; zoom buttons and a magnifier under the finger; frame-by-frame stepping. Needs Space v11.2.97.
+
+**1.2.25**: optional **Patch Removal** under the target video. Pick the exact frame, paint over a tattoo, mole or
+dark mark with a finger (pinch to zoom), tap Preview to see it erased by the Space, then Freeze. Frozen marks are
+removed on every frame of the video by the Space, even as they move. Needs Space v11.2.96.
+
+**1.2.24**: "Push to all Spaces" no longer restarts a Space that is rendering: busy Spaces are updated by
+themselves when their job ends (no running job is lost). Face restoration gets "GPEN + Cinematic" (fast face
+restore, needs Space v11.2.92) as the default; plain Cinematic stays as the fastest choice; CodeFormer (which never
+worked) is gone.
+
+**1.2.23**: video uploads continue when the app is minimised (resumable upload in 4-MB pieces through the
+Space's own routes, plus an "uploading" notification that keeps the app running while an upload is in
+progress), and replacement faces can be saved with a name and picked from a drop-down with thumbnails.
+
+**Installing:** install the new APK *over* the one on the phone - do not uninstall. Same app id, same signing
+key and a higher version number, so Android updates in place and keeps your token, Spaces and History, and the
+jobs keep running on the Spaces. The build log shows `Signing key (SHA-256): e2564a9b...`; it must be the same
+on every build.
+
