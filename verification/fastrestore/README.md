@@ -27,3 +27,5 @@ App: `mobile/verification/BusyTest.kt` + `busy_server.py` (the app's busy check 
 
 `bench_pipeline.py` takes `pg=0,1` (the app's M / F per slot). Models for the bench: InsightFace buffalo_l (GitHub release v0.7),
 xseg_2 and inswapper_128 from FaceFusion's GitHub assets (huggingface.co was not reachable from this sandbox).
+
+`src_a.jpg`, `src_b.jpg`: the bench's two replacement faces - faces f1 and f4 of InsightFace's own sample photo (`insightface/data/images/t1.jpg`), cropped and enlarged 3x; the contact clips use faces f2 and f3 of the same photo.
