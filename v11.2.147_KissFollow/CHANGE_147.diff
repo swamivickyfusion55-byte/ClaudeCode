@@ -1,0 +1,149 @@
+--- v11.2.146_KissFollow/swap_engine.py	2026-11-07 09:15:11.347072013 +0000
++++ v11.2.147_KissFollow/swap_engine.py	2026-11-07 12:30:55.918200998 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.146-kissfollow"
++ENGINE_VERSION = "aequus-1.2.147-kissfollow"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -3393,39 +3393,62 @@
+                     ta.crossing = True
+                     tb.crossing = True
+ 
+-    def _partner_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
+-        """v11.2.146 (SDOS-146): in contact, detection j is the partly hidden face of slot i. It reads as ANOTHER identified person by
+-        0.10 or more over this slot, it is not that person's own detection (their nearest, which is taken), and it touches that
+-        person's detection. The face whose nose and upper face are behind the other's is never a clean crop: the identity gate
+-        rejected it 87 times in the field log and it was painted on an old place. A sliver behind the other reads as nobody
+-        and is not admitted here."""
++    def _partner_side_why(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.147: the reason detection j is not the partly hidden face of slot i in contact, or "ok" (see _partner_side)."""
+         try:
+             others = [i2 for i2 in range(len(slots)) if i2 != i and has_id_all[i2]]
+             if not others:
+-                return False
++                return "no_other_id"
+             i2 = max(others, key=lambda k: sim_all[k][j])
+             if sim_all[i2][j] < sim + 0.10:
+-                return False
++                return "margin"
+             t2 = self.tracks[slots[i2]]
+             r2 = t2.last_hit_bbox if getattr(t2, "last_hit_bbox", None) is not None else t2.match_bbox
+             if r2 is None:
+-                return False
++                return "no_partner_ref"
+             k_own = min(range(len(faces)), key=lambda k: _cdist_norm(r2, faces[k].bbox))
+             if k_own == j:
+-                return False
++                return "is_partner_det"
+             if _cdist_norm(faces[j].bbox, faces[k_own].bbox) >= 1.0:
+-                return False
+-            # a second box carrying the partner's OWN points is the partner's face twice, not this face (a real partly hidden face
+-            # sits about a quarter of a face width from its partner's points)
++                return "far_from_partner"
+             kj, kk = getattr(faces[j], "kps", None), getattr(faces[k_own], "kps", None)
+             if kj is not None and kk is not None and np.size(kj) >= 10 and np.size(kk) >= 10:
+                 fwk = max(8.0, float(faces[k_own].bbox[2] - faces[k_own].bbox[0]))
+                 dk = np.asarray(kj, np.float32).reshape(-1, 2).mean(0) - np.asarray(kk, np.float32).reshape(-1, 2).mean(0)
+                 if float(np.linalg.norm(dk)) < 0.10 * fwk:
+-                    return False
+-            return True
++                    return "duplicate_points"
++            return "ok"
+         except Exception:
+-            return False
++            return "error"
++
++    def _partner_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.146 (SDOS-146): in contact, detection j is the partly hidden face of slot i: it reads as ANOTHER identified person
++        by 0.10 or more over this slot, it is not that person's own detection, it touches it, and its points do not duplicate the
++        partner's. A sliver behind the other reads as nobody and is not admitted here."""
++        return self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all) == "ok"
++
++    def _log_refusal(self, i, j, s, faces, slots, sim, sim_all, has_id_all, xo, touching, spatial_hit, spatial):
++        """v11.2.147 (log only): why a detection of a face in contact was refused - counts per slot, and the first 60 with their call."""
++        try:
++            if not touching:
++                reason = "not_touching"
++            elif xo < sim + 0.10:
++                reason = "reads_nobody_else"
++            else:
++                reason = self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all)
++            wc = getattr(self, "why_counts", None)
++            if wc is None:
++                wc = self.why_counts = {}
++            d = wc.setdefault(int(s), {})
++            d[reason] = d.get(reason, 0) + 1
++            smp = getattr(self, "why_sample", None)
++            if smp is None:
++                smp = self.why_sample = []
++            if touching and len(smp) < 60:           # (the sample: the refusals while the faces touch)
++                smp.append((int(getattr(self, "_call_n", 0)), int(s), int(j), reason, round(float(sim), 2), round(float(xo), 2),
++                            round(float(spatial_hit), 2), round(float(spatial), 2)))
++        except Exception:
++            pass
+ 
+     def _contact_motion(self):
+         """v11.2.144 (SDOS-144): a track in contact with another (a kiss, a hug) that the detector or the identity gate misses is
+@@ -3709,6 +3732,7 @@
+                         if not self._rel_admit(i, j, s, f, sim, sim_all,
+                                                has_id_all, slots):
+                             self.diag[s]["id_reject"] += 1
++                            self._log_refusal(i, j, s, faces, slots, sim, sim_all, has_id_all, _xo, touching, spatial_hit, spatial)
+                             continue
+                         rescued.add((i, j))
+                 else:
+--- v11.2.146_KissFollow/core_pipeline.py	2026-11-07 09:14:00.172680882 +0000
++++ v11.2.147_KissFollow/core_pipeline.py	2026-11-07 12:30:16.468408939 +0000
+@@ -954,6 +954,7 @@
+     _ORDER_MEM.clear()
+     _ORDER_XID[0] = 0
+     _ORDER_XMEM.clear()
++    _CPATH.clear()
+     try:
+         for _k in list(_E.PATCH_STATS.keys()):
+             _E.PATCH_STATS[_k] = 0.0 if isinstance(_E.PATCH_STATS[_k], float) else 0
+@@ -1980,6 +1981,7 @@
+ _ORDER_CUE = {}      # (slot_lo, slot_hi) -> evidence ratio lo-over-hi in front, for the frame being painted
+ _ORDER_XID = [0]     # v11.2.144: frames ordered by the cross-identity cue (per job)
+ _ORDER_XMEM = {}     # v11.2.144: (slot_lo, slot_hi) -> last output frame the cross-identity cue ordered this pair (per job)
++_CPATH = {}          # v11.2.147 (log only): (slot, frame) -> how a face in contact was painted: r rel, f follow, x faded, h held
+ 
+ 
+ def _outline_edge(gm, ox, oy, lmk, other_hull):
+@@ -7638,10 +7640,14 @@
+                             rec = dict(rec)                  # (a gap the plain path would not have bridged)
+                             rec["contact_held"] = True
+                         if CONTACT_FOLLOW:                   # v11.2.144: moved with its partner, not held still
++                            _r0 = stats.get("contact_rel", 0)
+                             try:
+                                 _st, _fr = _follow_partner(slot, _tl, g)
+                                 if _st == "ok":
+                                     rec = _fr
++                                _CPATH[(int(slot), int(g))] = ("h" if _st != "ok" else
++                                                               ("r" if stats.get("contact_rel", 0) > _r0 else
++                                                                ("f" if _fr is not None else "x")))
+                             except Exception as _fe:
+                                 logging.debug("contact follow skipped: %s", _fe)
+                     else:
+@@ -8369,6 +8375,17 @@
+             os.remove(_enc_log_path)
+         except Exception:
+             pass
++        try:    # v11.2.147 (log only): how each face in contact was painted, and why the tracker refused its detections
++            _cp_slots = sorted({k[0] for k in _CPATH})
++            _n_cp = int(stats.get("frames_out", 0))
++            for _s in _cp_slots:
++                logging.info("CONTACT-PATH slot %d (r rel, f follow, x faded, h held, . not in contact): %s", _s,
++                             "".join(_CPATH.get((_s, _g), ".") for _g in range(_n_cp)))
++            logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tracker, "why_counts", None) or {}).items())})
++            logging.info("ID-WHY first refusals (call, slot, face, reason, sim, other, spatial_hit, spatial): %s",
++                         (getattr(_tracker, "why_sample", None) or [])[:60])
++        except Exception as _e:
++            logging.debug("contact diagnostics skipped: %s", _e)
+         stats["processing_seconds"] = max(0.0, time.time() - t0 - stats["encode_seconds"])
+         # Keep the final output path explicit before optional encryption/autosave.
+         # The previous V4 runtime referenced `res` before assigning it, which
