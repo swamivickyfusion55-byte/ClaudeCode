@@ -6,7 +6,7 @@ g = types.ModuleType("gradio"); g.Request = type("Request", (), {}); g.update = 
 sys.modules["gradio"] = g
 hf = types.ModuleType("huggingface_hub"); hf.hf_hub_download = lambda *a, **k: ""; sys.modules["huggingface_hub"] = hf
 sys.path.insert(0, sys.argv[1])
-import numpy as np, core_pipeline as cp, swap_engine as E
+import numpy as np, cv2, core_pipeline as cp, swap_engine as E
 fails = 0
 def check(name, ok, extra=""):
     global fails
@@ -63,14 +63,14 @@ cp._mark_cross_identity({0: fa2, 1: fb2}, T)
 check("a face whose crop reads as its partner is marked (+), the partner reading as itself (-)",
       getattr(fa2, "_xid", 0) > 0.5 and getattr(fb2, "_xid", 0) < -0.5,
       "A %+.2f, B %+.2f" % (getattr(fa2, "_xid", 0), getattr(fb2, "_xid", 0)))
-def lm106(b):
-    x1, y1, x2, y2 = b; th = np.linspace(0, 2 * np.pi, 106, endpoint=False)
+def lm106(b, start=0.0):
+    x1, y1, x2, y2 = b; th = start + np.linspace(0, 2 * np.pi, 106, endpoint=False)   # (points 0-32: the jaw side, from start)
     return np.stack([(x1 + x2) / 2 + (x2 - x1) / 2 * np.cos(th), (y1 + y2) / 2 + (y2 - y1) / 2 * np.sin(th)], 1).astype(np.float32)
 frame = np.full((720, 1280, 3), 128, np.uint8)
 def recs(xa_, xb_):
     ba, bb = [480, 300, 700, 600], [600, 300, 820, 600]
     return {0: {"bbox": np.array(ba, np.float32), "lmk": lm106(ba), "xid_near": xa_},
-            1: {"bbox": np.array(bb, np.float32), "lmk": lm106(bb), "xid_near": xb_}}
+            1: {"bbox": np.array(bb, np.float32), "lmk": lm106(bb, np.pi * 0.85), "xid_near": xb_}}   # B's jaw side faces A
 cp._order_cues(frame, recs(0.7, -0.9)); c1 = cp._ORDER_CUE.get((0, 1))
 cp._order_cues(frame, recs(-0.9, 0.7)); c2 = cp._ORDER_CUE.get((0, 1))
 cp._order_cues(frame, recs(-0.4, -0.9)); c3 = cp._ORDER_CUE.get((0, 1))
@@ -82,6 +82,19 @@ cp._ORDER_MEM.clear(); res_ = []
 for k in range(6):
     cp._ORDER_NOW[0] = 100 + k; cp._order_cues(frame, recs(0.7, -0.9)); res_.append(cp._in_front(0, 1, 1.0, 1.0))
 check("...and the job's front / behind decision follows it (the first decision at once)", not any(res_), str(res_))
+# no identity reading for a few frames (no detection near): the identity-set order holds against the outline cue
+fr2 = frame.copy(); cv2.ellipse(fr2, (590, 450), (110, 150), 0, 0, 360, (255, 255, 255), 3)   # a strong edge on A's outline
+cp._ORDER_XMEM.clear(); cp._order_cues(fr2, recs(None, -0.9)); c0 = cp._ORDER_CUE.get((0, 1))
+check("(the test frame's outline evidence says A is in front)", c0 is not None and c0 > 1.5, "%s" % c0)
+cp._ORDER_MEM.clear(); cp._ORDER_XMEM.clear()
+for k in range(6):
+    cp._ORDER_NOW[0] = 100 + k; cp._order_cues(frame, recs(0.7, -0.9)); cp._in_front(0, 1, 1.0, 1.0)
+held = []
+for k in range(6, 12):
+    cp._ORDER_NOW[0] = 100 + k; cp._order_cues(fr2, recs(None, -0.9)); held.append(cp._in_front(0, 1, 1.0, 1.0))
+check("frames without an identity reading: the order holds (A stays behind) for up to 60 frames", not any(held), str(held))
+cp._ORDER_NOW[0] = 100 + 80; cp._order_cues(fr2, recs(None, -0.9))
+check("...and after 60 frames the outline evidence is used again", (cp._ORDER_CUE.get((0, 1)) or 0) > 1.5, str(cp._ORDER_CUE.get((0, 1))))
 cp.CONTACT_FOLLOW = False
 cp._order_cues(frame, recs(0.7, -0.9)); c4 = cp._ORDER_CUE.get((0, 1))
 check("CONTACT_FOLLOW False: no cross-identity ordering", c4 not in (0.25, 4.0), "%s" % c4)

@@ -953,6 +953,7 @@ def _reset_job_counters():
         pass
     _ORDER_MEM.clear()
     _ORDER_XID[0] = 0
+    _ORDER_XMEM.clear()
     try:
         for _k in list(_E.PATCH_STATS.keys()):
             _E.PATCH_STATS[_k] = 0.0 if isinstance(_E.PATCH_STATS[_k], float) else 0
@@ -1978,6 +1979,7 @@ _ORDER_MEM = {}      # (slot_a, slot_b) -> [a_in_front, frames_the_other_way, la
 _ORDER_NOW = [0]     # the output frame being painted (the flip counter advances once per frame)
 _ORDER_CUE = {}      # (slot_lo, slot_hi) -> evidence ratio lo-over-hi in front, for the frame being painted
 _ORDER_XID = [0]     # v11.2.144: frames ordered by the cross-identity cue (per job)
+_ORDER_XMEM = {}     # v11.2.144: (slot_lo, slot_hi) -> last output frame the cross-identity cue ordered this pair (per job)
 
 
 def _outline_edge(gm, ox, oy, lmk, other_hull):
@@ -2026,11 +2028,18 @@ def _order_cues(frame, records):
                     if xa >= 0.25 and xb <= -0.25:
                         _ORDER_CUE[(lo, hi)] = 0.25 if lo == sa else 4.0          # a behind b
                         _ORDER_XID[0] += 1
+                        _ORDER_XMEM[(lo, hi)] = int(_ORDER_NOW[0])
                         continue
                     if xb >= 0.25 and xa <= -0.25:
                         _ORDER_CUE[(lo, hi)] = 4.0 if lo == sa else 0.25          # b behind a
                         _ORDER_XID[0] += 1
+                        _ORDER_XMEM[(lo, hi)] = int(_ORDER_NOW[0])
                         continue
+                if CONTACT_FOLLOW and (xa is None or xb is None) and (lo, hi) in _ORDER_XMEM \
+                        and 0 <= int(_ORDER_NOW[0]) - _ORDER_XMEM[(lo, hi)] <= 60:
+                    # a frame without a recent detection of one of them (no identity reading): the order the identity cue
+                    # set holds for up to 60 frames - the outline cue, wrong in profile, flipped it back after 4 frames
+                    continue
                 if ea is None or eb is None:
                     continue
                 r = (ea + 1.0) / (eb + 1.0)
