@@ -290,7 +290,7 @@ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
 VERSION = "v11.2.144"
-BUILD = "BellyAnchor · belly marks outlined by a pentagon you can adjust, the video takes what the preview took; the cover is checked against the body (shoulders, hips) on every frame and found again around the body's place where the image tracker loses or leaves it"
+BUILD = "KissFollow · in a kiss or hug each face keeps its own replacement: a profile face whose crop reads as its partner is no longer dropped, a missed face moves with its partner and is taken back where it was last seen, the paint between two sightings follows the partner; belly as in v11.2.142"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

@@ -3293,6 +3293,13 @@ class MultiFaceTracker:
             for j2, f2 in enumerate(faces):
                 if j2 != j and _cdist_norm(ref, f2.bbox) < dj:
                     return False
+            # its facial points (eyes, nose, mouth) lie nearer this face's points at its last sighting than any other person's:
+            # a stray second box on the partner's own face (a cheek, half the face) carries the partner's points
+            kj = getattr(faces[j], "kps", None)
+            k_own = getattr(tr, "last_hit_kps", None)
+            cj = np.asarray(kj, np.float32).reshape(-1, 2).mean(0) if kj is not None and np.size(kj) >= 10 else None
+            d_own = (float(np.linalg.norm(cj - np.asarray(k_own, np.float32).reshape(-1, 2).mean(0)))
+                     if cj is not None and k_own is not None and np.size(k_own) >= 10 else None)
             for s2 in slots:
                 if s2 == s:
                     continue
@@ -3300,8 +3307,23 @@ class MultiFaceTracker:
                 r2 = t2.last_hit_bbox if getattr(t2, "last_hit_bbox", None) is not None else t2.match_bbox
                 if r2 is not None and t2.established and _cdist_norm(r2, faces[j].bbox) < dj:
                     return False
+                k2 = getattr(t2, "last_hit_kps", None)
+                if (t2.established and d_own is not None and k2 is not None and np.size(k2) >= 10
+                        and float(np.linalg.norm(cj - np.asarray(k2, np.float32).reshape(-1, 2).mean(0))) < d_own):
+                    return False
             for i2 in range(len(slots)):
                 if i2 != i and has_id_all[i2] and sim_all[i2][j] > sim + 0.10:
+                    # ...unless that person is plainly ANOTHER detection: one at least as much like them and nearer to where
+                    # they were last seen. In a profile kiss the partner fills the front half of this face's ArcFace crop, so
+                    # the crop reads as the partner (measured: 0.8-0.9 to the partner, 0.05-0.15 to its own person) while the
+                    # partner's own detection reads 0.95 - one person is never two detections.
+                    t2 = self.tracks[slots[i2]]
+                    r2 = t2.last_hit_bbox if getattr(t2, "last_hit_bbox", None) is not None else t2.match_bbox
+                    if r2 is not None and any(
+                            j2 != j and sim_all[i2][j2] >= sim_all[i2][j]
+                            and _cdist_norm(r2, faces[j2].bbox) < _cdist_norm(r2, faces[j].bbox)
+                            for j2 in range(len(faces))):
+                        continue
                     return False
             return True
         except Exception:
@@ -3769,6 +3791,12 @@ class MultiFaceTracker:
                     continue
                 if float(np.dot(a1[:k], a2[:k])) < 0.50:
                     continue
+                # v11.2.144: not two boxes on one face but two people in contact - a profile face pressed against its partner
+                # has the partner in half its ArcFace crop and reads as them (0.8-0.9). Kept when one of the pairs passed the
+                # contact test (each detection nearest its own person's last sighting) and the boxes are two separate faces.
+                if (bool(_P.get("contact_follow", 1)) and ((i, j) in contact_ok or (i2, j2) in contact_ok)
+                        and _iou(faces[j].bbox, faces[j2].bbox) < 0.40):
+                    continue
                 t1, t2 = self.tracks[slots[i]], self.tracks[slots[i2]]
                 r1 = refs.get(slots[i]) if refs else None
                 r2 = refs.get(slots[i2]) if refs else None
@@ -3931,7 +3959,8 @@ class MultiFaceTracker:
                 tr.flip_votes = max(0, tr.flip_votes - 1)
                 continue
             f = faces[j]
-            changed = self._belongs_to_other(s, f)
+            # v11.2.144: a pair admitted in contact by the last sighting has passed a stricter geometric test (_contact_mine)
+            changed = self._belongs_to_other(s, f) and (i, j) not in contact_ok
 
             if changed and tr.established:
                 # The class docstring specifies that during a crossing "label

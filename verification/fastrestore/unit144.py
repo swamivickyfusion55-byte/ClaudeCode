@@ -73,6 +73,45 @@ for k in range(30):
     T4.assign([fb_] if 15 <= k <= 20 else [fa_, fb_], {})
     used += int(T4.tracks[0]._contact_vel is not None)
 check("two faces apart: the contact rules never act", used == 0 and not T4.tracks[0].crossing, "%d calls" % used)
+# a profile kiss, measured on the real detector (make_pkiss.py): the partner fills the front half of A's ArcFace crop, so A's face
+# reads as B (0.8-0.9) and as A only 0.05-0.15. v11.2.141-143 took the two detections for one person in two boxes and dropped A.
+def contaminated(e):
+    return unit(0.10 * e + 0.90 * eb + rng.normal(size=512) * 0.02)
+T6 = E.MultiFaceTracker([0, 1]); xa, xb = 300.0, 700.0; got6 = wrong6 = 0
+for k in range(60):
+    if k < 20:
+        xa += 6.0; xb -= 6.0
+    else:
+        xa += 3.0 * np.sin(k / 3.0); xb += 3.0 * np.sin(k / 3.0)
+    fa_ = F([xa, 300, xa + 250, 550], contaminated(ea) if k >= 22 else ea)
+    fb_ = F([xb, 300, xb + 250, 550], eb)
+    res = T6.assign([fa_, fb_], {})
+    got6 += int(k >= 22 and res.get(0) is fa_); wrong6 += int(res.get(0) is fb_ or res.get(1) is fa_)
+check("a profile face whose crop reads as its partner (0.85) keeps its own face through the kiss", got6 == 38 and wrong6 == 0,
+      "A got its face on %d of 38 calls, %d wrong (141-143: 0 of 38)" % (got6, wrong6))
+# ...but a stray second box on B's own face (its cheek, toward where A was) with B's facial points never goes to A
+T7 = E.MultiFaceTracker([0, 1]); xa, xb = 300.0, 700.0; stray7 = 0
+for k in range(50):
+    if k < 20:
+        xa += 6.0; xb -= 6.0
+    fa_ = F([xa, 300, xa + 250, 550], ea); fb_ = F([xb, 300, xb + 250, 550], eb)
+    if k < 25:
+        faces = [fa_, fb_]
+    else:                                                                   # A not found; a box on B's left cheek, B's points
+        fs_ = F([xb - 70, 300, xb + 150, 550], unit(eb + rng.normal(size=512) * 0.02)); fs_.kps = fb_.kps.copy()
+        faces = [fs_, fb_]
+    res = T7.assign(faces, {})
+    stray7 += int(k >= 25 and res.get(0) is not None and res.get(0) is not fa_)
+check("a stray box on the partner's own face (the partner's points) is never given to the face that is not found", stray7 == 0,
+      "%d of 25 calls" % stray7)
+# two boxes on one face while the faces are apart: still one of them is dropped (the duplicate rule is untouched there)
+T8 = E.MultiFaceTracker([0, 1]); dup8 = 0
+for k in range(20):
+    fa_, fb_ = F([100, 300, 350, 550], ea), F([900, 300, 1150, 550], eb)
+    faces = [fa_, fb_] if k < 10 else [fa_, fb_, F([140, 320, 360, 560], ea)]
+    res = T8.assign(faces, {})
+    dup8 += int(k >= 10 and any(res.get(s_) is faces[-1] for s_ in (0, 1)) and len(faces) == 3)
+check("faces apart: a second box on the same face is still not given to the other slot", dup8 == 0, "%d of 10 calls" % dup8)
 E._P["contact_follow"] = 0
 out5, _ = kiss()
 re5 = sum(1 for (_, _, a0, _, _) in out5[31:] if a0)
