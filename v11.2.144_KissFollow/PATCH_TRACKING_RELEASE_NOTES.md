@@ -1,3 +1,17 @@
+# Phoenix v11.2.144 — KissFollow
+
+- **A kiss in profile no longer loses the face behind.** In profile the partner fills half of a face's identity crop, so the face
+  behind reads as the partner (0.80-0.88); two rules meant for two boxes on one face then removed it, and it was painted on a
+  guess and faded to the original. Two people the tracker sees in contact are now never merged, and in contact a crop that reads
+  as the partner is given back to its own person by geometry (where it was last really seen, its own facial points).
+- **Front / behind from the faces' own identity:** the face whose crop reads as the other person is behind. In profile the old
+  outline cue named the face behind as in front, and its replacement took the partner's nose and lips.
+- **In contact a missed face moves with its partner** (tracker and paint), instead of drifting on at its own speed or standing
+  still; a face that is only a sliver behind the other keeps the v11.2.141 rules.
+- Profile kiss test clip, v11.2.141 -> v11.2.144: the face behind reverted 56 -> 0 frames, carried the other person's replacement
+  on 37 -> 0 frames, worst lag 62 -> 21 px. The six frontal contact clips: no new revert or mix-up (SDOS-144). Synthetic tests only.
+- Belly clean: as in v11.2.142.
+
 # Phoenix v11.2.142 — BellyAnchor
 
 - Belly clean: Preview belly outlines the marks with a **pentagon** (five corners, drawn in yellow over the cleaned frame) that the
