@@ -1,0 +1,46 @@
+--- v11.2.147_KissFollow/swap_engine.py	2026-11-07 12:30:55.918200998 +0000
++++ v11.2.148_KissFollow/swap_engine.py	2026-11-07 14:17:40.997740519 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.147-kissfollow"
++ENGINE_VERSION = "aequus-1.2.148-kissfollow"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -3409,7 +3409,7 @@
+             k_own = min(range(len(faces)), key=lambda k: _cdist_norm(r2, faces[k].bbox))
+             if k_own == j:
+                 return "is_partner_det"
+-            if _cdist_norm(faces[j].bbox, faces[k_own].bbox) >= 1.0:
++            if _cdist_norm(faces[j].bbox, faces[k_own].bbox) >= 1.25:          # (v11.2.148: 1.25, as the crossing test)
+                 return "far_from_partner"
+             kj, kk = getattr(faces[j], "kps", None), getattr(faces[k_own], "kps", None)
+             if kj is not None and kk is not None and np.size(kj) >= 10 and np.size(kk) >= 10:
+@@ -3690,6 +3690,12 @@
+                     if _iou(f.bbox, f2.bbox) > 0.02 or _cdist_norm(f.bbox, f2.bbox) < 0.55:
+                         touching = True
+                         break
++                # v11.2.148: the kiss is one event, not a boundary. A face whose track is crossing another (their boxes within 1.25
++                # face widths, _mark_crossings) counts as touching too. The 0.55 gap alone flipped the contact admission on and off
++                # from frame to frame (field log v11.2.160: every refusal of both faces was not_touching) and the partly hidden
++                # admission was rarely reached. Gated on contact_follow.
++                if not touching and bool(_P.get("contact_follow", 1)) and tr.established and tr.crossing:
++                    touching = True
+                 # Gender is not a reason to drop a face. InsightFace often
+                 # calls the man a woman, and the woman a man for a few frames.
+                 # The Detect-frame photo is the identity. A wrong gender tag
+--- v11.2.147_KissFollow/config.py	2026-11-07 12:30:16.469603930 +0000
++++ v11.2.148_KissFollow/config.py	2026-11-07 14:17:40.998332530 +0000
+@@ -289,8 +289,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.147"
+-BUILD = "KissFollow · log only: why each contact detection is refused, and how each face in contact is painted (no change to the painting)"
++VERSION = "v11.2.148"
++BUILD = "KissFollow · a kiss is one event: a face crossing its partner counts as touching, so the contact admission no longer flips frame to frame; the partly hidden face is taken back where it touches"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
