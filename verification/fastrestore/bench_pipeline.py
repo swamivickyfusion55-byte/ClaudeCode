@@ -104,6 +104,25 @@ for n in ("_fa_get", "_embed_faces", "_enhance", "_soft_polish", "_face_region_o
     timed(cp, n)
 for n in ("occluder_keep", "paste_back", "aligned_correction", "scale_affine"):
     timed(cp._E if hasattr(cp, "_E") else swap_engine, n, "E." + n)
+_OD = []
+if os.environ.get("ORDER_DUMP") and hasattr(cp, "_rival_landmarks"):
+    # v11.2.144: every front / behind decision of the one-face-per-pixel rule - per frame and face: whether it and the other face
+    # count as seen, the outline-edge evidence (key[0] over key[1], -1 without), and whether the other face was put in front
+    _orig_rl = cp._rival_landmarks
+    def _rl_wrap(records, slot):
+        out_ = _orig_rl(records, slot)
+        me = records.get(slot) or {}
+        for s2, r2 in records.items():
+            if s2 == slot or r2 is None:
+                continue
+            key = (slot, s2) if slot < s2 else (s2, slot)
+            fr = [o.get("front") for o in out_ if isinstance(o, dict) and o.get("lmk") is r2.get("lmk")]
+            _OD.append({"g": int(getattr(cp, "_ORDER_NOW", [0])[0]), "slot": int(slot), "other": int(s2),
+                        "me_seen": me.get("seen_near", me.get("seen")), "o_seen": r2.get("seen_near", r2.get("seen")),
+                        "me_det": bool(me.get("det")), "o_det": bool(r2.get("det")), "follow": bool(me.get("follow")),
+                        "cue": float(getattr(cp, "_ORDER_CUE", {}).get(key, -1.0)), "other_front": (fr[0] if fr else None)})
+        return out_
+    cp._rival_landmarks = _rl_wrap
 if hasattr(cp, "_timeline_strip"):
     _orig_tl = cp._timeline_strip
     def _tl_wrap(tl, fps, nslots, bucket_sec=2.0):
@@ -226,6 +245,8 @@ for _kv in filter(None, os.environ.get("OVR", "").split(",")):
     _k, _v = _kv.split("="); swap_engine._P[_k] = float(_v)
 cp._run_job_body(jid, src, clip, cfg)
 wall = time.perf_counter() - t0
+if _OD:
+    json.dump(_OD, open(WORK + "/order_dump.json", "w"))
 j = cp.jobs[jid]
 res = j.get("result_path")
 print(json.dumps({"label": LABEL, "status": j.get("status"), "wall_s": round(wall, 1), "model_load_s": round(t_load, 1),
