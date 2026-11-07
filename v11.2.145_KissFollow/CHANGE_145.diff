@@ -1,0 +1,29 @@
+--- v11.2.144_KissFollow/swap_engine.py	2026-11-07 04:53:34.116419472 +0000
++++ v11.2.145_KissFollow/swap_engine.py	2026-11-07 07:51:32.341251331 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.144-kissfollow"
++ENGINE_VERSION = "aequus-1.2.145-kissfollow"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -3637,12 +3637,15 @@
+                 # calls the man a woman, and the woman a man for a few frames.
+                 # The Detect-frame photo is the identity. A wrong gender tag
+                 # must not skip him or flash her back to the original.
+-                # v11.2.144: does this crop read as ANOTHER tracked person (by 0.25 or more over its own)? In a profile kiss the
++                # v11.2.144: does this crop read as ANOTHER tracked person (by 0.10 or more over its own; 0.25 in v11.2.144)? In a profile kiss the
+                 # face behind has the partner in half its crop (measured: 0.75-0.88 to the partner, 0.05-0.20 to itself). A
+                 # face that is only a sliver behind the other reads as nobody (0.18-0.26 to itself, 0.02-0.06 to the partner)
+                 # and its 5 points are guessed 40 px off: it keeps the v11.2.141 rules (held where it was last seen well).
+                 _xo = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
+-                _reads_other = bool(_P.get("contact_follow", 1)) and _xo >= sim + 0.25
++                # v11.2.145: the margin is 0.10 (was 0.25). A man turned sideways reads as his partner by less than 0.25 in the
++                # field log (87 identity rejections, all below the floor, 27 frames painted on a predicted position). A sliver
++                # reads as nobody: its own similarity stays above the partner's, so it is still not admitted.
++                _reads_other = bool(_P.get("contact_follow", 1)) and _xo >= sim + float(_P.get("contact_read_margin", 0.10))
+                 if has_id:
+                     _abs_ok = True
+                     if (_reads_other and touching and spatial_hit >= 0.35
