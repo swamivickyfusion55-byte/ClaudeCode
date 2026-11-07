@@ -2,6 +2,7 @@
 Same faces and build as make_kiss.py (insightface's sample photo, cut-outs, B in front of A where they overlap). NOT user footage.
   cross   A walks left->right, B right->left, B in front: A is hidden behind B for about 12 frames, then both carry on
   hug     cheek to cheek, the pair turns half a circle about its middle (B stays in front), ends with the sides swapped
+  sway    (v11.2.144) in contact for 100 frames while the couple sways together (up to ~14 px a frame), B in front
 Writes kiss_<name>.mp4 and kiss_<name>_gt.npz (a: each face's visible mask per frame, kps: each face's 5 points per frame).
 usage: make_cross.py [cross|hug ...]   (run from the output folder)"""
 import os, sys, subprocess, cv2, numpy as np
@@ -47,6 +48,24 @@ def hug(i, n=120):
     xb, yb = cx + r * np.cos(th), cy - 0.35 * r * np.sin(th)
     return xa, ya, 8.0 * np.cos(th), xb, yb, -8.0 * np.cos(th)
 
+def sway(i, n=120):
+    """v11.2.144: a kiss that MOVES. 20 frames coming together (centres 520 -> 210 px apart, B in front, overlapping as in smooch),
+    then 100 frames in contact while the couple sways together - up to 110 px sideways and 30 px up and down (at most ~14 px a
+    frame), both heads tilting together - with a small push between them. Made to show a face held still while the heads move
+    (lag), and what happens when the detector loses a face during contact (see bench_pipeline.py drop=)."""
+    if i < 20:
+        sep, cx, cy, tilt = 520.0 - 310.0 * (i / 20.0), 640.0, 360.0, 0.0
+    else:
+        u = i - 20
+        sep = 210.0 - 8.0 * np.sin(u * 2 * np.pi / 15.0)
+        cx = 640.0 + 110.0 * np.sin(u * 2 * np.pi / 50.0)
+        cy = 360.0 + 30.0 * np.sin(u * 2 * np.pi / 37.0)
+        tilt = 6.0 * np.sin(u * 2 * np.pi / 60.0)
+    return cx - sep / 2, cy, 8.0 + tilt, cx + sep / 2, cy, -8.0 + tilt
+
 if __name__ == "__main__":
     for nm in (sys.argv[1:] or ["cross", "hug"]):
-        build_path(nm, {"cross": cross, "hug": hug}[nm])
+        if nm == "swaylong":                           # v11.2.144: 240 frames (8 s) - a gap that crosses the job's batch boundary (144 at 720p)
+            build_path(nm, sway, n=240)
+        else:
+            build_path(nm, {"cross": cross, "hug": hug, "sway": sway}[nm])

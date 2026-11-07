@@ -97,6 +97,8 @@ for name in NAMES:
             for _tr in getattr(_g, "tracks", []):
                 if getattr(_tr, "group", None) == "belly":
                     E.anchor_to_body(_tr, _bp.affine, log=msgs.append, gray_at=lambda i: grays[i])
+                    if hasattr(_bp, "below_floor"):
+                        _tr.floor_fn = _bp.below_floor      # v11.2.143, as core_pipeline
     t_plan = time.time() - t0
     t0 = time.time()
     out = []
@@ -105,6 +107,23 @@ for name in NAMES:
             f = tr.apply(f, i)
         out.append(f)
     t_apply = (time.time() - t0) / n
+    if os.environ.get("VT_TRUTH"):
+        # v11.2.143: the floor, on the frames as painted (in memory: no codec noise) - every pixel the paint changed, placed on the
+        # body by the clip's TRUE shoulders and hips; any below t 0.10 (0.10 above the hip line, the bikini line) is a breach
+        import belly_clear as _BCf
+        _Tf = np.load(os.environ["VT_TRUTH"]); _w, _fr, _deep = 0, 0, 0.0
+        for _i in range(n):
+            _ch = (out[_i] != inp[_i]).any(axis=2)
+            if not _ch.any():
+                continue
+            _tl = _Tf["lm"][_i + START]
+            _LM = {11: (_tl[0][0], _tl[0][1], 1.0), 12: (_tl[1][0], _tl[1][1], 1.0), 23: (_tl[2][0], _tl[2][1], 1.0), 24: (_tl[3][0], _tl[3][1], 1.0)}
+            _ys, _xs = np.nonzero(_ch); _ut = _BCf.to_body(np.stack([_xs, _ys], 1).astype(np.float64), _LM)
+            _b = _ut[:, 1] < 0.10
+            if _b.any():
+                _w = max(_w, int(_b.sum())); _fr += 1
+                _deep = max(_deep, float((0.10 - _ut[_b, 1]).max()) * float(np.linalg.norm(_BCf.body_affine(_LM)[:, 1])))
+        print("%s: floor - painted px below t 0.10: worst frame %d px, on %d of %d frames, deepest %.1f px below the line" % (name, _w, _fr, n, _deep), flush=True)
     left, err, shim, objc, outside, missed = [], [], [], [], [], 0
     prev = None
     ring_f, ring_m, ring_fast, cprev = [], [], [], None

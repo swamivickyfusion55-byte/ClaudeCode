@@ -22,6 +22,58 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 import cv2, numpy as np
 import core_pipeline as cp
 import swap_engine
+DROP_STATS = {}
+if KW.get("drop"):
+    # v11.2.144: the detector "loses" a person on chosen frames - drop=A:30-100 (person A, frames 30-100), drop=A:30-100:alt (every
+    # other frame of that span: a face found and lost by turns), several separated by ";" - to test what the job does when the face is
+    # not found during contact (a kiss in profile: SCRFD loses one face, or both, for seconds). The frame is recognised by its
+    # pixels (the frame given to _make_det_frame against the clip's own frames); every face the job's detection returns for that
+    # frame (main pass, hi-res probe, zoom crops: all end in _sort_faces_left) whose box centre lies within 0.35 of a face width of
+    # the person's TRUE 5-point centre is removed. Persons: A = gt index 0 (left at start), B = 1.
+    _clip_src = KW.get("clip")
+    _gt = np.load(os.path.splitext(_clip_src)[0] + "_gt.npz")["kps"]
+    _cap = cv2.VideoCapture(_clip_src); _sigs = []
+    while True:
+        _ok, _f = _cap.read()
+        if not _ok:
+            break
+        _sigs.append(cv2.resize(cv2.cvtColor(_f, cv2.COLOR_BGR2GRAY), (64, 36), interpolation=cv2.INTER_AREA).astype(np.float32))
+    _cap.release(); _sigs = np.array(_sigs)
+    _drops = {}
+    for _spec in KW["drop"].split(";"):
+        _pp = _spec.split(":"); _who = {"A": 0, "B": 1}[_pp[0]]; _a, _b = (int(v) for v in _pp[1].split("-"))
+        _alt = len(_pp) > 2 and _pp[2] == "alt"
+        for _i in range(_a, _b + 1):
+            if not _alt or (_i - _a) % 2 == 0:
+                _drops.setdefault(_i, set()).add(_who)
+    _CUR = {"idx": -1, "sx": 1.0}
+    _orig_mdf, _orig_sfl = cp._make_det_frame, cp._sort_faces_left
+    def _mdf(frm, *a, **k):
+        try:
+            s = cv2.resize(cv2.cvtColor(frm, cv2.COLOR_BGR2GRAY), (64, 36), interpolation=cv2.INTER_AREA).astype(np.float32)
+            _CUR["idx"] = int(np.argmin(np.abs(_sigs - s[None]).mean(axis=(1, 2)))); _CUR["sx"] = float(frm.shape[1]) / 1280.0
+        except Exception:
+            _CUR["idx"] = -1
+        return _orig_mdf(frm, *a, **k)
+    def _sfl(faces):
+        faces = _orig_sfl(faces)
+        who = _drops.get(_CUR["idx"])
+        if not who or not faces:
+            return faces
+        keep = []
+        for f in faces:
+            cxy = np.array([(f.bbox[0] + f.bbox[2]) / 2.0, (f.bbox[1] + f.bbox[3]) / 2.0])
+            gone = False
+            for w_ in who:
+                k5 = _gt[_CUR["idx"], w_] * _CUR["sx"]; fw = 2.6 * float(np.linalg.norm(k5[1] - k5[0]))
+                if float(np.linalg.norm(cxy - k5.mean(axis=0))) < 0.35 * fw:          # (0.75 reached the partner in contact)
+                    gone = True
+            if gone:
+                DROP_STATS[_CUR["idx"]] = DROP_STATS.get(_CUR["idx"], 0) + 1
+            else:
+                keep.append(f)
+        return keep
+    cp._make_det_frame, cp._sort_faces_left = _mdf, _sfl
 if os.environ.get("MASK_DUMP"):
     import atexit
     _DUMP = []; _orig_bm = swap_engine.AlignedCompositor.build_mask
@@ -29,6 +81,7 @@ if os.environ.get("MASK_DUMP"):
     def _bm(self, face, M, size, **kw):
         m = _orig_bm(self, face, M, size, **kw)
         _DUMP.append(cv2.resize(m, (128, 128), interpolation=cv2.INTER_AREA))
+        _G[0] = int(getattr(cp, "_ORDER_NOW", [0])[0])        # v11.2.144: the output frame being painted (frames without paint have no entry)
         tr_ = kw.get("track"); _MS.append((-1 if tr_ is None else int(getattr(tr_, "slot", -1)), np.asarray(M, np.float32).reshape(2, 3).copy(), int(size), int(_G[0])))
         return m
     swap_engine.AlignedCompositor.build_mask = _bm
@@ -181,5 +234,7 @@ print(json.dumps({"label": LABEL, "status": j.get("status"), "wall_s": round(wal
 rows = sorted(T.items(), key=lambda kv: -kv[1])
 print("%-52s %9s %8s %9s" % ("function (wall seconds, summed over threads)", "total_s", "calls", "ms/call"))
 for k, v in rows: print("%-52s %9.1f %8d %9.1f" % (k, v, C[k], 1000 * v / max(1, C[k])))
+if KW.get("drop"):
+    print("DROP: %d detections removed on %d frames (%s)" % (sum(DROP_STATS.values()), len(DROP_STATS), KW["drop"]))
 for l in open(WORK + "/job.log"):
     if "Done in" in l or "detector input" in l or "native_threads" in l or "SEARCH-BACKOFF" in l: print(l.strip()[:600])

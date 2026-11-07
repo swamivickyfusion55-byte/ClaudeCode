@@ -15,7 +15,9 @@ N = int(sys.argv[3]) if len(sys.argv) > 3 else 90
 HEAD = sys.argv[4] if len(sys.argv) > 4 else "pixelate"
 NAVEL_T = float(sys.argv[6]) if len(sys.argv) > 6 else 0.27
 WAIST = len(sys.argv) > 7 and sys.argv[7] == "waistband"
-FAST = "motion=fast" in sys.argv          # v11.2.142: 3 x the shift, turn and zoom, twice as fast   # a dark waistband across the belly (t 0.11-0.15) and a stroke running into it
+FAST = "motion=fast" in sys.argv
+SOFT = "patch=soft" in sys.argv          # v11.2.143: a faint, soft-edged brown patch below the navel (part 6: pigment, not ink)
+ONLY_PATCH = "marks=patch" in sys.argv   # v11.2.143: no tattoos - the soft patch, the mole and a small freckle far from it          # v11.2.142: 3 x the shift, turn and zoom, twice as fast   # a dark waistband across the belly (t 0.11-0.15) and a stroke running into it
 SKIN = sys.argv[5] if len(sys.argv) > 5 else "proc"     # proc: make_patchclip.py's procedural skin texture (pores, mottling); flat: none
 os.makedirs(out, exist_ok=True)
 im = cv2.imread(src)
@@ -63,14 +65,14 @@ m = np.zeros((H, W), np.uint8); c1 = (mx - 18, Y(0.47))
 cv2.circle(m, c1, 12, 255, 3, cv2.LINE_AA); cv2.ellipse(m, (c1[0] + 4, c1[1] - 3), (6, 4), 30, 0, 300, 255, 2, cv2.LINE_AA)
 cv2.line(m, (c1[0] + 8, c1[1] + 11), (c1[0] + 26, Y(0.40)), 255, 3, cv2.LINE_AA)
 cv2.ellipse(m, (c1[0] + 22, Y(0.42)), (7, 3), -35, 0, 360, 255, -1, cv2.LINE_AA)
-put(m, 1)
+if not ONLY_PATCH: put(m, 1)
 # 2: beside the navel, a script-like stroke and three dots, 0.42 of the hip width to the right
 m = np.zeros((H, W), np.uint8); x2 = mx + int(0.42 * hipw)
 cv2.polylines(m, [np.array([[x2 - 14, Y(0.31)], [x2 - 6, Y(0.26)], [x2 + 2, Y(0.30)], [x2 + 10, Y(0.25)], [x2 + 16, Y(0.29)]], np.int32)],
               False, 255, 3, cv2.LINE_AA)
 for d in (-8, 0, 8):
     cv2.circle(m, (x2 + d, Y(0.22)), 3, 255, -1, cv2.LINE_AA)
-put(m, 2)
+if not ONLY_PATCH: put(m, 2)
 # 3: lower belly, above the floor (t 0.12-0.20): a wave and a ring   (waistband variant: 5, a stroke running down into the band)
 m = np.zeros((H, W), np.uint8)
 if WAIST:
@@ -81,7 +83,7 @@ else:
   cv2.polylines(m, [np.array([[mx - 46, Y(0.14)], [mx - 24, Y(0.20)], [mx, Y(0.13)], [mx + 24, Y(0.20)], [mx + 44, Y(0.14)]], np.int32)],
               False, 255, 4, cv2.LINE_AA)
   cv2.circle(m, (mx - 64, Y(0.17)), 8, 255, 3, cv2.LINE_AA)
-  put(m, 3)
+  if not ONLY_PATCH: put(m, 3)
 ink = np.array([70, 45, 35], np.float32)
 a = cv2.GaussianBlur((parts > 0).astype(np.float32), (0, 0), 0.8)[..., None] * 0.85
 marked = (clean.astype(np.float32) * (1 - a) + ink * a)
@@ -90,7 +92,26 @@ m = np.zeros((H, W), np.uint8); cv2.circle(m, (mx - int(0.33 * hipw), Y(0.37)), 
 put(m, 4)
 am = cv2.GaussianBlur((m > 100).astype(np.float32), (0, 0), 1.0)[..., None] * 0.80
 mole = tone * np.array([0.45, 0.55, 0.70], np.float32)
-marked = (marked * (1 - am) + mole * am).astype(np.uint8)
+marked = (marked * (1 - am) + mole * am)
+if ONLY_PATCH:                                  # a small freckle on the other side, high up (a stray mark far from the patch)
+    m = np.zeros((H, W), np.uint8); cv2.circle(m, (mx + int(0.30 * hipw), Y(0.50)), 3, 255, -1, cv2.LINE_AA)
+    put(m, 7)
+    af = cv2.GaussianBlur((m > 100).astype(np.float32), (0, 0), 0.8)[..., None] * 0.70
+    marked = marked * (1 - af) + mole * af
+if SOFT:
+    # 6: an irregular brown patch below the navel, about 46 x 30 px: 16 % darker at its middle, fading to nothing over ~8 px - the
+    # marks finder's darker-skin test (12 levels) catches only its core
+    pc = (mx + int(0.08 * hipw), Y(0.19))
+    blob = np.zeros((H, W), np.float32)
+    cv2.ellipse(blob, pc, (21, 13), 12, 0, 360, 1.0, -1, cv2.LINE_AA)
+    cv2.ellipse(blob, (pc[0] - 14, pc[1] + 6), (10, 8), 0, 0, 360, 1.0, -1, cv2.LINE_AA)
+    cv2.circle(blob, (pc[0] + 17, pc[1] - 7), 7, 1.0, -1, cv2.LINE_AA)
+    wgt = cv2.GaussianBlur(blob, (0, 0), 4.0)
+    wgt = np.clip(wgt / max(1e-6, float(wgt.max())), 0, 1)
+    put(((wgt > 0.12) * 255).astype(np.uint8), 6)
+    tint = np.array([0.80, 0.84, 0.90], np.float32)         # browner as well as darker
+    marked = marked * (1 - wgt[..., None] * (1 - tint))
+marked = np.clip(marked, 0, 255).astype(np.uint8)
 if WAIST:
     wb = np.zeros((H, W), np.uint8)
     cv2.rectangle(wb, (0, Y(0.15)), (W - 1, Y(0.11)), 255, -1)
@@ -121,4 +142,4 @@ vw.release(); vc.release()
 np.savez_compressed(out + "/truth.npz", mask=np.array(masks), parts=np.array(pmasks), ref=marked, clean=clean, navel=np.array(navs), lm=np.array(lms),
                     navel_t=np.float64(NAVEL_T), waist=np.array(wbs))
 cv2.imwrite(out + "/frame0.jpg", marked, [cv2.IMWRITE_JPEG_QUALITY, 95])
-print("clip", W, "x", H, N, "frames; marks", {k: int((parts == k).sum()) for k in (1, 2, 3, 4, 5)}, "px; navel", nav, "t", NAVEL_T, "waistband" if WAIST else "")
+print("clip", W, "x", H, N, "frames; marks", {k: int((parts == k).sum()) for k in (1, 2, 3, 4, 5, 6, 7)}, "px; navel", nav, "t", NAVEL_T, "waistband" if WAIST else "")

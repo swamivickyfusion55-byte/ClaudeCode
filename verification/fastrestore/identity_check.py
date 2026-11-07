@@ -34,6 +34,8 @@ for (x1, y1, x2, y2) in ((466, 268, 573, 415), (745, 338, 845, 479)):
     fh = L[L[:, 1] < top + 0.35 * h].copy(); fh[:, 1] -= 0.30 * h                      # a forehead estimate above the brows
     PHOTO.append((f.kps.astype(np.float32), np.vstack([L, fh])))
 def face_region(t, p, shape):
+    if REGION is not None:                    # v11.2.144: the clip's own face outline per frame (make_pkiss.py)
+        m = np.zeros(shape[:2], np.uint8); cv2.fillConvexPoly(m, cv2.convexHull(np.round(REGION[t, p]).astype(np.int32)), 1); return m > 0
     k0, L = PHOTO[p]; M, _ = cv2.estimateAffinePartial2D(k0, np.asarray(kps[t, p], np.float32))
     if M is None: return None
     P = L @ M[:, :2].T + M[:, 2]; m = np.zeros(shape[:2], np.uint8)
@@ -59,6 +61,7 @@ def frames(p):
         fr.append(f)
     return fr
 out, inp = frames(OUT), frames(CLIP); g = np.load(GT); vis, kps = g["a"], g["kps"]
+REGION = g["region"] if "region" in g.files else None
 n = min(len(out), len(inp), len(vis)); full = [float((vis[:, p] > 127).sum(axis=(1, 2)).max()) for p in range(2)]
 lab = {0: [], 1: []}; sims = {0: [], 1: []}
 for t in range(n):
@@ -91,6 +94,13 @@ def flick(seq, p):
 _dump = None
 if DUMP:
     _z = np.load(DUMP); _sl = _z["slot"]; _idx = {int(s): np.nonzero(_sl == s)[0] for s in np.unique(_sl)}
+    # v11.2.144: dumps that carry the frame number ("g", not all 0) are looked up by frame: a frame without paint (a revert) has no
+    # entry, and counting entries would shift every later frame onto the wrong one
+    _byg = None
+    if "g" in _z.files and int(np.max(_z["g"])) > 0:
+        _byg = {}
+        for _k in range(len(_sl)):
+            _byg.setdefault(int(_sl[_k]), {})[int(_z["g"][_k])] = _k
     def _centre(k):
         M = _z["M"][k]; size = int(_z["size"][k]); IM = cv2.invertAffineTransform(M); return IM[:, :2] @ np.array([size / 2, size / 2]) + IM[:, 2]
     _slot_of = {}
@@ -99,9 +109,14 @@ if DUMP:
     _dump = (_z, _idx, _slot_of)
 def _paint_map(t, p, shape):
     z, idx, slot_of = _dump
-    ks = idx.get(slot_of[p]);
-    if ks is None or t >= len(ks): return None
-    k = ks[t]; size = int(z["size"][k]); m = cv2.resize(z["m"][k].astype(np.float32), (size, size))
+    if _byg is not None:
+        k = _byg.get(slot_of[p], {}).get(int(t))
+        if k is None: return np.zeros(shape[:2], np.float32)          # (not painted on this frame)
+    else:
+        ks = idx.get(slot_of[p]);
+        if ks is None or t >= len(ks): return None
+        k = ks[t]
+    size = int(z["size"][k]); m = cv2.resize(z["m"][k].astype(np.float32), (size, size))
     return cv2.warpAffine(m, cv2.invertAffineTransform(z["M"][k]), (shape[1], shape[0]))
 def painted(p):
     sh, vv = [], []
