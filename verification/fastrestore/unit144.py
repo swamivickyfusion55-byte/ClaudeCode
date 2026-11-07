@@ -19,8 +19,11 @@ def unit(v):
     return v / np.linalg.norm(v)
 ea, eb, ec = unit(rng.normal(size=512)), unit(rng.normal(size=512)), unit(rng.normal(size=512))
 def weak(e):
-    return unit(0.15 * e + rng.normal(size=512) * 0.05)                     # a profile of that person: similarity ~0.1
-def kiss(drop_a=range(22, 31), profile_after=30, extra=None, n=40):
+    return unit(0.15 * e + rng.normal(size=512) * 0.05)                     # a sliver / turned-away face: similarity ~0.1 to anyone
+def prof(e):
+    # a profile kiss as measured (make_pkiss.py, the real detector): the partner fills half of the crop - 0.80-0.88 to B
+    return unit(0.12 * e + 0.85 * eb + rng.normal(size=512) * 0.02)
+def kiss(drop_a=range(22, 31), profile_after=30, extra=None, n=40, look=None):
     """-> per call: (A's box x1, A's true x1, slot0 got A's face, slot0 got B's face, slot1 got A's face), tracker"""
     T = E.MultiFaceTracker([0, 1]); xa, xb = 300.0, 700.0; out = []
     for k in range(n):
@@ -28,7 +31,7 @@ def kiss(drop_a=range(22, 31), profile_after=30, extra=None, n=40):
             xa += 6.0; xb -= 6.0
         else:
             xa += 3.0 * np.sin(k / 3.0); xb += 3.0 * np.sin(k / 3.0)
-        fa_ = F([xa, 300, xa + 250, 550], weak(ea) if k > profile_after else ea)
+        fa_ = F([xa, 300, xa + 250, 550], (look or prof)(ea) if k > profile_after else ea)
         fb_ = F([xb, 300, xb + 250, 550], eb)
         faces = [fb_] if k in drop_a else [fa_, fb_]
         if extra is not None:
@@ -42,8 +45,12 @@ err_miss = max(abs(a - t) for a, t, *_ in out[22:31])
 check("in contact, a face the detector misses moves with its partner (the approach stops at the kiss: no overshoot into the partner)",
       err_miss <= 8.0, "worst %.1f px over the 9 missed calls" % err_miss)
 re = sum(1 for (_, _, a0, _, _) in out[31:] if a0)
-check("...and when it is found again, in profile (similarity ~0.1), it is taken back at once - no lock-out for the rest of the kiss",
+check("...and when it is found again in profile (its crop reading as the partner, 0.85), it is taken back at once - no lock-out",
       re == 9, "%d of 9 calls (%s)" % (re, o141_note))
+out_w, _ = kiss(look=weak)
+re_w = sum(1 for (_, _, a0, _, _) in out_w[31:] if a0)
+check("a face that reads as nobody (a sliver behind the other, similarity ~0.1 to anyone) keeps the v11.2.141 rules (not taken "
+      "back by geometry)", re_w == 0, "%d of 9 calls" % re_w)
 wrong = sum(1 for (_, _, _, b0, a1) in out if b0 or a1)
 check("...and no face ever goes to the other person's slot", wrong == 0, "%d wrong assignments in 40 calls" % wrong)
 # a stranger appears right where A was last seen while A's own face is also there: A's own detection wins (mutual nearest)

@@ -3637,14 +3637,21 @@ class MultiFaceTracker:
                 # calls the man a woman, and the woman a man for a few frames.
                 # The Detect-frame photo is the identity. A wrong gender tag
                 # must not skip him or flash her back to the original.
+                # v11.2.144: does this crop read as ANOTHER tracked person (by 0.25 or more over its own)? In a profile kiss the
+                # face behind has the partner in half its crop (measured: 0.75-0.88 to the partner, 0.05-0.20 to itself). A
+                # face that is only a sliver behind the other reads as nobody (0.18-0.26 to itself, 0.02-0.06 to the partner)
+                # and its 5 points are guessed 40 px off: it keeps the v11.2.141 rules (held where it was last seen well).
+                _xo = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
+                _reads_other = bool(_P.get("contact_follow", 1)) and _xo >= sim + 0.25
                 if has_id:
                     _abs_ok = True
-                    if touching and spatial_hit >= 0.35 and self._contact_mine(i, j, s, faces, slots, sim, sim_all, has_id_all):
+                    if (_reads_other and touching and spatial_hit >= 0.35
+                            and self._contact_mine(i, j, s, faces, slots, sim, sim_all, has_id_all)):
                         _abs_ok = True
                         contact_ok.add((i, j))
                     elif touching and spatial >= 0.20:
                         _abs_ok = True
-                        if bool(_P.get("contact_follow", 1)) and self._contact_mine(i, j, s, faces, slots, sim, sim_all, has_id_all):
+                        if _reads_other and self._contact_mine(i, j, s, faces, slots, sim, sim_all, has_id_all):
                             contact_ok.add((i, j))
                     elif long_gap:
                         if sim < 0.40:
