@@ -1268,7 +1268,7 @@ _DUP_IOU = 0.55
 _DUP_SIM = 0.55
 
 
-def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35):
+def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35, apart=None):
     """One person → one box. Duplicate woman-boxes were occupying the man's slot.
 
     ``centre_frac`` is the centre-distance fallback used ONLY for a pair where
@@ -1278,7 +1278,11 @@ def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35):
     apart (measured: two distinct people at centre distance 55px with 100x130
     boxes, IoU 0.29, collapsed to one). _fa_get runs this BEFORE deferred
     recognition has produced embeddings, so there it passes a much tighter
-    value that only catches boxes sitting on top of each other."""
+    value that only catches boxes sitting on top of each other.
+
+    ``apart`` (v11.2.144): pairs (id, id) of detections the tracker knows to be two different people in contact (see
+    _contact_apart); only the box-overlap test applies to them. In a profile kiss the partner fills half of a face's ArcFace
+    crop, so the two people's embeddings agree at 0.8-0.9 and the cosine test merged them: the face behind was gone."""
     faces = _as_face_list(faces)
     if len(faces) < 2:
         return faces
@@ -1317,6 +1321,8 @@ def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35):
                     break
             except Exception:
                 pass
+            if apart and (id(f), id(g)) in apart:
+                continue
             eg = _emb(g)
             if ef is not None and eg is not None:
                 try:
@@ -4371,6 +4377,54 @@ def _face_looks_marginal(f) -> bool:
         return False
 
 
+def _contact_apart(faces, tracker):
+    """v11.2.144 (SDOS-144): pairs of detections that are two different people, by the tracker's own geometry. Each sits where a
+    different established person was last really seen (mutual nearest: the detection nearest to that person's last sighting, and
+    that person the nearest to it), its facial points lie nearer that person's last points than the other's, and the two boxes
+    are separate faces (overlap under 0.40). Empty when CONTACT_FOLLOW is off or fewer than two people are tracked."""
+    out = set()
+    try:
+        if not CONTACT_FOLLOW or tracker is None or len(faces) < 2:
+            return out
+        trs = [(s, t) for s, t in tracker.tracks.items()
+               if t is not None and t.established and getattr(t, "last_hit_bbox", None) is not None
+               and int(getattr(t, "missed", 0) or 0) <= 30]
+        if len(trs) < 2:
+            return out
+        cd = _E._cdist_norm
+        near_t = {}
+        for s, t in trs:
+            near_t[s] = min(range(len(faces)), key=lambda k: cd(t.last_hit_bbox, faces[k].bbox))
+        mine = {}
+        for k, f in enumerate(faces):
+            s = min(trs, key=lambda st: cd(st[1].last_hit_bbox, f.bbox))[0]
+            if near_t.get(s) == k:
+                mine[k] = s
+
+        def _kc(p):
+            if p is None or np.size(p) < 10:
+                return None
+            return np.asarray(p, np.float32).reshape(-1, 2).mean(0)
+        tk = {s: _kc(getattr(t, "last_hit_kps", None)) for s, t in trs}
+        ks = sorted(mine)
+        for a_ in range(len(ks)):
+            for b_ in range(a_ + 1, len(ks)):
+                ka, kb = ks[a_], ks[b_]
+                sa, sb = mine[ka], mine[kb]
+                fa, fb = faces[ka], faces[kb]
+                if sa == sb or _bbox_iou(fa.bbox, fb.bbox) >= 0.40:
+                    continue
+                ca, cb = _kc(getattr(fa, "kps", None)), _kc(getattr(fb, "kps", None))
+                if ca is None or cb is None or tk.get(sa) is None or tk.get(sb) is None:
+                    continue
+                if (float(np.linalg.norm(ca - tk[sa])) < float(np.linalg.norm(ca - tk[sb]))
+                        and float(np.linalg.norm(cb - tk[sb])) < float(np.linalg.norm(cb - tk[sa]))):
+                    out.add((id(fa), id(fb))); out.add((id(fb), id(fa)))
+    except Exception as _e:
+        logging.debug("contact apart skipped: %s", _e)
+    return out
+
+
 def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
                             dt_frames=1.0):
     """Associate detections to replacement slots via the v11 MultiFaceTracker.
@@ -4414,7 +4468,14 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
         # that way). Now that the embeddings exist, run it once more so the
         # one case the fallback cannot see - two boxes barely overlapping that
         # are the same person - is still caught.
-        faces = _dedupe_faces(faces)
+        # v11.2.144: but never two people the tracker sees in contact, each where it was last seen (_contact_apart)
+        _apart = _contact_apart(faces, tracker)
+        if _apart:
+            try:
+                tracker.contact_apart_n = int(getattr(tracker, "contact_apart_n", 0)) + 1
+            except Exception:
+                pass
+        faces = _dedupe_faces(faces, apart=_apart)
     except Exception as e:
         logging.debug("deferred embedding stage skipped: %s", e)
 
@@ -4853,13 +4914,14 @@ except Exception:
 try:
     from config import CONTACT_HOLD_SEC as _CFG_CONTACT_HOLD_SEC, CONTACT_FLAT_SEC as _CFG_CONTACT_FLAT_SEC
     CONTACT_HOLD_SEC, CONTACT_FLAT_SEC = float(_CFG_CONTACT_HOLD_SEC), float(_CFG_CONTACT_FLAT_SEC)
-    try:
-        from config import CONTACT_FOLLOW as _CFG_CONTACT_FOLLOW, CONTACT_LONG_SEC as _CFG_CONTACT_LONG_SEC
-        CONTACT_FOLLOW, CONTACT_LONG_SEC = bool(_CFG_CONTACT_FOLLOW), float(_CFG_CONTACT_LONG_SEC)
-    except Exception:
-        CONTACT_FOLLOW, CONTACT_LONG_SEC = True, 8.0
 except Exception:
     CONTACT_HOLD_SEC, CONTACT_FLAT_SEC = 2.0, 1.0
+
+try:
+    from config import CONTACT_FOLLOW as _CFG_CONTACT_FOLLOW, CONTACT_LONG_SEC as _CFG_CONTACT_LONG_SEC
+    CONTACT_FOLLOW, CONTACT_LONG_SEC = bool(_CFG_CONTACT_FOLLOW), float(_CFG_CONTACT_LONG_SEC)
+except Exception:
+    CONTACT_FOLLOW, CONTACT_LONG_SEC = True, 8.0
 
 try:
     from config import PASTE_FADE_SEC as _CFG_PASTE_FADE_SEC
@@ -8206,7 +8268,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             "detector_calls=%d (empty=%d); swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d; det_faces_avg=%.2f max=%d; "
             "det_passes=%d raw_faces=%d embeds=%d (%.2f embeds per raw face%s); "
             "shot_cuts=%d; "
-            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d/%d contact_follow=%d occ_cut=%d/%d; "
+            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d/%d contact_follow=%d contact_apart=%d occ_cut=%d/%d; "
             "geom_errors=%d; "
             "PER-PERSON painted=%s recorded=%s picker_calls=%d picker_dropped_ref=%d; "
             "weak_kept=%d weak_dropped=%d; ID-GATE %s",
@@ -8226,7 +8288,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             _CUT_STATS["cuts"],
             stats.get("revert_frames", 0), stats.get("blind_frames", 0),
             stats.get("faint_frames", 0), stats.get("vis_reject_calls", 0), stats.get("contact_hold", 0), stats.get("contact_reuse", 0),
-            stats.get("contact_follow", 0),
+            stats.get("contact_follow", 0), int(getattr(_tracker, "contact_apart_n", 0) or 0),
             _E.OCC_STATS.get("cut_frames", 0), _E.OCC_STATS.get("frames", 0),
             stats.get("record_geom_errors", 0),
             dict(sorted((stats.get("slot_painted") or {}).items())),
