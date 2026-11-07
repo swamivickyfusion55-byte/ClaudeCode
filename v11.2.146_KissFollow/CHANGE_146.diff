@@ -1,0 +1,147 @@
+--- /dev/fd/63	2026-11-07 09:15:20.699991422 +0000
++++ v11.2.146_KissFollow/swap_engine.py	2026-11-07 09:15:11.347072013 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.145-kissfollow"
++ENGINE_VERSION = "aequus-1.2.146-kissfollow"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -3393,6 +3393,40 @@
+                     ta.crossing = True
+                     tb.crossing = True
+ 
++    def _partner_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.146 (SDOS-146): in contact, detection j is the partly hidden face of slot i. It reads as ANOTHER identified person by
++        0.10 or more over this slot, it is not that person's own detection (their nearest, which is taken), and it touches that
++        person's detection. The face whose nose and upper face are behind the other's is never a clean crop: the identity gate
++        rejected it 87 times in the field log and it was painted on an old place. A sliver behind the other reads as nobody
++        and is not admitted here."""
++        try:
++            others = [i2 for i2 in range(len(slots)) if i2 != i and has_id_all[i2]]
++            if not others:
++                return False
++            i2 = max(others, key=lambda k: sim_all[k][j])
++            if sim_all[i2][j] < sim + 0.10:
++                return False
++            t2 = self.tracks[slots[i2]]
++            r2 = t2.last_hit_bbox if getattr(t2, "last_hit_bbox", None) is not None else t2.match_bbox
++            if r2 is None:
++                return False
++            k_own = min(range(len(faces)), key=lambda k: _cdist_norm(r2, faces[k].bbox))
++            if k_own == j:
++                return False
++            if _cdist_norm(faces[j].bbox, faces[k_own].bbox) >= 1.0:
++                return False
++            # a second box carrying the partner's OWN points is the partner's face twice, not this face (a real partly hidden face
++            # sits about a quarter of a face width from its partner's points)
++            kj, kk = getattr(faces[j], "kps", None), getattr(faces[k_own], "kps", None)
++            if kj is not None and kk is not None and np.size(kj) >= 10 and np.size(kk) >= 10:
++                fwk = max(8.0, float(faces[k_own].bbox[2] - faces[k_own].bbox[0]))
++                dk = np.asarray(kj, np.float32).reshape(-1, 2).mean(0) - np.asarray(kk, np.float32).reshape(-1, 2).mean(0)
++                if float(np.linalg.norm(dk)) < 0.10 * fwk:
++                    return False
++            return True
++        except Exception:
++            return False
++
+     def _contact_motion(self):
+         """v11.2.144 (SDOS-144): a track in contact with another (a kiss, a hug) that the detector or the identity gate misses is
+         moved with its PARTNER's velocity when the partner was matched on the last call - in contact the two heads move together -
+@@ -3648,7 +3682,12 @@
+                 _reads_other = bool(_P.get("contact_follow", 1)) and _xo >= sim + float(_P.get("contact_read_margin", 0.10))
+                 if has_id:
+                     _abs_ok = True
+-                    if (_reads_other and touching and spatial_hit >= 0.35
++                    if (_reads_other and touching
++                            and self._partner_side(i, j, s, faces, slots, sim, sim_all, has_id_all)):
++                        _abs_ok = True                      # v11.2.146: the partly hidden face, by where it touches its partner
++                        contact_ok.add((i, j))
++                        self.partner_side_n = getattr(self, "partner_side_n", 0) + 1
++                    elif (_reads_other and touching and spatial_hit >= 0.35
+                             and self._contact_mine(i, j, s, faces, slots, sim, sim_all, has_id_all)):
+                         _abs_ok = True
+                         contact_ok.add((i, j))
+--- v11.2.145_KissFollow/core_pipeline.py	2026-11-07 07:51:32.288883601 +0000
++++ v11.2.146_KissFollow/core_pipeline.py	2026-11-07 09:14:00.172680882 +0000
+@@ -4453,6 +4453,41 @@
+     return out
+ 
+ 
++def _rel_translation(hist_self, hist_partner, g, lo_rec, pg, long_frames):
++    """v11.2.146 (SDOS-146): a 2x3 translation that puts a face's last real box where it stood against its partner's box at its
++    last TOUCHING sighting within long_frames, measured in units of the partner's face width, relative to the partner's box now
++    (pg, at frame g). None when the two were not seen touching in that window, or pg is missing. A face lost while partly hidden
++    behind its partner stays with the partner, not at the place it had before the contact."""
++    try:
++        if lo_rec is None or pg is None or pg.get("bbox") is None:
++            return None
++        pdet = {}
++        for gg, rr in (hist_partner or []):
++            if rr.get("det") and rr.get("bbox") is not None:
++                pdet[int(gg)] = rr
++        best = None
++        for gg, rr in (hist_self or []):
++            gg = int(gg)
++            if (not rr.get("det") or rr.get("bbox") is None or gg > int(g) or gg < int(g) - int(long_frames) or gg not in pdet):
++                continue
++            b = np.asarray(rr["bbox"], np.float64)
++            pb = np.asarray(pdet[gg]["bbox"], np.float64)
++            pw = max(8.0, float(pb[2] - pb[0]))
++            d = (np.array([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]) - np.array([(pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2])) / pw
++            if float(np.linalg.norm(d)) <= 1.2 and (best is None or gg > best[0]):
++                best = (gg, d)
++        if best is None:
++            return None
++        pgb = np.asarray(pg["bbox"], np.float64)
++        pwg = max(8.0, float(pgb[2] - pgb[0]))
++        want = np.array([(pgb[0] + pgb[2]) / 2, (pgb[1] + pgb[3]) / 2]) + best[1] * pwg
++        lb = np.asarray(lo_rec["bbox"], np.float64)
++        dx, dy = want - np.array([(lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2])
++        return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], np.float64)
++    except Exception:
++        return None
++
++
+ def _mark_cross_identity(assigned, tracker):
+     """v11.2.144 (SDOS-144): on each face given to a person, ``_xid`` = how much more its ArcFace crop is like ANOTHER tracked
+     person than like its own (cosine to the other's identity lock minus cosine to its own). The face behind in a kiss has its
+@@ -7481,10 +7516,16 @@
+                 fw = max(8.0, float(lo_[1]["bbox"][2] - lo_[1]["bbox"][0]))
+                 sc_ = float(np.sqrt(abs(float(np.linalg.det(T[:, :2])))))
+                 c0_ = np.mean(np.asarray(lo_[1]["kps"], np.float64), 0)
+-                if not (0.75 <= sc_ <= 1.33) or float(np.linalg.norm(_sim_pts(T, c0_[None])[0] - c0_)) > 3.0 * fw:
+-                    return "na", None                   # (the partner's own track jumped: not a motion to follow)
++                rel_ = (not (0.75 <= sc_ <= 1.33)) or float(np.linalg.norm(_sim_pts(T, c0_[None])[0] - c0_)) > 3.0 * fw
++                if rel_:
++                    # v11.2.146 (SDOS-146): the partner moved too far for its own motion to be followed (a sudden approach, or its
++                    # track jumped): the face is placed against the partner, where the two were last seen touching
++                    T = _rel_translation(_geom_hist.get(slot) or [], _geom_hist.get(o) or [], g, lo_[1], pg, _contact_long)
++                    if T is None:
++                        return "na", None
++                    stats["contact_rel"] = stats.get("contact_rel", 0) + 1
+                 out_ = _moved(lo_[1], T)
+-                bracketed = hi_ is not None and (hi_[0] - lo_[0]) <= _contact_long
++                bracketed = hi_ is not None and (hi_[0] - lo_[0]) <= _contact_long and not rel_
+                 if bracketed:
+                     ph, _sh2 = _partner_at(o, hi_[0], _sl, _sh)
+                     Th = _sim_fit(p0["kps"], ph["kps"]) if (ph is not None and ph.get("kps") is not None) else None
+@@ -8339,7 +8380,7 @@
+             "detector_calls=%d (empty=%d); swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d; det_faces_avg=%.2f max=%d; "
+             "det_passes=%d raw_faces=%d embeds=%d (%.2f embeds per raw face%s); "
+             "shot_cuts=%d; "
+-            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d/%d contact_follow=%d contact_apart=%d order_xid=%d occ_cut=%d/%d; "
++            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d/%d contact_follow=%d contact_apart=%d order_xid=%d contact_rel=%d partner_side=%d occ_cut=%d/%d; "
+             "geom_errors=%d; "
+             "PER-PERSON painted=%s recorded=%s picker_calls=%d picker_dropped_ref=%d; "
+             "weak_kept=%d weak_dropped=%d; ID-GATE %s",
+@@ -8360,6 +8401,7 @@
+             stats.get("revert_frames", 0), stats.get("blind_frames", 0),
+             stats.get("faint_frames", 0), stats.get("vis_reject_calls", 0), stats.get("contact_hold", 0), stats.get("contact_reuse", 0),
+             stats.get("contact_follow", 0), int(getattr(_tracker, "contact_apart_n", 0) or 0), int(_ORDER_XID[0]),
++            stats.get("contact_rel", 0), int(getattr(_tracker, "partner_side_n", 0) or 0),
+             _E.OCC_STATS.get("cut_frames", 0), _E.OCC_STATS.get("frames", 0),
+             stats.get("record_geom_errors", 0),
+             dict(sorted((stats.get("slot_painted") or {}).items())),
