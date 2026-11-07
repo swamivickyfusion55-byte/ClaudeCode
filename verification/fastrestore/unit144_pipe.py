@@ -56,4 +56,34 @@ cp.CONTACT_FOLLOW = True
 # no tracker history (first frame of a job): nothing is kept apart
 ap5 = cp._contact_apart([fa, fb], E.MultiFaceTracker([0, 1]))
 check("no one tracked yet: nothing is kept apart", len(ap5) == 0)
+# --- front / behind: the cross-identity cue ---------------------------------------------------------------------------------------
+# the cue is measured on the tracker: A's crop reads as B, B's reads as B
+fa2, fb2 = F([xa, 300, xa + 200, 600], unit(0.12 * ea + 0.88 * eb)), F([xb, 300, xb + 200, 600], eb)
+cp._mark_cross_identity({0: fa2, 1: fb2}, T)
+check("a face whose crop reads as its partner is marked (+), the partner reading as itself (-)",
+      getattr(fa2, "_xid", 0) > 0.5 and getattr(fb2, "_xid", 0) < -0.5,
+      "A %+.2f, B %+.2f" % (getattr(fa2, "_xid", 0), getattr(fb2, "_xid", 0)))
+def lm106(b):
+    x1, y1, x2, y2 = b; th = np.linspace(0, 2 * np.pi, 106, endpoint=False)
+    return np.stack([(x1 + x2) / 2 + (x2 - x1) / 2 * np.cos(th), (y1 + y2) / 2 + (y2 - y1) / 2 * np.sin(th)], 1).astype(np.float32)
+frame = np.full((720, 1280, 3), 128, np.uint8)
+def recs(xa_, xb_):
+    ba, bb = [480, 300, 700, 600], [600, 300, 820, 600]
+    return {0: {"bbox": np.array(ba, np.float32), "lmk": lm106(ba), "xid_near": xa_},
+            1: {"bbox": np.array(bb, np.float32), "lmk": lm106(bb), "xid_near": xb_}}
+cp._order_cues(frame, recs(0.7, -0.9)); c1 = cp._ORDER_CUE.get((0, 1))
+cp._order_cues(frame, recs(-0.9, 0.7)); c2 = cp._ORDER_CUE.get((0, 1))
+cp._order_cues(frame, recs(-0.4, -0.9)); c3 = cp._ORDER_CUE.get((0, 1))
+check("A reads as B, B as itself: A is behind (evidence for A in front 0.25); the other way round: 4.0",
+      c1 == 0.25 and c2 == 4.0, "%s, %s" % (c1, c2))
+check("both read as themselves (a frontal pair): the cross-identity cue does not act (outline evidence only)",
+      c3 is None or c3 not in (0.25, 4.0), "%s" % c3)
+cp._ORDER_MEM.clear(); res_ = []
+for k in range(6):
+    cp._ORDER_NOW[0] = 100 + k; cp._order_cues(frame, recs(0.7, -0.9)); res_.append(cp._in_front(0, 1, 1.0, 1.0))
+check("...and the job's front / behind decision follows it (the first decision at once)", not any(res_), str(res_))
+cp.CONTACT_FOLLOW = False
+cp._order_cues(frame, recs(0.7, -0.9)); c4 = cp._ORDER_CUE.get((0, 1))
+check("CONTACT_FOLLOW False: no cross-identity ordering", c4 not in (0.25, 4.0), "%s" % c4)
+cp.CONTACT_FOLLOW = True
 print("\n%s" % ("all checks passed" if fails == 0 else "%d check(s) failed" % fails))

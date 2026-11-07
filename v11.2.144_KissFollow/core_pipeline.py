@@ -952,6 +952,7 @@ def _reset_job_counters():
     except Exception:
         pass
     _ORDER_MEM.clear()
+    _ORDER_XID[0] = 0
     try:
         for _k in list(_E.PATCH_STATS.keys()):
             _E.PATCH_STATS[_k] = 0.0 if isinstance(_E.PATCH_STATS[_k], float) else 0
@@ -1734,6 +1735,9 @@ def _geom_record(face, track, alpha, guard, src, lmk=None):
         # for any motion the tracker can model, whereas extrapolation trails
         # the subject and then snaps at the next detection.
         "det": not bool(getattr(face, "predicted", False)),
+        # v11.2.144: how much this detection's crop reads as another person (see _mark_cross_identity); None when unknown
+        "xid": (None if bool(getattr(face, "predicted", False)) or getattr(face, "_xid", None) is None
+                else float(getattr(face, "_xid"))),
     }
 
 
@@ -1973,6 +1977,7 @@ def _geom_for_frame(timeline, g, taper, max_bracket=None, end_gap=None,
 _ORDER_MEM = {}      # (slot_a, slot_b) -> [a_in_front, frames_the_other_way, last frame counted]; per job (v11.2.95)
 _ORDER_NOW = [0]     # the output frame being painted (the flip counter advances once per frame)
 _ORDER_CUE = {}      # (slot_lo, slot_hi) -> evidence ratio lo-over-hi in front, for the frame being painted
+_ORDER_XID = [0]     # v11.2.144: frames ordered by the cross-identity cue (per job)
 
 
 def _outline_edge(gm, ox, oy, lmk, other_hull):
@@ -2011,9 +2016,23 @@ def _order_cues(frame, records):
                 g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
                 gm = cv2.magnitude(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
                 ea, eb = _outline_edge(gm, x0, y0, la, hb), _outline_edge(gm, x0, y0, lb, ha)
+                lo, hi = (sa, sb) if sa < sb else (sb, sa)
+                # v11.2.144 (SDOS-144): a face whose crop reads as the other person (its middle covered by them) while the
+                # other reads as itself is BEHIND. In a profile kiss both guessed jaw outlines run along the one silhouette
+                # edge between the faces, and the outline cue named the face behind as in front on every frame: its guessed
+                # nose and lips, lying on the partner's, took the partner's nose and lips.
+                xa, xb = ra.get("xid_near"), rb.get("xid_near")
+                if CONTACT_FOLLOW and xa is not None and xb is not None:
+                    if xa >= 0.25 and xb <= -0.25:
+                        _ORDER_CUE[(lo, hi)] = 0.25 if lo == sa else 4.0          # a behind b
+                        _ORDER_XID[0] += 1
+                        continue
+                    if xb >= 0.25 and xa <= -0.25:
+                        _ORDER_CUE[(lo, hi)] = 4.0 if lo == sa else 0.25          # b behind a
+                        _ORDER_XID[0] += 1
+                        continue
                 if ea is None or eb is None:
                     continue
-                lo, hi = (sa, sb) if sa < sb else (sb, sa)
                 r = (ea + 1.0) / (eb + 1.0)
                 _ORDER_CUE[(lo, hi)] = r if lo == sa else 1.0 / r
     except Exception as e:
@@ -4425,6 +4444,45 @@ def _contact_apart(faces, tracker):
     return out
 
 
+def _mark_cross_identity(assigned, tracker):
+    """v11.2.144 (SDOS-144): on each face given to a person, ``_xid`` = how much more its ArcFace crop is like ANOTHER tracked
+    person than like its own (cosine to the other's identity lock minus cosine to its own). The face behind in a kiss has its
+    middle - nose, mouth - covered by the partner, so its crop reads as the partner (measured on a profile kiss: +0.6 to +0.8),
+    while the face in front reads as itself (-0.9). Used only to order two faces in contact (_order_cues). The identity locks
+    are not learned during contact, so they are the people's own clean faces."""
+    try:
+        if not CONTACT_FOLLOW or not assigned or len(assigned) < 2:
+            return
+        locks = {}
+        for s, tr in tracker.tracks.items():
+            if tr is None:
+                continue
+            e = getattr(tr, "id_lock", None)
+            if e is None:
+                e = getattr(tr, "emb", None)
+            if e is not None:
+                v = np.asarray(e, np.float32).reshape(-1)
+                n = float(np.linalg.norm(v))
+                if v.size >= 8 and n > 1e-6:
+                    locks[s] = v / n
+        if len(locks) < 2:
+            return
+        for s, f in assigned.items():
+            e = getattr(f, "normed_embedding", None)
+            if e is None or s not in locks:
+                continue
+            v = np.asarray(e, np.float32).reshape(-1)
+            n = float(np.linalg.norm(v))
+            if v.size != locks[s].size or n < 1e-6:
+                continue
+            v = v / n
+            own = float(v @ locks[s])
+            oth = max(float(v @ l) for s2, l in locks.items() if s2 != s and l.size == v.size)
+            f._xid = oth - own
+    except Exception as _e:
+        logging.debug("cross identity skipped: %s", _e)
+
+
 def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
                             dt_frames=1.0):
     """Associate detections to replacement slots via the v11 MultiFaceTracker.
@@ -4480,6 +4538,7 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
         logging.debug("deferred embedding stage skipped: %s", e)
 
     assigned = tracker.assign(faces, ref_map, dt_frames=dt_frames)
+    _mark_cross_identity(assigned, tracker)
 
     # v11.1.9: stamp frame size onto every live track so predict() can freeze
     # once the bbox leaves the shot.
@@ -7549,6 +7608,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         # by turns (common in profile) no longer flips behind on every frame it is lost - the paint where the two
                         # faces meet flickered between them. A longer loss still puts it behind (the v11.2.141 rule).
                         rec["seen_near"] = any(abs(int(gg) - int(g)) <= 2 and rr.get("det") for gg, rr in _tl)
+                        _xs = [float(rr["xid"]) for gg, rr in _tl
+                               if abs(int(gg) - int(g)) <= 3 and rr.get("det") and rr.get("xid") is not None]
+                        rec["xid_near"] = float(np.median(_xs)) if _xs else None
                         out[slot] = rec
                 return out
 
@@ -8268,7 +8330,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             "detector_calls=%d (empty=%d); swap_calls=%d; detector_avg=%.1fms; swap_avg=%.1fms; encode=%.1fs; reused=%d; kps_rejected=%d; det_faces_avg=%.2f max=%d; "
             "det_passes=%d raw_faces=%d embeds=%d (%.2f embeds per raw face%s); "
             "shot_cuts=%d; "
-            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d/%d contact_follow=%d contact_apart=%d occ_cut=%d/%d; "
+            "REVERTS=%d blind=%d faint=%d vis_rejected_calls=%d contact_hold=%d/%d contact_follow=%d contact_apart=%d order_xid=%d occ_cut=%d/%d; "
             "geom_errors=%d; "
             "PER-PERSON painted=%s recorded=%s picker_calls=%d picker_dropped_ref=%d; "
             "weak_kept=%d weak_dropped=%d; ID-GATE %s",
@@ -8288,7 +8350,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
             _CUT_STATS["cuts"],
             stats.get("revert_frames", 0), stats.get("blind_frames", 0),
             stats.get("faint_frames", 0), stats.get("vis_reject_calls", 0), stats.get("contact_hold", 0), stats.get("contact_reuse", 0),
-            stats.get("contact_follow", 0), int(getattr(_tracker, "contact_apart_n", 0) or 0),
+            stats.get("contact_follow", 0), int(getattr(_tracker, "contact_apart_n", 0) or 0), int(_ORDER_XID[0]),
             _E.OCC_STATS.get("cut_frames", 0), _E.OCC_STATS.get("frames", 0),
             stats.get("record_geom_errors", 0),
             dict(sorted((stats.get("slot_painted") or {}).items())),
