@@ -1313,8 +1313,12 @@ def _shift_faces(faces, ox, oy):
     return faces
 
 
-def _zoom_detect(frm, box, pad=1.15):
-    """Re-detect inside an expanded head box so a small or turned face fills 640."""
+def _zoom_detect(frm, box, pad=1.15, force=False):
+    """Re-detect inside an expanded head box so a small or turned face fills 640.
+
+    v11.2.176: ``force`` (a tracked person the detector did not find on this frame) searches a face of any size - the 220 px
+    limit made this rescue dead at 1080p, where most faces are larger, exactly when a fast move or a turn lost the face - with
+    the crop's lower threshold (0.18)."""
     if frm is None or box is None or _fa is None:
         return []
     try:
@@ -1323,7 +1327,7 @@ def _zoom_detect(frm, box, pad=1.15):
     except Exception:
         return []
     bw, bh = max(12.0, x2 - x1), max(12.0, y2 - y1)
-    if min(bw, bh) > 220:
+    if min(bw, bh) > 220 and not force:
         return []
     cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
     side = max(96.0, min(max(bw, bh) * (1.0 + float(pad)), float(min(h, w))))
@@ -5624,13 +5628,18 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                 _short = True
                     except Exception:
                         _rois = []
+                    _trk_rois = list(_rois)      # v11.2.176: the rois that are tracked people missing on this frame
                     if _short and not _rois:
                         _hh, _ww = frm.shape[:2]
                         _rois.append([_ww * 0.12, _hh * 0.02, _ww * 0.88, _hh * 0.72])
                     if _short and _rois:
                         try:
                             for _bb in _rois[:2]:
-                                _extra = _zoom_detect(frm, _bb)
+                                # v11.2.176: a missing tracked face - any size, a wider search (a fast step moves it far)
+                                if any(_bb is _r for _r in _trk_rois):
+                                    _extra = _zoom_detect(frm, _bb, pad=1.6, force=True)
+                                else:
+                                    _extra = _zoom_detect(frm, _bb)
                                 if _extra:
                                     faces = _merge_detected(faces, _extra)
                                     stats["zoom_hits"] = stats.get("zoom_hits", 0) + len(_extra)

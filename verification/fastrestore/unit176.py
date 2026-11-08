@@ -17,14 +17,14 @@ def unit(v): return v / np.linalg.norm(v)
 ea, eb, ec = unit(rng.normal(size=512)), unit(rng.normal(size=512)), unit(rng.normal(size=512))
 def nobody(e): return unit(0.12 * e + rng.normal(size=512) * 0.05)       # turned away / blurred: ~0.13 to itself, ~0 to anyone
 def box(cx, cy, w): return [cx - w / 2, cy - w / 2, cx + w / 2, cy + w / 2]
-def run(two_elim=1, cf=1, shrink=1.0, weak=False, third=False):
+def run(two_elim=1, cf=1, shrink=1.0, weak=False, third=False, xb=925):
     E._P["two_elim"], E._P["contact_follow"] = two_elim, cf
     T = E.MultiFaceTracker([0, 1]); got = wrong = 0
     for k in range(30):
         fa = F(box(325, 425, 250 * (shrink if k >= 15 else 1.0)), nobody(ea) if k >= 15 else ea)
         if weak and k >= 15:
             fa._kps_weak = True
-        fb = F(box(925, 425, 250), eb)
+        fb = F(box(xb, 425, 250), eb)
         faces = [fa, fb] + ([F(box(625, 150, 200), ec)] if third and k >= 15 else [])
         res = T.assign(faces, {})
         if k >= 15:
@@ -37,8 +37,10 @@ g, w = run(two_elim=0)
 check("two_elim 0: the v11.2.92 behaviour (that face is refused)", g == 0, "%d of 15" % g)
 g, w = run(shrink=0.75)
 check("a sliver (its box 0.75 of its last width) is not taken by elimination", g == 0, "%d of 15" % g)
+g, w = run(weak=True, xb=560)
+check("against its partner, a face whose points are marked unreliable (maybe a sliver) is not taken by elimination", g == 0, "%d of 15" % g)
 g, w = run(weak=True)
-check("a face whose points are marked unreliable is not taken by elimination", g == 0, "%d of 15" % g)
+check("away from its partner, a blurred whole face (points unreliable) is kept by elimination - a fast step", g == 15 and w == 0, "%d of 15, %d wrong" % (g, w))
 g, w = run(third=True)
 check("a third face in the frame: elimination does not act", g == 0 and w == 0, "%d of 15, %d wrong" % (g, w))
 # the carry in contact: A missed for 60 calls while B (touching it) is found and moves

@@ -3124,7 +3124,8 @@ class MultiFaceTracker:
         """v11.2.176 (SDOS-176): two people, two faces found. Face k is clearly the other person (0.45 or more, 0.10 above this
         face), face j is not them (under 0.40), j is nearer to where THIS person was last seen than k is, and j is a whole face
         (its box at least 0.82 of this person's last width, its points not marked unreliable). Then j is this person, whatever
-        its own score (a side view, a turn, motion blur). A face that is only a sliver behind the other is not taken this way."""
+        its own score (a side view, a turn, motion blur). A face that is only a sliver behind the other is not taken this way
+        (box under 0.82, or points marked unreliable while it is against its partner)."""
         try:
             if not bool(_P.get("two_elim", 1)) or len(slots) != 2 or len(faces) != 2 or not all(has_id_all):
                 return False
@@ -3137,8 +3138,8 @@ class MultiFaceTracker:
             ref = tr.last_hit_bbox if getattr(tr, "last_hit_bbox", None) is not None else tr.match_bbox
             if ref is None or _cdist_norm(ref, faces[j].bbox) >= _cdist_norm(ref, faces[k].bbox):
                 return False
-            if bool(getattr(faces[j], "_kps_weak", False)):
-                return False
+            if bool(getattr(faces[j], "_kps_weak", False)) and getattr(tr, "crossing", False):
+                return False      # (points unreliable against its partner: may be a sliver; away from it: a blurred whole face)
             w_last = float(ref[2] - ref[0]); w_now = float(faces[j].bbox[2] - faces[j].bbox[0])
             if w_last > 1.0 and w_now < 0.82 * w_last:
                 return False
