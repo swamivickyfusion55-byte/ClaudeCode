@@ -61,7 +61,7 @@ __all__ = [
     "ENGINE_VERSION",
 ]
 
-ENGINE_VERSION = "aequus-1.2.92-fastrestore"
+ENGINE_VERSION = "aequus-1.2.176-contactstep"
 
 log = logging.getLogger("swamitech.engine")
 
@@ -226,7 +226,11 @@ _P = {
     "trk_cross_iou": 0.12,   # tracks this close are considered "crossing"
     "trk_flip_margin": 0.14, # identity margin needed to justify a label flip
     "trk_flip_frames": 5,    # ...sustained for this many frames
-    "trk_max_missed": 24,  # aligned with config ENGINE_TUNABLES / predicted hold budget
+    "trk_max_missed": 24,
+    # v11.2.176 (SDOS-176): two people in contact (a kiss, a hug). 0 = the v11.2.92 behaviour exactly.
+    "contact_follow": 1,     # a face in contact is kept by where it touches its partner, and moves with the partner when missed
+    "contact_carry_max": 240,  # ...and is carried while its partner is seen, up to this many frames (8 s at 30 fps; v11.2.92: 24)
+    "two_elim": 1,           # 2 people, 2 faces found: one clearly person X, the other is person Y (if it is where Y was, not a sliver)  # aligned with config ENGINE_TUNABLES / predicted hold budget
     # Relative identity admission (SDOS-078). A slot that has locked onto a
     # person used to accept a later detection only if it matched that one stored
     # frame at >= 0.38 (>= 0.40 after a gap) - an absolute wall. Measured on the
@@ -941,7 +945,7 @@ class TrackState:
     __slots__ = ("slot", "bbox", "obs_bbox", "kps", "lmk", "vel_bbox", "vel_kps",
                  "emb", "id_lock", "hits", "missed", "mask_ema", "cm_dmean", "cm_ratio",
                  "flip_votes", "crossing", "last_face", "det_score", "last_hit_bbox",
-                 "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps",
+                 "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps", "_contact_vel",
                  "fake", "fake_corr", "fake_size", "fake_frame",
                  "_frame_wh", "_paste_frozen", "_reacquired",
                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
@@ -1025,6 +1029,7 @@ class TrackState:
         self.last_hit_bbox = None
         self.last_dt = 1.0        # output frames between the last two detections
         self.last_hit_kps = None  # raw keypoints at the last real detection
+        self._contact_vel = None  # v11.2.176: (bbox velocity, kps velocity) of the partner while in contact
         self.hull_ema = None      # smoothed landmark hull (aligned space)
         self.occl_w = 0.0         # CONTINUOUS occlusion weight in [0,1]
         self.alpha_ema = 1.0      # smoothed composite opacity
@@ -1112,6 +1117,17 @@ class TrackState:
         steps = max(1, int(round(n)))
         m0 = self.missed
         self.missed = m0 + steps
+        cv_ = getattr(self, "_contact_vel", None)
+        if cv_ is not None and not self._paste_frozen:
+            # v11.2.176: in contact, carried with the partner's motion (MultiFaceTracker._contact_motion), not on at its own
+            vb, vk = cv_
+            if self.bbox is not None:
+                self.bbox = (self.bbox + vb * float(steps)).astype(np.float32)
+            if self.obs_bbox is not None:
+                self.obs_bbox = (self.obs_bbox + vb * float(steps)).astype(np.float32)
+            if self.kps is not None and vk is not None:
+                self.kps = (self.kps + vk * float(steps)).astype(np.float32)
+            return self.bbox
         # Already left the frame — count the miss but do not keep coasting.
         if self._paste_frozen:
             return self.bbox
@@ -3021,6 +3037,137 @@ class MultiFaceTracker:
                     ta.crossing = True
                     tb.crossing = True
 
+    def _contact_motion(self):
+        """v11.2.176 (SDOS-176): a track in contact with another (crossing) that is missed moves with its PARTNER's velocity when
+        the partner was matched on the last call - in a kiss or a hug the two heads move together - and otherwise with its own
+        velocity halved on every call. Constant-velocity coasting carried a face missed when the heads met (the approach stops
+        dead) on into the partner, or left it behind when the couple moved: the paint drifted, then snapped back."""
+        if not bool(_P.get("contact_follow", 1)):
+            return
+        for s, tr in self.tracks.items():
+            tr._contact_vel = None
+            if not getattr(tr, "crossing", False) or tr.bbox is None or not tr.established:
+                continue
+            best = None
+            for s2, t2 in self.tracks.items():
+                if s2 == s or t2.bbox is None:
+                    continue
+                d = _cdist_norm(tr.match_bbox, t2.match_bbox)
+                if best is None or d < best[0]:
+                    best = (d, t2)
+            if best is None:
+                continue
+            o = best[1]
+            if int(getattr(o, "missed", 0) or 0) == 0 and o.vel_bbox is not None:
+                vk = None
+                if o.vel_kps is not None:
+                    vk = np.broadcast_to(np.asarray(o.vel_kps, np.float32).reshape(-1, 2).mean(0), (5, 2)).copy()
+                tr._contact_vel = (np.asarray(o.vel_bbox, np.float32).copy(), vk)
+            elif int(getattr(tr, "missed", 0) or 0) > 0:
+                if tr.vel_bbox is not None:
+                    tr.vel_bbox = (np.asarray(tr.vel_bbox, np.float32) * 0.5).astype(np.float32)
+                if tr.vel_kps is not None:
+                    tr.vel_kps = (np.asarray(tr.vel_kps, np.float32) * 0.5).astype(np.float32)
+
+    def _partner_seen(self, s):
+        """v11.2.176: is a partner this track is crossing found on this call (missed == 0)?"""
+        tr = self.tracks.get(s)
+        if tr is None or not getattr(tr, "crossing", False):
+            return False
+        for s2, t2 in self.tracks.items():
+            if s2 != s and t2.bbox is not None and getattr(t2, "crossing", False) and int(getattr(t2, "missed", 0) or 0) == 0:
+                return True
+        return False
+
+    def _miss_limit(self, s):
+        """v11.2.176: how many missed calls a track is carried. In contact with a partner that is seen: contact_carry_max
+        (the face is behind or against its partner, which is still there); otherwise trk_max_missed (v11.2.92)."""
+        if bool(_P.get("contact_follow", 1)) and self._partner_seen(s):
+            return int(_P.get("contact_carry_max", 240) or 240)
+        return int(_P["trk_max_missed"])
+
+    def _partner_side_why(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
+        """v11.2.176: "ok", or why detection j is not the partly hidden face of slot i in contact (see _partner_side)."""
+        try:
+            others = [i2 for i2 in range(len(slots)) if i2 != i and has_id_all[i2]]
+            if not others:
+                return "no_other_id"
+            i2 = max(others, key=lambda k: sim_all[k][j])
+            if sim_all[i2][j] < sim + 0.10:
+                return "margin"
+            t2 = self.tracks[slots[i2]]
+            r2 = t2.last_hit_bbox if getattr(t2, "last_hit_bbox", None) is not None else t2.match_bbox
+            if r2 is None:
+                return "no_partner_ref"
+            k_own = min(range(len(faces)), key=lambda k: _cdist_norm(r2, faces[k].bbox))
+            if k_own == j:
+                return "is_partner_det"
+            if _cdist_norm(faces[j].bbox, faces[k_own].bbox) >= 1.25:
+                return "far_from_partner"
+            kj, kk = getattr(faces[j], "kps", None), getattr(faces[k_own], "kps", None)
+            if kj is not None and kk is not None and np.size(kj) >= 10 and np.size(kk) >= 10:
+                fwk = max(8.0, float(faces[k_own].bbox[2] - faces[k_own].bbox[0]))
+                dk = np.asarray(kj, np.float32).reshape(-1, 2).mean(0) - np.asarray(kk, np.float32).reshape(-1, 2).mean(0)
+                if float(np.linalg.norm(dk)) < 0.10 * fwk:
+                    return "duplicate_points"
+            return "ok"
+        except Exception:
+            return "error"
+
+    def _partner_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
+        """v11.2.176 (SDOS-176, from v11.2.146-148): in contact, detection j is the partly hidden face of slot i: in a side-view kiss
+        the partner fills half of the crop, so it reads as the partner (measured 0.75-0.88) and as itself 0.05-0.20. It must read as
+        the partner by 0.10 or more, not be the partner's own detection, touch it, and not carry the partner's own points."""
+        return self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all) == "ok"
+
+    def _elim_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
+        """v11.2.176 (SDOS-176): two people, two faces found. Face k is clearly the other person (0.45 or more, 0.10 above this
+        face), face j is not them (under 0.40), j is nearer to where THIS person was last seen than k is, and j is a whole face
+        (its box at least 0.82 of this person's last width, its points not marked unreliable). Then j is this person, whatever
+        its own score (a side view, a turn, motion blur). A face that is only a sliver behind the other is not taken this way."""
+        try:
+            if not bool(_P.get("two_elim", 1)) or len(slots) != 2 or len(faces) != 2 or not all(has_id_all):
+                return False
+            k = 1 - j; i2 = 1 - i
+            if sim_all[i2][k] < 0.45 or sim_all[i2][k] < sim_all[i2][j] + 0.10 or sim_all[i2][j] >= 0.40:
+                return False
+            tr = self.tracks[s]
+            if not tr.established:
+                return False
+            ref = tr.last_hit_bbox if getattr(tr, "last_hit_bbox", None) is not None else tr.match_bbox
+            if ref is None or _cdist_norm(ref, faces[j].bbox) >= _cdist_norm(ref, faces[k].bbox):
+                return False
+            if bool(getattr(faces[j], "_kps_weak", False)):
+                return False
+            w_last = float(ref[2] - ref[0]); w_now = float(faces[j].bbox[2] - faces[j].bbox[0])
+            if w_last > 1.0 and w_now < 0.82 * w_last:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _log_refusal(self, i, j, s, faces, slots, sim, sim_all, has_id_all, xo, touching):
+        """v11.2.176 (log only): why a detection was refused - counts per slot, and the first 60 refusals while the faces touch."""
+        try:
+            if not touching:
+                reason = "not_touching"
+            elif xo < sim + 0.10:
+                reason = "reads_nobody_else"
+            else:
+                reason = self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all)
+            wc = getattr(self, "why_counts", None)
+            if wc is None:
+                wc = self.why_counts = {}
+            d = wc.setdefault(int(s), {})
+            d[reason] = d.get(reason, 0) + 1
+            smp = getattr(self, "why_sample", None)
+            if smp is None:
+                smp = self.why_sample = []
+            if touching and len(smp) < 60:
+                smp.append((int(getattr(self, "_call_n", 0)), int(s), int(j), reason, round(float(sim), 2), round(float(xo), 2)))
+        except Exception:
+            pass
+
     def _identity(self, face, track, ref):
         emb = getattr(face, "normed_embedding", None)
         if emb is None:
@@ -3092,6 +3239,7 @@ class MultiFaceTracker:
         them via TrackState.predicted_face().
         """
         self._mark_crossings()
+        self._contact_motion()           # v11.2.176
         slots = sorted(self.tracks.keys())
         if faces is None or (hasattr(faces, "__len__") and len(faces) == 0):
             for t in self.tracks.values():
@@ -3181,6 +3329,7 @@ class MultiFaceTracker:
         # absolute floor (0.32) and has to be told about these, or it quietly
         # throws away exactly the faces the rescue just admitted.
         rescued = set()
+        contact_ok = set()   # v11.2.176: (slot index, face index) kept in contact by where it touches its partner, or by elimination
         # Every slot's similarity to every face, computed up front. The main
         # loop below visits slot 0 first, when slot 1's row has not been filled
         # in yet, and the relative-admission rule needs all of them.
@@ -3207,13 +3356,34 @@ class MultiFaceTracker:
                     gate = -1.0          # trust motion, not embeddings
                 has_id = (getattr(tr, "id_lock", None) is not None) or (tr.emb is not None)
                 long_gap = int(getattr(tr, "missed", 0) or 0) >= 8 or bool(getattr(tr, "_paste_frozen", False))
+                # v11.2.176 (SDOS-176): is this face touching another one, and does its crop read as another tracked person?
+                # Touching: boxes overlapping, or centres within 0.55 face widths, or - once two known faces are crossing -
+                # the whole contact (the 0.55 line alone switched the decision on and off from frame to frame in a kiss).
+                touching = False
+                for f2 in faces:
+                    if f2 is f:
+                        continue
+                    if _iou(f.bbox, f2.bbox) > 0.02 or _cdist_norm(f.bbox, f2.bbox) < 0.55:
+                        touching = True
+                        break
+                _cf = bool(_P.get("contact_follow", 1))
+                if not touching and _cf and tr.established and tr.crossing:
+                    touching = True
+                _xo = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
+                _reads_other = _cf and _xo >= sim + 0.10
                 # Gender is not a reason to drop a face. InsightFace often
                 # calls the man a woman, and the woman a man for a few frames.
                 # The Detect-frame photo is the identity. A wrong gender tag
                 # must not skip him or flash her back to the original.
                 if has_id:
                     _abs_ok = True
-                    if long_gap:
+                    if _reads_other and touching and self._partner_side(i, j, s, faces, slots, sim, sim_all, has_id_all):
+                        contact_ok.add((i, j))               # v11.2.176: the partly hidden face of a kiss (reads as the partner)
+                        self.partner_side_n = getattr(self, "partner_side_n", 0) + 1
+                    elif self._elim_side(i, j, s, faces, slots, sim, sim_all, has_id_all):
+                        contact_ok.add((i, j))               # v11.2.176: two people, the other one clearly the other person
+                        self.elim_n = getattr(self, "elim_n", 0) + 1
+                    elif long_gap:
                         if sim < 0.40:
                             _abs_ok = False
                     elif sim < 0.38 and not (spatial >= 0.55 and sim >= 0.22):
@@ -3227,6 +3397,7 @@ class MultiFaceTracker:
                         if not self._rel_admit(i, j, s, f, sim, sim_all,
                                                has_id_all, slots):
                             self.diag[s]["id_reject"] += 1
+                            self._log_refusal(i, j, s, faces, slots, sim, sim_all, has_id_all, _xo, touching)
                             continue
                         rescued.add((i, j))
                 else:
@@ -3355,6 +3526,10 @@ class MultiFaceTracker:
                 if k < 8:
                     continue
                 if float(np.dot(a1[:k], a2[:k])) < 0.50:
+                    continue
+                # v11.2.176: not two boxes on one face but two people in contact - a side-view face has its partner in half its
+                # crop and reads as them. Kept when one of the pairs passed the contact test and the boxes are two separate faces.
+                if ((i, j) in contact_ok or (i2, j2) in contact_ok) and _iou(faces[j].bbox, faces[j2].bbox) < 0.40:
                     continue
                 t1, t2 = self.tracks[slots[i]], self.tracks[slots[i2]]
                 r1 = refs.get(slots[i]) if refs else None
@@ -3518,7 +3693,7 @@ class MultiFaceTracker:
                 tr.flip_votes = max(0, tr.flip_votes - 1)
                 continue
             f = faces[j]
-            changed = self._belongs_to_other(s, f)
+            changed = self._belongs_to_other(s, f) and (i, j) not in contact_ok    # v11.2.176: a contact pair is not a flip
 
             if changed and tr.established:
                 # The class docstring specifies that during a crossing "label
@@ -3557,7 +3732,7 @@ class MultiFaceTracker:
             if getattr(tr, "id_lock", None) is None and tr.emb is None and not tr.crossing:
                 good = True
             elif (getattr(tr, "id_lock", None) is not None and lock_sim < 0.32
-                    and (i, j) not in rescued):
+                    and (i, j) not in rescued and (i, j) not in contact_ok):
                 # Below the absolute floor. This used to be an unconditional
                 # "not this slot's person". The gate above admits faces down to
                 # 0.22 when they sit where the track expects its person (the
@@ -3613,7 +3788,7 @@ class MultiFaceTracker:
         """
         for s in list(self.tracks.keys()):
             tr = self.tracks[s]
-            if tr.missed > _P["trk_max_missed"]:
+            if tr.missed > self._miss_limit(s):           # v11.2.176: longer while in contact with a partner that is seen
                 keep_emb = tr.emb
                 keep_lock = getattr(tr, "id_lock", None)
                 nw = TrackState(s)
@@ -3661,7 +3836,7 @@ class MultiFaceTracker:
             # is the best case for carrying, not a reason to refuse.
             if not tr.established:
                 continue
-            if tr.missed > _P["trk_max_missed"]:
+            if tr.missed > self._miss_limit(s):           # v11.2.176: longer while in contact with a partner that is seen
                 continue
             # v11.1.9: frozen after leaving frame — do not offer for paste.
             if getattr(tr, "_paste_frozen", False):

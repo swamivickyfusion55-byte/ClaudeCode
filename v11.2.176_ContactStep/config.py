@@ -276,8 +276,8 @@ SPLIT_MAX_PARTS = 10
 DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
-VERSION = "v11.2.175"
-BUILD = "ManualPatch · face swap is 11.2.92, only a painted mark is removed, automatic clean is off"
+VERSION = "v11.2.176"
+BUILD = "ContactStep · the 11.2.92 face swap; in a kiss or hug each face is kept (where it touches its partner, by elimination of 2 people, moving with the partner when missed); a fast step keeps the face; only a painted mark is removed"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

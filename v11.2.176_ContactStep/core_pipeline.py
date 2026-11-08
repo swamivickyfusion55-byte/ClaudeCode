@@ -1134,7 +1134,7 @@ _DUP_IOU = 0.55
 _DUP_SIM = 0.55
 
 
-def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35):
+def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35, apart=None):
     """One person → one box. Duplicate woman-boxes were occupying the man's slot.
 
     ``centre_frac`` is the centre-distance fallback used ONLY for a pair where
@@ -1183,6 +1183,8 @@ def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35):
                     break
             except Exception:
                 pass
+            if apart and (id(f), id(g)) in apart:
+                continue          # v11.2.176: two people in contact (_contact_apart) - only the box-overlap test applies
             eg = _emb(g)
             if ef is not None and eg is not None:
                 try:
@@ -3787,6 +3789,53 @@ def _face_looks_marginal(f) -> bool:
         return False
 
 
+def _contact_apart(faces, tracker):
+    """v11.2.176 (SDOS-176, from v11.2.144): pairs of detections that are two different people, by the tracker's geometry. In a
+    side-view kiss the partner fills half of a face's ArcFace crop, so the two embeddings agree at 0.8-0.9 and the de-duplication
+    (0.55) merged them into one face: the face behind was gone before the tracker saw it. Each must sit where a different
+    established person was last really seen (mutual nearest), its points nearer that person's last points than the other's,
+    and the boxes must be two faces (overlap under 0.40)."""
+    out = set()
+    try:
+        if not bool(_E._P.get("contact_follow", 1)) or tracker is None or len(faces) < 2:
+            return out
+        trs = [(s, t) for s, t in tracker.tracks.items()
+               if t is not None and t.established and getattr(t, "last_hit_bbox", None) is not None
+               and int(getattr(t, "missed", 0) or 0) <= 30]
+        if len(trs) < 2:
+            return out
+        cd = _E._cdist_norm
+        near_t = {s: min(range(len(faces)), key=lambda k: cd(t.last_hit_bbox, faces[k].bbox)) for s, t in trs}
+        mine = {}
+        for k, f in enumerate(faces):
+            s = min(trs, key=lambda st: cd(st[1].last_hit_bbox, f.bbox))[0]
+            if near_t.get(s) == k:
+                mine[k] = s
+
+        def _kc(p):
+            if p is None or np.size(p) < 10:
+                return None
+            return np.asarray(p, np.float32).reshape(-1, 2).mean(0)
+        tk = {s: _kc(getattr(t, "last_hit_kps", None)) for s, t in trs}
+        ks = sorted(mine)
+        for a_ in range(len(ks)):
+            for b_ in range(a_ + 1, len(ks)):
+                ka, kb = ks[a_], ks[b_]
+                sa, sb = mine[ka], mine[kb]
+                fa, fb = faces[ka], faces[kb]
+                if sa == sb or _bbox_iou(fa.bbox, fb.bbox) >= 0.40:
+                    continue
+                ca, cb = _kc(getattr(fa, "kps", None)), _kc(getattr(fb, "kps", None))
+                if ca is None or cb is None or tk.get(sa) is None or tk.get(sb) is None:
+                    continue
+                if (float(np.linalg.norm(ca - tk[sa])) < float(np.linalg.norm(ca - tk[sb]))
+                        and float(np.linalg.norm(cb - tk[sb])) < float(np.linalg.norm(cb - tk[sa]))):
+                    out.add((id(fa), id(fb))); out.add((id(fb), id(fa)))
+    except Exception as _e:
+        logging.debug("contact apart skipped: %s", _e)
+    return out
+
+
 def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
                             dt_frames=1.0):
     """Associate detections to replacement slots via the v11 MultiFaceTracker.
@@ -3830,7 +3879,11 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
         # that way). Now that the embeddings exist, run it once more so the
         # one case the fallback cannot see - two boxes barely overlapping that
         # are the same person - is still caught.
-        faces = _dedupe_faces(faces)
+        # v11.2.176: but never two people the tracker sees in contact, each where it was last seen (_contact_apart)
+        _apart = _contact_apart(faces, tracker)
+        if _apart:
+            tracker.contact_apart_n = int(getattr(tracker, "contact_apart_n", 0) or 0) + 1
+        faces = _dedupe_faces(faces, apart=_apart)
     except Exception as e:
         logging.debug("deferred embedding stage skipped: %s", e)
 
@@ -5625,6 +5678,10 @@ def _run_job_body(jid, src_paths, vp, cfg):
                             _reliable.append(f)
                         else:
                             _weak.append(f)
+                            try:
+                                f._kps_weak = True      # v11.2.176: read by MultiFaceTracker._elim_side
+                            except Exception:
+                                pass
                     if _reliable:
                         if multi_face_safe:
                             # KEEP a weak second person. Old code used slot 0's
@@ -7192,6 +7249,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                     out = trial
                     any_ok = True
                     stats["slot_painted"][slot] = stats["slot_painted"].get(slot, 0) + 1
+                    stats.setdefault("painted_g", {}).setdefault(slot, set()).add(int(g))   # v11.2.176 (log)
                     _pn.add(slot)
                     # Remember the geometry that actually composited, so if this
                     # slot is suppressed later there is something frozen to fade
@@ -7334,6 +7392,28 @@ def _run_job_body(jid, src_paths, vp, cfg):
             os.remove(_enc_log_path)
         except Exception:
             pass
+        try:    # v11.2.176 (log): contact decisions, refusals, and the frames each person was NOT painted on
+            _n_out = int(stats.get("frames_out", 0))
+            _tk = _tracker if "_tracker" in dir() else None
+            logging.info("CONTACT: partly hidden faces kept %d, kept by elimination (2 people) %d, kept apart from the "
+                         "de-duplication %d", int(getattr(_tk, "partner_side_n", 0) or 0), int(getattr(_tk, "elim_n", 0) or 0),
+                         int(getattr(_tk, "contact_apart_n", 0) or 0))
+            logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
+            for _s, _gs in sorted((stats.get("painted_g") or {}).items()):
+                _miss = [x for x in range(_n_out) if x not in _gs]
+                _runs, _a = [], None
+                for x in _miss + [None]:
+                    if _a is None:
+                        _a = _b = x
+                    elif x is not None and x == _b + 1:
+                        _b = x
+                    else:
+                        if _a is not None:
+                            _runs.append("%d" % _a if _a == _b else "%d-%d" % (_a, _b))
+                        _a = _b = x
+                logging.info("UNPAINTED person %d: %d frames %s", int(_s) + 1, len(_miss), ", ".join(_runs[:40]) if _runs else "none")
+        except Exception as _e:
+            logging.debug("contact log skipped: %s", _e)
         stats["processing_seconds"] = max(0.0, time.time() - t0 - stats["encode_seconds"])
         # Keep the final output path explicit before optional encryption/autosave.
         # The previous V4 runtime referenced `res` before assigning it, which
