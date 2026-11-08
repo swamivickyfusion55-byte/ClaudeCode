@@ -130,6 +130,25 @@ if os.environ.get("ORDER_DUMP") and hasattr(cp, "_rival_landmarks"):
                         "cue": float(getattr(cp, "_ORDER_CUE", {}).get(key, -1.0)), "other_front": (fr[0] if fr else None)})
         return out_
     cp._rival_landmarks = _rl_wrap
+_FD = []
+if os.environ.get("FRONT_DUMP") and hasattr(cp, "_front_relations"):
+    # v11.2.176: every front / behind decision of _front_relations - per frame and pair: the decision, the box areas, whether each
+    # face counts as seen, its identity cue (xid_near), and the decision memory
+    _orig_fr = cp._front_relations
+    def _fr_wrap(records, g):
+        rel = _orig_fr(records, g)
+        for key, v in rel.items():
+            ra, rb = records.get(key[0]) or {}, records.get(key[1]) or {}
+            def _ar(r):
+                b = r.get("bbox")
+                return None if b is None else float((b[2] - b[0]) * (b[3] - b[1]))
+            st = cp._FRONT_MEM.get(key)
+            _FD.append({"g": int(g), "pair": list(key), "lo_front": bool(v), "area": [_ar(ra), _ar(rb)],
+                        "seen": [ra.get("seen_near", ra.get("det")), rb.get("seen_near", rb.get("det"))],
+                        "xid": [ra.get("xid_near"), rb.get("xid_near")], "mem": [x if not isinstance(x, bool) else int(x) for x in (st or [])]})
+        return rel
+    cp._front_relations = _fr_wrap
+    atexit.register(lambda: json.dump(_FD, open(WORK + "/front_dump.json", "w"), default=str))
 if hasattr(cp, "_timeline_strip"):
     _orig_tl = cp._timeline_strip
     def _tl_wrap(tl, fps, nslots, bucket_sec=2.0):
