@@ -22,6 +22,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 import cv2, numpy as np
 import core_pipeline as cp
 import swap_engine
+if not hasattr(cp, "_ORDER_NOW") and hasattr(cp, "_geom_for_frame"):
+    # v11.2.176: packs before v11.2.95 have no frame counter at paint time - take it from the render-time geometry call, so the
+    # mask dump's frame numbers (identity_check.py, contact_lag.py) line up with the clip
+    cp._ORDER_NOW = [0]; _orig_gff = cp._geom_for_frame
+    def _gff(timeline, g, *a, **k):
+        cp._ORDER_NOW[0] = int(g); return _orig_gff(timeline, g, *a, **k)
+    cp._geom_for_frame = _gff
 DROP_STATS = {}
 if KW.get("drop"):
     # v11.2.144: the detector "loses" a person on chosen frames - drop=A:30-100 (person A, frames 30-100), drop=A:30-100:alt (every
