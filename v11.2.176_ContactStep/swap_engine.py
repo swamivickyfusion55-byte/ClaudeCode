@@ -3118,7 +3118,8 @@ class MultiFaceTracker:
     def _miss_limit(self, s):
         """v11.2.176: how many missed calls a track is carried. In contact with a partner that is seen: contact_carry_max
         (the face is behind or against its partner, which is still there); otherwise trk_max_missed (v11.2.92)."""
-        if bool(_P.get("contact_follow", 1)) and self._partner_seen(s):
+        if (bool(_P.get("contact_follow", 1)) and self._partner_seen(s)
+                and s not in (getattr(self, "_found_elsewhere", None) or ())):
             return int(_P.get("contact_carry_max", 240) or 240)
         return int(_P["trk_max_missed"])
 
@@ -3177,7 +3178,15 @@ class MultiFaceTracker:
             if bool(getattr(faces[j], "_kps_weak", False)) and getattr(tr, "crossing", False):
                 return False      # (points unreliable against its partner: may be a sliver; away from it: a blurred whole face)
             w_last = float(ref[2] - ref[0]); w_now = float(faces[j].bbox[2] - faces[j].bbox[0])
-            if w_last > 1.0 and w_now < 0.82 * w_last:
+            w_ref = w_last
+            if getattr(tr, "crossing", False):
+                # against its partner: against the widest this face was identified on its own in the last 90 calls, not
+                # only the last frame - a face sliding behind its partner shrinks a little each frame and never fell under
+                # 0.82 of the frame before (measured on the hide clip: 317 px -> 244 px, its points guessed ~40 px off)
+                _h = [w_ for c_, w_ in (getattr(self, "_sure_w", None) or {}).get(s, []) if self._call_n - c_ <= 90]
+                if _h:
+                    w_ref = max(w_ref, max(_h))
+            if w_ref > 1.0 and w_now < 0.82 * w_ref:
                 return False
             return True
         except Exception:
@@ -3277,6 +3286,7 @@ class MultiFaceTracker:
         """
         self._mark_crossings()
         self._contact_motion()           # v11.2.176
+        self._found_elsewhere = set()    # v11.2.176: slots whose person is seen elsewhere this call (see the end of assign)
         slots = sorted(self.tracks.keys())
         if faces is None or (hasattr(faces, "__len__") and len(faces) == 0):
             for t in self.tracks.values():
@@ -3419,7 +3429,8 @@ class MultiFaceTracker:
                         self.partner_side_n = getattr(self, "partner_side_n", 0) + 1
                     elif self._elim_side(i, j, s, faces, slots, sim, sim_all, has_id_all):
                         contact_ok.add((i, j))               # v11.2.176: two people, the other one clearly the other person
-                        self.elim_n = getattr(self, "elim_n", 0) + 1
+                        if (sim < 0.40) if long_gap else (sim < 0.38 and not (spatial >= 0.55 and sim >= 0.22)):
+                            self.elim_n = getattr(self, "elim_n", 0) + 1     # (log: only faces the identity gate refused)
                     elif long_gap:
                         if sim < 0.40:
                             _abs_ok = False
@@ -3796,6 +3807,18 @@ class MultiFaceTracker:
             tr.update(f, update_embedding=good, dt_frames=dt_frames, kps_ok=_kps_ok)
             if changed:
                 tr.reset_appearance()
+            if lock_sim >= 0.38:
+                # v11.2.176: the widths of this face when it was identified on its own, over the last 90 calls (the sliver
+                # guard of _elim_side)
+                try:
+                    _sw = getattr(self, "_sure_w", None)
+                    if _sw is None:
+                        _sw = self._sure_w = {}
+                    _h = [e for e in _sw.get(s, []) if self._call_n - e[0] <= 90]
+                    _h.append((self._call_n, float(f.bbox[2] - f.bbox[0])))
+                    _sw[s] = _h[-120:]
+                except Exception:
+                    pass
             result[s] = f
             # This slot is now TRACKING this face. The confirmation count in
             # _rel_admit exists to vet a NEW acquisition; a face the slot has
@@ -3813,6 +3836,23 @@ class MultiFaceTracker:
             except Exception:
                 pass
 
+        # v11.2.176: the long carry in contact (contact_carry_max) is for a face hidden against its partner. When this person's
+        # own face is found ELSEWHERE in the frame (it walked out from behind the other: a crossing), the carry ends at the
+        # v11.2.92 limit, so the slot is re-acquired by identity as in v11.2.92 instead of staying glued to the partner.
+        try:
+            taken = {id(f_) for f_ in result.values()}
+            for i, s in enumerate(slots):
+                if s in result or not has_id_all[i] or self.tracks[s].missed <= int(_P["trk_max_missed"]):
+                    continue
+                for j, f_ in enumerate(faces):
+                    if id(f_) in taken:
+                        continue
+                    o_ = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
+                    if sim_all[i][j] >= 0.45 and sim_all[i][j] >= o_ + 0.10:
+                        self._found_elsewhere.add(s)
+                        break
+        except Exception:
+            pass
         self._preserve_identity_on_expire()
         return result
 

@@ -89,4 +89,36 @@ def jitter(snap):
 o1, i1 = jitter(1); o0, _ = jitter(0)
 check("a still face with detector jitter is smoothed exactly as in v11.2.92", abs(o1 - o0) < 1e-6 and o1 < 0.8 * i1,
       "frame-to-frame jitter %.2f px out of %.2f in (v11.2.92 %.2f)" % (o1, i1, o0))
+# a face sliding behind its partner shrinks a little each frame (its box 300 -> 228 px) and then reads as nobody: elimination must
+# compare it with the widest it was identified at, not with the frame before (the hide clip: points ~40 px off on the sliver)
+def slide_run():
+    T = E.MultiFaceTracker([0, 1]); took = 0
+    for k in range(40):
+        w = 300.0 - (72.0 * min(1.0, max(0.0, (k - 10) / 20.0)))
+        ident = k < 30
+        fa = F(box(470 - (300 - w) / 2, 425, w), ea if ident else nobody(ea)); fb = F(box(700, 425, 300), eb)
+        res = T.assign([fa, fb], {})
+        if k >= 30:
+            took += int(res.get(0) is fa)
+    return took
+tk = slide_run()
+check("against its partner, a face that shrank slowly to 0.76 of its width and reads as nobody is not taken by elimination", tk == 0,
+      "%d of 10 taken" % tk)
+# a crossing: A walks behind B (missed 30 frames while B is seen) and comes out on the other side - it is picked up again by its
+# identity at the v11.2.92 limit (24), not carried on with B for up to 240 frames
+def cross_run():
+    T = E.MultiFaceTracker([0, 1]); xa, xb = 300.0, 700.0; back = None
+    for k in range(20):
+        T.assign([F(box(xa + 6 * k, 425, 250), ea), F(box(xb - 6 * k, 425, 250), eb)], {})
+    xb = 700.0 - 120
+    for k in range(60):
+        xb -= 6.0
+        faces = [F(box(xb, 425, 250), eb)] + ([F(box(820 + 6 * (k - 30), 425, 250), ea)] if k >= 30 else [])
+        res = T.assign(faces, {})
+        if back is None and k >= 30 and res.get(0) is not None and res.get(0) is faces[-1]:
+            back = k
+    return back
+bk = cross_run()
+check("a crossing: A comes out on the other side and is its own again within a few frames (not carried with B)", bk is not None and bk <= 32,
+      "back on call %s (A reappears on call 30)" % bk)
 print("\n%s" % ("all checks passed" if fails == 0 else "%d check(s) failed" % fails))
