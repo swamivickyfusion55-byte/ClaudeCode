@@ -136,7 +136,7 @@ visible face. "Weak" means 40-70 %. "Mix-up" means the face reads as the other p
 | **Step, detections dropped on the step frames** | step frames 4-6 px; worst 16.6 px | **step frames 1-3 px**; worst 18.6 px (frame 84) |
 | **Side-view kiss**, A behind | revert 12, weak 2, mix-up 4; worst 62 px off | **revert 0, mix-up 0**, weak 12; worst 16 px off |
 | **Side-view kiss**, B in front | revert 36, weak 18, mix-up 19; worst 33 px off | **revert 7, weak 15, mix-up 0**; worst 8 px off |
-| Side-view kiss: the other person's paint on a face | up to 51 % (A's slot on B, frames 64-73) | **at most 1 %** |
+| Side-view kiss: the other person's paint on a face | up to 51 % (A's slot on B, frames 64-73) | **at most 4 %** (5 % or more on 0 face-frames; 175: 128) |
 | **Smooch** (frontal, deep) | B: weak 0, mix-up 0; A: weak 45 | B: weak 1, mix-up 1 (frame 34); A: weak 45 (the same) |
 | **Hide** (A a sliver) | A weak 30; B clean | an earlier 176 build: A weak 52, fixed since (section 4, item 4); final run pending |
 | **Cross** | A revert 0, weak 7; B weak 2 | final run pending |

@@ -1,0 +1,81 @@
+diff -ru -x __pycache__ v11.2.176_ContactStep/SDOS-176_ContactStep.md v11.2.177_ContactStep/SDOS-176_ContactStep.md
+--- v11.2.176_ContactStep/SDOS-176_ContactStep.md	2026-11-08 15:26:40.161768813 +0000
++++ v11.2.177_ContactStep/SDOS-176_ContactStep.md	2026-11-08 16:02:34.748579583 +0000
+@@ -136,7 +136,7 @@
+ | **Step, detections dropped on the step frames** | step frames 4-6 px; worst 16.6 px | **step frames 1-3 px**; worst 18.6 px (frame 84) |
+ | **Side-view kiss**, A behind | revert 12, weak 2, mix-up 4; worst 62 px off | **revert 0, mix-up 0**, weak 12; worst 16 px off |
+ | **Side-view kiss**, B in front | revert 36, weak 18, mix-up 19; worst 33 px off | **revert 7, weak 15, mix-up 0**; worst 8 px off |
+-| Side-view kiss: the other person's paint on a face | up to 51 % (A's slot on B, frames 64-73) | **at most 1 %** |
++| Side-view kiss: the other person's paint on a face | up to 51 % (A's slot on B, frames 64-73) | **at most 4 %** (5 % or more on 0 face-frames; 175: 128) |
+ | **Smooch** (frontal, deep) | B: weak 0, mix-up 0; A: weak 45 | B: weak 1, mix-up 1 (frame 34); A: weak 45 (the same) |
+ | **Hide** (A a sliver) | A weak 30; B clean | an earlier 176 build: A weak 52, fixed since (section 4, item 4); final run pending |
+ | **Cross** | A revert 0, weak 7; B weak 2 | final run pending |
+Only in v11.2.177_ContactStep: SDOS-177_ContactStep.md
+diff -ru -x __pycache__ v11.2.176_ContactStep/config.py v11.2.177_ContactStep/config.py
+--- v11.2.176_ContactStep/config.py	2026-11-08 13:13:22.971270768 +0000
++++ v11.2.177_ContactStep/config.py	2026-11-08 15:39:35.804310002 +0000
+@@ -276,7 +276,7 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.176"
++VERSION = "v11.2.177"
+ BUILD = "ContactStep · the 11.2.92 face swap; in a kiss or hug each face is kept (where it touches its partner, by elimination of 2 people, moving with the partner when missed); a fast step keeps the face; only a painted mark is removed"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+diff -ru -x __pycache__ v11.2.176_ContactStep/core_pipeline.py v11.2.177_ContactStep/core_pipeline.py
+--- v11.2.176_ContactStep/core_pipeline.py	2026-11-08 14:49:27.058386806 +0000
++++ v11.2.177_ContactStep/core_pipeline.py	2026-11-08 15:39:35.803913577 +0000
+@@ -3887,17 +3887,31 @@
+                 r = _ar(rlo) / _ar(rhi)
+                 _clear = r >= 1.10 or r <= 1.0 / 1.10
+                 if st is None:
+-                    st = [r >= 1.0, 0, int(g), None, _clear]
++                    st = [r >= 1.0, 0, int(g), None, _clear, r, 0]
+                 elif st[3] is not None and 0 <= int(g) - st[3] <= 60:
+                     st[2] = int(g)                       # an identity decision holds through frames without a reading
+-                elif len(st) >= 5 and not st[4] and _clear and st[2] != int(g):
+-                    # the first decision was a near tie (boxes within 10 %, as when two faces first touch): the first clear
+-                    # difference decides at once - the face going behind loses box size as it is covered (measured on the
+-                    # frontal smooch: the face behind 6-8 % BIGGER on the first touching frames, 12-15 % smaller from then on)
+-                    if (r >= 1.10) != st[0]:
+-                        st[0] = r >= 1.10
+-                        _FRONT_STATS["changes"] += 1
+-                    st[1], st[2], st[4] = 0, int(g), True
++                elif len(st) >= 7 and not st[4] and st[2] != int(g):
++                    # the first decision was a near tie (boxes within 10 %, as when two faces first touch). The face going
++                    # behind loses box size as it is covered, so the first decision may switch ONCE, at once:
++                    #  - on the first clear difference (10 %) - the frontal smooch: the face behind 6-8 % BIGGER on the first
++                    #    touching frames, 12-15 % smaller from then on;
++                    #  - or when the face put in front has lost 8 % of its size against the other since that decision and is
++                    #    the smaller one, two frames in a row - the cross clip: 1.09 at first touch, then 1.07 ... 0.91, never
++                    #    10 % apart before it was hidden (detector jitter of a side-view pair flips every frame, never twice)
++                    if _clear:
++                        if (r >= 1.10) != st[0]:
++                            st[0] = r >= 1.10
++                            _FRONT_STATS["changes"] += 1
++                        st[4] = True
++                    else:
++                        r0 = max(1e-6, float(st[5]))
++                        losing = (r / r0 <= 0.92 and r < 1.0) if st[0] else (r / r0 >= 1.0 / 0.92 and r > 1.0)
++                        st[6] = st[6] + 1 if losing else 0
++                        if st[6] >= 2:
++                            st[0] = not st[0]
++                            st[4], st[6] = True, 0
++                            _FRONT_STATS["changes"] += 1
++                    st[1], st[2] = 0, int(g)
+                 elif st[2] != int(g):
+                     w = (r >= 1.10) if not st[0] else not (r <= 1.0 / 1.10)
+                     if w != st[0]:
+diff -ru -x __pycache__ v11.2.176_ContactStep/swap_engine.py v11.2.177_ContactStep/swap_engine.py
+--- v11.2.176_ContactStep/swap_engine.py	2026-11-08 15:19:53.004694987 +0000
++++ v11.2.177_ContactStep/swap_engine.py	2026-11-08 15:39:35.804852306 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.176-contactstep"
++ENGINE_VERSION = "aequus-1.2.177-contactstep"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
