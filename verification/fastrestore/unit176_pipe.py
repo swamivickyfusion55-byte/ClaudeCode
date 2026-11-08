@@ -54,6 +54,18 @@ check("first touch a near tie, then the other face clearly bigger: it is in fron
 fresh(); seq = [0.80] * 6 + [1.12] + [0.80] * 6
 res = [cp._front_relations({0: rec(500, 200 * r ** 0.5), 1: rec(640, 200)}, g)[(0, 1)] for g, r in enumerate(seq)]
 check("...but once decided on a clear difference, one contrary frame does not change it", not any(res), str(res))
+# 4c) the cross clip (v11.2.177): at first touch the face going behind is 9 % bigger, then shrinks steadily (1.09 -> 0.91) and is
+# hidden before the two are 10 % apart - the decision switches when it has lost 8 % and is the smaller one, two frames in a row
+if hasattr(cp, "_front_relations"):
+    fresh(); seq = [1.09, 1.07, 1.06, 1.03, 1.02, 1.00, 0.98, 0.94, 0.93, 0.91, 0.92, 0.92]
+    res = [cp._front_relations({0: rec(500, 200 * r ** 0.5), 1: rec(640, 200)}, g)[(0, 1)] for g, r in enumerate(seq)]
+    sw = res.index(False) if False in res else None
+    check("first touch a near tie, then the face in front shrinks steadily: it goes behind within 2 frames of becoming the smaller",
+          sw is not None and sw <= 7 and not any(res[sw:]), "%s (switch at %s; the smaller from index 6)" % (res, sw))
+    fresh(); seq = [1.06, 0.94] * 20 + [1.20] * 6
+    res = [cp._front_relations({0: rec(500, 200 * r ** 0.5), 1: rec(640, 200)}, g)[(0, 1)] for g, r in enumerate(seq)]
+    ch = sum(1 for a_, b_ in zip(res, res[1:]) if a_ != b_)
+    check("...while detector jitter that alternates every frame (+-6 % area) never switches it", ch == 0, "%d changes" % ch)
 # 5) a side-view kiss on the tracker: each face's 5 points all on its front half, so the two faces' points sit ~15 px apart while
 # the boxes stay two faces (overlap ~0.15, each centre outside the other box); the face behind reads as its partner (0.85)
 import swap_engine as E
