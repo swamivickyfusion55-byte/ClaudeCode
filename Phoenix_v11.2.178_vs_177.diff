@@ -1,0 +1,100 @@
+Only in v11.2.178_ContactStep: SDOS-178_PatchPreview.md
+diff -ru -x __pycache__ v11.2.177_ContactStep/app.py v11.2.178_ContactStep/app.py
+--- v11.2.177_ContactStep/app.py	2026-11-08 15:39:35.780717890 +0000
++++ v11.2.178_ContactStep/app.py	2026-11-08 16:21:10.014625377 +0000
+@@ -21,7 +21,7 @@
+ # Stable machine API for Phoenix Mobile / external clients.
+ from phoenix_api_adapter import (
+     api_submit_video, api_job_status, api_download, api_cancel,
+-    api_detect_video_frame, _jpeg_rgb,
++    api_detect_video_frame, _jpeg_rgb, api_patch_preview,
+ )
+ 
+ # Import pipeline (models, jobs, swap, temporal, device helpers, …)
+@@ -649,6 +649,12 @@
+         _api_download_btn = gr.Button("API Download")
+         _api_cancel_btn = gr.Button("API Cancel")
+         _api_json_out = gr.JSON(label="API response")
++        # v11.2.178: the app's Patch Removal Preview button
++        _api_patch_image = gr.File(type="filepath", label="API patch frame")
++        _api_patch_mask = gr.File(type="filepath", label="API patch mask")
++        _api_patch_btn = gr.Button("API Patch Preview")
++        _api_patch_out = gr.File(type="filepath", label="API patch preview")
++        _api_patch_msg = gr.Textbox(label="API patch preview status")
+         _api_file_out = gr.File(label="API output file")
+ 
+         # Image API compatibility controls. These remain hidden and exist only
+@@ -689,6 +695,8 @@
+         return _jpeg_rgb(out, "iswap") if out is not None else None, msg
+ 
+     _api_submit_btn.click(api_submit_video, inputs=[_api_video, _api_face1, _api_face2, _api_face3, _api_face4, _api_settings], outputs=[_api_json_out], api_name="phoenix_submit_video")
++    _api_patch_btn.click(api_patch_preview, inputs=[_api_patch_image, _api_patch_mask], outputs=[_api_patch_out, _api_patch_msg],
++                         api_name="phoenix_patch_preview", concurrency_limit=1)
+     _api_detect_btn.click(api_detect_video_frame, inputs=[_api_detect_video, _api_detect_pct], outputs=[_api_detect_image, _api_detect_msg, _api_detect_face1, _api_detect_face2, _api_detect_face3, _api_detect_face4], api_name="phoenix_detect_video_frame")
+     # queue=False: these three are near-instant (a dict lookup, serving an
+     # already-rendered file, setting a cancel flag) and were previously
+diff -ru -x __pycache__ v11.2.177_ContactStep/config.py v11.2.178_ContactStep/config.py
+--- v11.2.177_ContactStep/config.py	2026-11-08 15:39:35.804310002 +0000
++++ v11.2.178_ContactStep/config.py	2026-11-08 16:21:10.014800414 +0000
+@@ -276,8 +276,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.177"
+-BUILD = "ContactStep · the 11.2.92 face swap; in a kiss or hug each face is kept (where it touches its partner, by elimination of 2 people, moving with the partner when missed); a fast step keeps the face; only a painted mark is removed"
++VERSION = "v11.2.178"
++BUILD = "ContactStep · the 11.2.92 face swap; in a kiss or hug each face is kept (where it touches its partner, by elimination of 2 people, moving with the partner when missed); a fast step keeps the face; only a painted mark is removed, with its Preview"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru -x __pycache__ v11.2.177_ContactStep/phoenix_api_adapter.py v11.2.178_ContactStep/phoenix_api_adapter.py
+--- v11.2.177_ContactStep/phoenix_api_adapter.py	2026-11-08 15:39:35.782238186 +0000
++++ v11.2.178_ContactStep/phoenix_api_adapter.py	2026-11-08 16:21:32.228894870 +0000
+@@ -383,6 +383,35 @@
+     return ((m > 127).astype(np.uint8) * 255)
+ 
+ 
++def api_patch_preview(image, mask):
++    """v11.2.178: Patch Removal preview (the app's Preview button): the frame + the finger-painted mask -> (the frame with the mark
++    removed, JSON info). The same still fill the video job makes on the painted frame (patch_manual.remove_patch_image).
++    v11.2.175-177 had no such endpoint, so the app's Preview could not show the cleaned frame."""
++    t0 = time.time()
++    try:
++        import patch_manual as _PM
++        ip, mp = _coerce_video(image), _coerce_video(mask)
++        img = cv2.imread(str(ip), cv2.IMREAD_COLOR) if ip else None
++        msk = _mask_from_image(cv2.imread(str(mp), cv2.IMREAD_UNCHANGED)) if mp else None
++        if img is None:
++            return None, json.dumps({"ok": False, "error": "the frame is not a readable image"})
++        if msk is None or not (msk > 127).any():
++            return None, json.dumps({"ok": False, "error": "nothing is painted on the mask"})
++        out, info = _PM.remove_patch_image(img, msk)
++        root = Path(os.environ.get("GRADIO_TEMP_DIR") or tempfile.gettempdir()) / "phoenix_patch_preview"
++        root.mkdir(parents=True, exist_ok=True)
++        dest = root / f"patchprev_{uuid.uuid4().hex[:10]}.jpg"
++        cv2.imwrite(str(dest), out, [cv2.IMWRITE_JPEG_QUALITY, 93])
++        res = {"ok": True, "marks": len(info), "area_px": int(sum(int(i.get("area_px", 0)) for i in info)),
++               "inpainter": "still fill", "ms": int((time.time() - t0) * 1000),
++               "width": int(img.shape[1]), "height": int(img.shape[0]), "version": VERSION_FULL}
++        logging.info("phoenix_patch_preview: %s", res)
++        return str(dest), json.dumps(res)
++    except Exception as exc:
++        logging.exception("api_patch_preview")
++        return None, json.dumps({"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:180]}"})
++
++
+ def _load_patches(raw: dict):
+     """Painted marks only. Automatic belly settings are ignored."""
+     if raw.get("belly_clear") or raw.get("clean_belly") or raw.get("belly_norm"):
+diff -ru -x __pycache__ v11.2.177_ContactStep/swap_engine.py v11.2.178_ContactStep/swap_engine.py
+--- v11.2.177_ContactStep/swap_engine.py	2026-11-08 15:39:35.804852306 +0000
++++ v11.2.178_ContactStep/swap_engine.py	2026-11-08 16:21:10.015640737 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.177-contactstep"
++ENGINE_VERSION = "aequus-1.2.178-contactstep"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 

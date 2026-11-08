@@ -1,0 +1,901 @@
+Only in v11.2.178_ContactStep: SDOS-176_ContactStep.md
+Only in v11.2.178_ContactStep: SDOS-177_ContactStep.md
+Only in v11.2.178_ContactStep: SDOS-178_PatchPreview.md
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/app.py v11.2.178_ContactStep/app.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/app.py	2026-10-25 11:55:00.000000000 +0000
++++ v11.2.178_ContactStep/app.py	2026-11-08 16:21:10.014625377 +0000
+@@ -21,7 +21,7 @@
+ # Stable machine API for Phoenix Mobile / external clients.
+ from phoenix_api_adapter import (
+     api_submit_video, api_job_status, api_download, api_cancel,
+-    api_detect_video_frame, _jpeg_rgb,
++    api_detect_video_frame, _jpeg_rgb, api_patch_preview,
+ )
+ 
+ # Import pipeline (models, jobs, swap, temporal, device helpers, …)
+@@ -649,6 +649,12 @@
+         _api_download_btn = gr.Button("API Download")
+         _api_cancel_btn = gr.Button("API Cancel")
+         _api_json_out = gr.JSON(label="API response")
++        # v11.2.178: the app's Patch Removal Preview button
++        _api_patch_image = gr.File(type="filepath", label="API patch frame")
++        _api_patch_mask = gr.File(type="filepath", label="API patch mask")
++        _api_patch_btn = gr.Button("API Patch Preview")
++        _api_patch_out = gr.File(type="filepath", label="API patch preview")
++        _api_patch_msg = gr.Textbox(label="API patch preview status")
+         _api_file_out = gr.File(label="API output file")
+ 
+         # Image API compatibility controls. These remain hidden and exist only
+@@ -689,6 +695,8 @@
+         return _jpeg_rgb(out, "iswap") if out is not None else None, msg
+ 
+     _api_submit_btn.click(api_submit_video, inputs=[_api_video, _api_face1, _api_face2, _api_face3, _api_face4, _api_settings], outputs=[_api_json_out], api_name="phoenix_submit_video")
++    _api_patch_btn.click(api_patch_preview, inputs=[_api_patch_image, _api_patch_mask], outputs=[_api_patch_out, _api_patch_msg],
++                         api_name="phoenix_patch_preview", concurrency_limit=1)
+     _api_detect_btn.click(api_detect_video_frame, inputs=[_api_detect_video, _api_detect_pct], outputs=[_api_detect_image, _api_detect_msg, _api_detect_face1, _api_detect_face2, _api_detect_face3, _api_detect_face4], api_name="phoenix_detect_video_frame")
+     # queue=False: these three are near-instant (a dict lookup, serving an
+     # already-rendered file, setting a cancel flag) and were previously
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/config.py v11.2.178_ContactStep/config.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/config.py	2026-11-08 11:45:24.000000000 +0000
++++ v11.2.178_ContactStep/config.py	2026-11-08 16:21:10.014800414 +0000
+@@ -276,8 +276,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.175"
+-BUILD = "ManualPatch · face swap is 11.2.92, only a painted mark is removed, automatic clean is off"
++VERSION = "v11.2.178"
++BUILD = "ContactStep · the 11.2.92 face swap; in a kiss or hug each face is kept (where it touches its partner, by elimination of 2 people, moving with the partner when missed); a fast step keeps the face; only a painted mark is removed, with its Preview"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/core_pipeline.py v11.2.178_ContactStep/core_pipeline.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/core_pipeline.py	2026-11-08 11:45:22.000000000 +0000
++++ v11.2.178_ContactStep/core_pipeline.py	2026-11-08 16:21:09.984316104 +0000
+@@ -1134,7 +1134,7 @@
+ _DUP_SIM = 0.55
+ 
+ 
+-def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35):
++def _dedupe_faces(faces, iou_thr=_DUP_IOU, sim_thr=_DUP_SIM, centre_frac=0.35, apart=None):
+     """One person → one box. Duplicate woman-boxes were occupying the man's slot.
+ 
+     ``centre_frac`` is the centre-distance fallback used ONLY for a pair where
+@@ -1183,6 +1183,8 @@
+                     break
+             except Exception:
+                 pass
++            if apart and (id(f), id(g)) in apart:
++                continue          # v11.2.176: two people in contact (_contact_apart) - only the box-overlap test applies
+             eg = _emb(g)
+             if ef is not None and eg is not None:
+                 try:
+@@ -1311,8 +1313,12 @@
+     return faces
+ 
+ 
+-def _zoom_detect(frm, box, pad=1.15):
+-    """Re-detect inside an expanded head box so a small or turned face fills 640."""
++def _zoom_detect(frm, box, pad=1.15, force=False):
++    """Re-detect inside an expanded head box so a small or turned face fills 640.
++
++    v11.2.176: ``force`` (a tracked person the detector did not find on this frame) searches a face of any size - the 220 px
++    limit made this rescue dead at 1080p, where most faces are larger, exactly when a fast move or a turn lost the face - with
++    the crop's lower threshold (0.18)."""
+     if frm is None or box is None or _fa is None:
+         return []
+     try:
+@@ -1321,7 +1327,7 @@
+     except Exception:
+         return []
+     bw, bh = max(12.0, x2 - x1), max(12.0, y2 - y1)
+-    if min(bw, bh) > 220:
++    if min(bw, bh) > 220 and not force:
+         return []
+     cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+     side = max(96.0, min(max(bw, bh) * (1.0 + float(pad)), float(min(h, w))))
+@@ -1581,6 +1587,9 @@
+         # for any motion the tracker can model, whereas extrapolation trails
+         # the subject and then snaps at the next detection.
+         "det": not bool(getattr(face, "predicted", False)),
++        # v11.2.176: how much this detection's crop reads as ANOTHER person (_mark_cross_identity); None when unknown
++        "xid": (None if bool(getattr(face, "predicted", False)) or getattr(face, "_xid", None) is None
++                else float(getattr(face, "_xid"))),
+     }
+ 
+ 
+@@ -1831,7 +1840,11 @@
+         if s2 == slot or r2 is None or r2.get("lmk") is None:
+             continue
+         area2 = float(max(1.0, (r2["bbox"][2] - r2["bbox"][0]) * (r2["bbox"][3] - r2["bbox"][1])))
+-        if area2 <= my_area:
++        _k = (min(slot, s2), max(slot, s2))
++        if _k in _FRONT_NOW:              # v11.2.176: the steady front / behind decision of this frame (_front_relations)
++            if (not _FRONT_NOW[_k]) if _k[0] == s2 else _FRONT_NOW[_k]:
++                continue                  # (this face is the one in front)
++        elif area2 <= my_area:
+             continue                      # painted before us; not an occluder
+         if _bbox_iou(me["bbox"], r2["bbox"]) < 0.06:
+             continue
+@@ -3787,6 +3800,185 @@
+         return False
+ 
+ 
++def _mark_cross_identity(assigned, tracker):
++    """v11.2.176 (SDOS-176, from v11.2.144): on each face given to a person, ``_xid`` = cosine to the OTHER person's identity
++    lock minus cosine to its own. The face behind in a kiss has its middle covered by the partner, so its crop reads as the
++    partner (+0.6 to +0.8); the face in front reads as itself (-0.9). Used only for front / behind (_front_relations)."""
++    try:
++        if not bool(_E._P.get("contact_follow", 1)) or not assigned or len(assigned) < 2:
++            return
++        locks = {}
++        for s, tr in tracker.tracks.items():
++            e = getattr(tr, "id_lock", None) if tr is not None else None
++            if e is None and tr is not None:
++                e = getattr(tr, "emb", None)
++            if e is not None:
++                v = np.asarray(e, np.float32).reshape(-1); n = float(np.linalg.norm(v))
++                if v.size >= 8 and n > 1e-6:
++                    locks[s] = v / n
++        if len(locks) < 2:
++            return
++        for s, f in assigned.items():
++            e = getattr(f, "normed_embedding", None)
++            if e is None or s not in locks:
++                continue
++            v = np.asarray(e, np.float32).reshape(-1); n = float(np.linalg.norm(v))
++            if v.size != locks[s].size or n < 1e-6:
++                continue
++            v = v / n
++            f._xid = max(float(v @ l) for s2, l in locks.items() if s2 != s and l.size == v.size) - float(v @ locks[s])
++    except Exception as _e:
++        logging.debug("cross identity skipped: %s", _e)
++
++
++_FRONT_MEM = {}      # v11.2.176: (slot_lo, slot_hi) -> [lo_in_front, frames_the_other_way, last_frame, last_identity_frame]
++_FRONT_NOW = {}      # v11.2.176: the frame being painted: (slot_lo, slot_hi) -> lo is in front
++_FRONT_STATS = {"identity": 0, "seen": 0, "size": 0, "changes": 0}
++
++
++def _front_relations(records, g):
++    """v11.2.176 (SDOS-176): who is in front, for every overlapping pair, decided ONCE per frame and kept steady. v11.2.92 took
++    the bigger box as the one in front, afresh on every frame; in a side-view kiss the two boxes are the same size within a few
++    per cent, so the face in front changed from frame to frame, each change cutting the other face out where they overlap -
++    the shake, and the revert and back. Evidence, strongest first:
++      1. identity: a face whose crop reads as the other person (by 0.25) while the other reads as itself (by 0.25) is BEHIND
++         (its middle is covered by the other); held for 60 frames when there is no reading;
++      2. sight: a face not seen within 2 frames (carried on a guess) is never in front of one that is;
++      3. size: the bigger box, changed only when the other has been 10 % bigger for 4 frames in a row."""
++    rel = {}
++    items = [(s, r) for s, r in records.items() if r is not None and r.get("bbox") is not None]
++
++    def _ar(r):
++        b = r["bbox"]
++        return float(max(1.0, (b[2] - b[0]) * (b[3] - b[1])))
++    for i_ in range(len(items)):
++        for j_ in range(i_ + 1, len(items)):
++            (sa, ra), (sb, rb) = items[i_], items[j_]
++            if _bbox_iou(ra["bbox"], rb["bbox"]) < 0.06:
++                continue
++            key = (min(sa, sb), max(sa, sb))
++            rlo, rhi = (ra, rb) if key[0] == sa else (rb, ra)
++            want, src = None, None
++            xl, xh = rlo.get("xid_near"), rhi.get("xid_near")
++            if xl is not None and xh is not None:
++                if xl >= 0.25 and xh <= -0.25:
++                    want, src = False, "identity"
++                elif xh >= 0.25 and xl <= -0.25:
++                    want, src = True, "identity"
++            if want is None:
++                sl = bool(rlo.get("seen_near", rlo.get("det"))); sh = bool(rhi.get("seen_near", rhi.get("det")))
++                if sl != sh:
++                    want, src = sl, "seen"
++            st = _FRONT_MEM.get(key)
++            if want is not None:
++                if st is None:
++                    st = [want, 0, int(g), int(g) if src == "identity" else None, True]
++                else:
++                    if st[0] != want:
++                        _FRONT_STATS["changes"] += 1
++                    st[0], st[1], st[2] = want, 0, int(g)
++                    if src == "identity":
++                        st[3] = int(g)
++                    if len(st) < 5:
++                        st.append(True)
++                    st[4] = True
++                _FRONT_STATS[src] += 1
++            else:
++                r = _ar(rlo) / _ar(rhi)
++                _clear = r >= 1.10 or r <= 1.0 / 1.10
++                if st is None:
++                    st = [r >= 1.0, 0, int(g), None, _clear, r, 0]
++                elif st[3] is not None and 0 <= int(g) - st[3] <= 60:
++                    st[2] = int(g)                       # an identity decision holds through frames without a reading
++                elif len(st) >= 7 and not st[4] and st[2] != int(g):
++                    # the first decision was a near tie (boxes within 10 %, as when two faces first touch). The face going
++                    # behind loses box size as it is covered, so the first decision may switch ONCE, at once:
++                    #  - on the first clear difference (10 %) - the frontal smooch: the face behind 6-8 % BIGGER on the first
++                    #    touching frames, 12-15 % smaller from then on;
++                    #  - or when the face put in front has lost 8 % of its size against the other since that decision and is
++                    #    the smaller one, two frames in a row - the cross clip: 1.09 at first touch, then 1.07 ... 0.91, never
++                    #    10 % apart before it was hidden (detector jitter of a side-view pair flips every frame, never twice)
++                    if _clear:
++                        if (r >= 1.10) != st[0]:
++                            st[0] = r >= 1.10
++                            _FRONT_STATS["changes"] += 1
++                        st[4] = True
++                    else:
++                        r0 = max(1e-6, float(st[5]))
++                        losing = (r / r0 <= 0.92 and r < 1.0) if st[0] else (r / r0 >= 1.0 / 0.92 and r > 1.0)
++                        st[6] = st[6] + 1 if losing else 0
++                        if st[6] >= 2:
++                            st[0] = not st[0]
++                            st[4], st[6] = True, 0
++                            _FRONT_STATS["changes"] += 1
++                    st[1], st[2] = 0, int(g)
++                elif st[2] != int(g):
++                    w = (r >= 1.10) if not st[0] else not (r <= 1.0 / 1.10)
++                    if w != st[0]:
++                        st[1] += 1
++                        if st[1] >= 4:
++                            st[0], st[1] = w, 0
++                            _FRONT_STATS["changes"] += 1
++                    else:
++                        st[1] = 0
++                    st[2] = int(g)
++                _FRONT_STATS["size"] += 1
++            _FRONT_MEM[key] = st
++            rel[key] = bool(st[0])
++    return rel
++
++
++def _contact_apart(faces, tracker):
++    """v11.2.176 (SDOS-176, from v11.2.144): pairs of detections that are two different people, by the tracker's geometry. In a
++    side-view kiss the partner fills half of a face's ArcFace crop, so the two embeddings agree at 0.8-0.9 and the de-duplication
++    (0.55) merged them into one face: the face behind was gone before the tracker saw it. Each must sit where a different
++    established person was last really seen (mutual nearest), its points nearer that person's last points than the other's,
++    and the boxes must be two faces (overlap under 0.40)."""
++    out = set()
++    try:
++        if not bool(_E._P.get("contact_follow", 1)) or tracker is None or len(faces) < 2:
++            return out
++        trs = [(s, t) for s, t in tracker.tracks.items()
++               if t is not None and t.established and getattr(t, "last_hit_bbox", None) is not None
++               and int(getattr(t, "missed", 0) or 0) <= 30]
++        if len(trs) < 2:
++            return out
++        cd = _E._cdist_norm
++        near_t = {s: min(range(len(faces)), key=lambda k: cd(t.last_hit_bbox, faces[k].bbox)) for s, t in trs}
++        mine = {}
++        for k, f in enumerate(faces):
++            s = min(trs, key=lambda st: cd(st[1].last_hit_bbox, f.bbox))[0]
++            if near_t.get(s) == k:
++                mine[k] = s
++
++        def _kc(p):
++            if p is None or np.size(p) < 10:
++                return None
++            return np.asarray(p, np.float32).reshape(-1, 2).mean(0)
++        tk = {s: _kc(getattr(t, "last_hit_kps", None)) for s, t in trs}
++        ks = sorted(mine)
++        for a_ in range(len(ks)):
++            for b_ in range(a_ + 1, len(ks)):
++                ka, kb = ks[a_], ks[b_]
++                sa, sb = mine[ka], mine[kb]
++                fa, fb = faces[ka], faces[kb]
++                if sa == sb or _bbox_iou(fa.bbox, fb.bbox) >= 0.40:
++                    continue
++                ca, cb = _kc(getattr(fa, "kps", None)), _kc(getattr(fb, "kps", None))
++                if ca is None or cb is None or tk.get(sa) is None or tk.get(sb) is None:
++                    if _E._two_boxes(fa.bbox, fb.bbox):
++                        out.add((id(fa), id(fb))); out.add((id(fb), id(fa)))
++                    continue
++                if ((float(np.linalg.norm(ca - tk[sa])) < float(np.linalg.norm(ca - tk[sb]))
++                        and float(np.linalg.norm(cb - tk[sb])) < float(np.linalg.norm(cb - tk[sa])))
++                        or _E._two_boxes(fa.bbox, fb.bbox)):
++                    # (or the boxes are two faces: in a side-view kiss the points of both faces sit within ~20 px)
++                    out.add((id(fa), id(fb))); out.add((id(fb), id(fa)))
++    except Exception as _e:
++        logging.debug("contact apart skipped: %s", _e)
++    return out
++
++
+ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
+                             dt_frames=1.0):
+     """Associate detections to replacement slots via the v11 MultiFaceTracker.
+@@ -3830,11 +4022,16 @@
+         # that way). Now that the embeddings exist, run it once more so the
+         # one case the fallback cannot see - two boxes barely overlapping that
+         # are the same person - is still caught.
+-        faces = _dedupe_faces(faces)
++        # v11.2.176: but never two people the tracker sees in contact, each where it was last seen (_contact_apart)
++        _apart = _contact_apart(faces, tracker)
++        if _apart:
++            tracker.contact_apart_n = int(getattr(tracker, "contact_apart_n", 0) or 0) + 1
++        faces = _dedupe_faces(faces, apart=_apart)
+     except Exception as e:
+         logging.debug("deferred embedding stage skipped: %s", e)
+ 
+     assigned = tracker.assign(faces, ref_map, dt_frames=dt_frames)
++    _mark_cross_identity(assigned, tracker)
+ 
+     # v11.1.9: stamp frame size onto every live track so predict() can freeze
+     # once the bbox leaves the shot.
+@@ -4757,6 +4954,9 @@
+             except Exception:
+                 _src_gender[idx] = None
+         _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_src_gender)
++        _FRONT_MEM.clear(); _FRONT_NOW.clear()
++        for _fk in _FRONT_STATS:
++            _FRONT_STATS[_fk] = 0
+         logging.info("Face mode: %s · sources=%d · source genders (0=F 1=M): %s",
+                      max_faces if max_faces < 99 else "multi", len(smap), _src_gender)
+         u(8, f"Face mode: {max_faces if max_faces < 99 else 'multi'} · sources={len(smap)} · gender={_src_gender}")
+@@ -5571,13 +5771,18 @@
+                                 _short = True
+                     except Exception:
+                         _rois = []
++                    _trk_rois = list(_rois)      # v11.2.176: the rois that are tracked people missing on this frame
+                     if _short and not _rois:
+                         _hh, _ww = frm.shape[:2]
+                         _rois.append([_ww * 0.12, _hh * 0.02, _ww * 0.88, _hh * 0.72])
+                     if _short and _rois:
+                         try:
+                             for _bb in _rois[:2]:
+-                                _extra = _zoom_detect(frm, _bb)
++                                # v11.2.176: a missing tracked face - any size, a wider search (a fast step moves it far)
++                                if any(_bb is _r for _r in _trk_rois):
++                                    _extra = _zoom_detect(frm, _bb, pad=1.6, force=True)
++                                else:
++                                    _extra = _zoom_detect(frm, _bb)
+                                 if _extra:
+                                     faces = _merge_detected(faces, _extra)
+                                     stats["zoom_hits"] = stats.get("zoom_hits", 0) + len(_extra)
+@@ -5625,6 +5830,10 @@
+                             _reliable.append(f)
+                         else:
+                             _weak.append(f)
++                            try:
++                                f._kps_weak = True      # v11.2.176: read by MultiFaceTracker._elim_side
++                            except Exception:
++                                pass
+                     if _reliable:
+                         if multi_face_safe:
+                             # KEEP a weak second person. Old code used slot 0's
+@@ -6667,6 +6876,12 @@
+                                           end_gap=end_gap,
+                                           hold_after=_cadence_taper)
+                     if rec is not None:
++                        # v11.2.176: seen within 2 frames, and how much its recent real crops read as the other person
++                        rec = dict(rec)
++                        rec["seen_near"] = any(abs(int(gg) - int(g)) <= 2 and rr.get("det") for gg, rr in _tl)
++                        _xs = [float(rr["xid"]) for gg, rr in _tl
++                               if abs(int(gg) - int(g)) <= 3 and rr.get("det") and rr.get("xid") is not None]
++                        rec["xid_near"] = float(np.median(_xs)) if _xs else None
+                         out[slot] = rec
+                 return out
+ 
+@@ -7151,9 +7366,20 @@
+                         _use["det"] = False
+                     _paint[slot] = _use
+ 
++                _FRONT_NOW.clear()
++                try:
++                    if bool(_E._P.get("contact_follow", 1)):
++                        _FRONT_NOW.update(_front_relations(records, g))       # v11.2.176: steady front / behind
++                except Exception as _fe:
++                    _FRONT_NOW.clear()
++                    logging.debug("front order skipped: %s", _fe)
++
++                def _ahead(sl):
++                    return sum(1 for (_a, _b), _lo_front in _FRONT_NOW.items()
++                               if (sl == _a and _lo_front) or (sl == _b and not _lo_front))
+                 order = sorted(_paint.keys(),
+-                               key=lambda sl: float((_paint[sl]["bbox"][2] - _paint[sl]["bbox"][0]) *
+-                                                    (_paint[sl]["bbox"][3] - _paint[sl]["bbox"][1])))
++                               key=lambda sl: (_ahead(sl), float((_paint[sl]["bbox"][2] - _paint[sl]["bbox"][0]) *
++                                                                 (_paint[sl]["bbox"][3] - _paint[sl]["bbox"][1]))))
+                 any_ok = False
+                 _pn = set()
+                 for slot in order:
+@@ -7192,6 +7418,7 @@
+                     out = trial
+                     any_ok = True
+                     stats["slot_painted"][slot] = stats["slot_painted"].get(slot, 0) + 1
++                    stats.setdefault("painted_g", {}).setdefault(slot, set()).add(int(g))   # v11.2.176 (log)
+                     _pn.add(slot)
+                     # Remember the geometry that actually composited, so if this
+                     # slot is suppressed later there is something frozen to fade
+@@ -7334,6 +7561,30 @@
+             os.remove(_enc_log_path)
+         except Exception:
+             pass
++        try:    # v11.2.176 (log): contact decisions, refusals, and the frames each person was NOT painted on
++            _n_out = int(stats.get("frames_out", 0))
++            _tk = _tracker if "_tracker" in dir() else None
++            logging.info("CONTACT: partly hidden faces kept %d, kept by elimination (2 people) %d, kept apart from the "
++                         "de-duplication %d", int(getattr(_tk, "partner_side_n", 0) or 0), int(getattr(_tk, "elim_n", 0) or 0),
++                         int(getattr(_tk, "contact_apart_n", 0) or 0))
++            logging.info("FRONT/BEHIND: decided by identity on %d face-pair frames, by sight on %d, by size (held) on %d; changes %d",
++                         _FRONT_STATS["identity"], _FRONT_STATS["seen"], _FRONT_STATS["size"], _FRONT_STATS["changes"])
++            logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
++            for _s, _gs in sorted((stats.get("painted_g") or {}).items()):
++                _miss = [x for x in range(_n_out) if x not in _gs]
++                _runs, _a = [], None
++                for x in _miss + [None]:
++                    if _a is None:
++                        _a = _b = x
++                    elif x is not None and x == _b + 1:
++                        _b = x
++                    else:
++                        if _a is not None:
++                            _runs.append("%d" % _a if _a == _b else "%d-%d" % (_a, _b))
++                        _a = _b = x
++                logging.info("UNPAINTED person %d: %d frames %s", int(_s) + 1, len(_miss), ", ".join(_runs[:40]) if _runs else "none")
++        except Exception as _e:
++            logging.debug("contact log skipped: %s", _e)
+         stats["processing_seconds"] = max(0.0, time.time() - t0 - stats["encode_seconds"])
+         # Keep the final output path explicit before optional encryption/autosave.
+         # The previous V4 runtime referenced `res` before assigning it, which
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/phoenix_api_adapter.py v11.2.178_ContactStep/phoenix_api_adapter.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/phoenix_api_adapter.py	2026-11-08 11:45:56.000000000 +0000
++++ v11.2.178_ContactStep/phoenix_api_adapter.py	2026-11-08 16:21:32.228894870 +0000
+@@ -383,6 +383,35 @@
+     return ((m > 127).astype(np.uint8) * 255)
+ 
+ 
++def api_patch_preview(image, mask):
++    """v11.2.178: Patch Removal preview (the app's Preview button): the frame + the finger-painted mask -> (the frame with the mark
++    removed, JSON info). The same still fill the video job makes on the painted frame (patch_manual.remove_patch_image).
++    v11.2.175-177 had no such endpoint, so the app's Preview could not show the cleaned frame."""
++    t0 = time.time()
++    try:
++        import patch_manual as _PM
++        ip, mp = _coerce_video(image), _coerce_video(mask)
++        img = cv2.imread(str(ip), cv2.IMREAD_COLOR) if ip else None
++        msk = _mask_from_image(cv2.imread(str(mp), cv2.IMREAD_UNCHANGED)) if mp else None
++        if img is None:
++            return None, json.dumps({"ok": False, "error": "the frame is not a readable image"})
++        if msk is None or not (msk > 127).any():
++            return None, json.dumps({"ok": False, "error": "nothing is painted on the mask"})
++        out, info = _PM.remove_patch_image(img, msk)
++        root = Path(os.environ.get("GRADIO_TEMP_DIR") or tempfile.gettempdir()) / "phoenix_patch_preview"
++        root.mkdir(parents=True, exist_ok=True)
++        dest = root / f"patchprev_{uuid.uuid4().hex[:10]}.jpg"
++        cv2.imwrite(str(dest), out, [cv2.IMWRITE_JPEG_QUALITY, 93])
++        res = {"ok": True, "marks": len(info), "area_px": int(sum(int(i.get("area_px", 0)) for i in info)),
++               "inpainter": "still fill", "ms": int((time.time() - t0) * 1000),
++               "width": int(img.shape[1]), "height": int(img.shape[0]), "version": VERSION_FULL}
++        logging.info("phoenix_patch_preview: %s", res)
++        return str(dest), json.dumps(res)
++    except Exception as exc:
++        logging.exception("api_patch_preview")
++        return None, json.dumps({"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:180]}"})
++
++
+ def _load_patches(raw: dict):
+     """Painted marks only. Automatic belly settings are ignored."""
+     if raw.get("belly_clear") or raw.get("clean_belly") or raw.get("belly_norm"):
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/swap_engine.py v11.2.178_ContactStep/swap_engine.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up175/x/Phoenix_v11.2.175_ManualPatch/swap_engine.py	2026-10-25 11:55:00.000000000 +0000
++++ v11.2.178_ContactStep/swap_engine.py	2026-11-08 16:21:10.015640737 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.92-fastrestore"
++ENGINE_VERSION = "aequus-1.2.178-contactstep"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -226,7 +226,12 @@
+     "trk_cross_iou": 0.12,   # tracks this close are considered "crossing"
+     "trk_flip_margin": 0.14, # identity margin needed to justify a label flip
+     "trk_flip_frames": 5,    # ...sustained for this many frames
+-    "trk_max_missed": 24,  # aligned with config ENGINE_TUNABLES / predicted hold budget
++    "trk_max_missed": 24,
++    # v11.2.176 (SDOS-176): two people in contact (a kiss, a hug). 0 = the v11.2.92 behaviour exactly.
++    "contact_follow": 1,     # a face in contact is kept by where it touches its partner, and moves with the partner when missed
++    "contact_carry_max": 240,  # ...and is carried while its partner is seen, up to this many frames (8 s at 30 fps; v11.2.92: 24)
++    "two_elim": 1,
++    "fast_snap": 1,          # v11.2.176: a face moving fast (4-10 % of its width a frame and more) is followed without smoothing lag           # 2 people, 2 faces found: one clearly person X, the other is person Y (if it is where Y was, not a sliver)  # aligned with config ENGINE_TUNABLES / predicted hold budget
+     # Relative identity admission (SDOS-078). A slot that has locked onto a
+     # person used to accept a later detection only if it matched that one stored
+     # frame at >= 0.38 (>= 0.40 after a gap) - an absolute wall. Measured on the
+@@ -941,7 +946,7 @@
+     __slots__ = ("slot", "bbox", "obs_bbox", "kps", "lmk", "vel_bbox", "vel_kps",
+                  "emb", "id_lock", "hits", "missed", "mask_ema", "cm_dmean", "cm_ratio",
+                  "flip_votes", "crossing", "last_face", "det_score", "last_hit_bbox",
+-                 "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps",
++                 "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps", "_contact_vel",
+                  "fake", "fake_corr", "fake_size", "fake_frame",
+                  "_frame_wh", "_paste_frozen", "_reacquired",
+                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
+@@ -1025,6 +1030,7 @@
+         self.last_hit_bbox = None
+         self.last_dt = 1.0        # output frames between the last two detections
+         self.last_hit_kps = None  # raw keypoints at the last real detection
++        self._contact_vel = None  # v11.2.176: (bbox velocity, kps velocity) of the partner while in contact
+         self.hull_ema = None      # smoothed landmark hull (aligned space)
+         self.occl_w = 0.0         # CONTINUOUS occlusion weight in [0,1]
+         self.alpha_ema = 1.0      # smoothed composite opacity
+@@ -1112,6 +1118,17 @@
+         steps = max(1, int(round(n)))
+         m0 = self.missed
+         self.missed = m0 + steps
++        cv_ = getattr(self, "_contact_vel", None)
++        if cv_ is not None and not self._paste_frozen:
++            # v11.2.176: in contact, carried with the partner's motion (MultiFaceTracker._contact_motion), not on at its own
++            vb, vk = cv_
++            if self.bbox is not None:
++                self.bbox = (self.bbox + vb * float(steps)).astype(np.float32)
++            if self.obs_bbox is not None:
++                self.obs_bbox = (self.obs_bbox + vb * float(steps)).astype(np.float32)
++            if self.kps is not None and vk is not None:
++                self.kps = (self.kps + vk * float(steps)).astype(np.float32)
++            return self.bbox
+         # Already left the frame — count the miss but do not keep coasting.
+         if self._paste_frozen:
+             return self.bbox
+@@ -1409,11 +1426,27 @@
+             self.vel_bbox = (self.vel_bbox + (_ab_b / elapsed) * r).astype(np.float32)
+             self.ab_bbox = (x_pred + _ab_a * r).astype(np.float32)
+         self.obs_bbox = bb.copy()
++        # v11.2.176 (SDOS-176): the faster the face moves, the less it is smoothed. v11.2.92 blended every detection into the
++        # last position (box 0.42; the 5 points' One Euro filter barely opened with speed), so on a fast step - 60 px a frame -
++        # the paint trailed the face by up to 50 px, a ghost beside it. From 4 % of the face width a frame the smoothing fades,
++        # gone at 10 %; a still or slow face keeps all of it. Not while two faces touch (their points are steadied there).
++        _fast_w = 0.0
++        if (bool(_P.get("fast_snap", 1)) and self.bbox is not None and not bool(getattr(self, "crossing", False))
++                and self.last_hit_bbox is not None):
++            try:
++                _fw = max(8.0, float(bb[2] - bb[0]))
++                _dc = (np.array([bb[0] + bb[2], bb[1] + bb[3]], np.float32) - np.array(
++                    [self.bbox[0] + self.bbox[2], self.bbox[1] + self.bbox[3]], np.float32)) * 0.5
++                _sp = float(np.hypot(_dc[0], _dc[1])) / max(1.0, float(elapsed)) / _fw
++                _fast_w = float(np.clip((_sp - 0.04) / 0.06, 0.0, 1.0))
++            except Exception:
++                _fast_w = 0.0
+         self.last_hit_bbox = bb.copy()
+         if self.bbox is None:
+             self.bbox = bb
+         else:
+-            self.bbox = (self.bbox * (1.0 - a) + bb * a).astype(np.float32)
++            _a = a + (1.0 - a) * _fast_w
++            self.bbox = (self.bbox * (1.0 - _a) + bb * _a).astype(np.float32)
+ 
+         kps = getattr(face, "kps", None)
+         if kps is not None:
+@@ -1431,6 +1464,7 @@
+                 # cadence above 1 the old form under-smoothed by that factor.
+                 r = 2.0 * math.pi * cutoff * elapsed
+                 a = r / (r + 1.0)
++                a = a + (1.0 - a) * _fast_w          # v11.2.176: fast motion, no lag (see the box above)
+                 sm = self.kps * (1.0 - a) + kp * a
+                 # Same alpha-beta filter as vel_bbox, on its own state. Note
+                 # this is a SECOND, independent filter and not a duplicate of
+@@ -2833,6 +2867,24 @@
+     return float(inter / u) if u > 0 else 0.0
+ 
+ 
++def _two_boxes(a, b):
++    """v11.2.176 (SDOS-176): two boxes are two faces: overlap under 0.40 and neither box's centre inside the other box. In a
++    side-view kiss the two faces' 5 points sit within about 20 px of each other (all on the front half of each face), so a points
++    test calls them one face; their boxes stay apart (measured: overlap 0.13-0.16, each centre outside the other box). A second
++    box on one face (a cheek box, a zoomed box) has its centre inside the first."""
++    try:
++        a = np.asarray(a, dtype=np.float32).reshape(-1); b = np.asarray(b, dtype=np.float32).reshape(-1)
++        if _iou(a, b) >= 0.40:
++            return False
++        for p, q in ((a, b), (b, a)):
++            cx, cy = (p[0] + p[2]) * .5, (p[1] + p[3]) * .5
++            if q[0] <= cx <= q[2] and q[1] <= cy <= q[3]:
++                return False
++        return True
++    except Exception:
++        return False
++
++
+ def _cdist_norm(a, b):
+     if a is None or b is None:
+         return 9.0
+@@ -3021,6 +3073,147 @@
+                     ta.crossing = True
+                     tb.crossing = True
+ 
++    def _contact_motion(self):
++        """v11.2.176 (SDOS-176): a track in contact with another (crossing) that is missed moves with its PARTNER's velocity when
++        the partner was matched on the last call - in a kiss or a hug the two heads move together - and otherwise with its own
++        velocity halved on every call. Constant-velocity coasting carried a face missed when the heads met (the approach stops
++        dead) on into the partner, or left it behind when the couple moved: the paint drifted, then snapped back."""
++        if not bool(_P.get("contact_follow", 1)):
++            return
++        for s, tr in self.tracks.items():
++            tr._contact_vel = None
++            if not getattr(tr, "crossing", False) or tr.bbox is None or not tr.established:
++                continue
++            best = None
++            for s2, t2 in self.tracks.items():
++                if s2 == s or t2.bbox is None:
++                    continue
++                d = _cdist_norm(tr.match_bbox, t2.match_bbox)
++                if best is None or d < best[0]:
++                    best = (d, t2)
++            if best is None:
++                continue
++            o = best[1]
++            if int(getattr(o, "missed", 0) or 0) == 0 and o.vel_bbox is not None:
++                vk = None
++                if o.vel_kps is not None:
++                    vk = np.broadcast_to(np.asarray(o.vel_kps, np.float32).reshape(-1, 2).mean(0), (5, 2)).copy()
++                tr._contact_vel = (np.asarray(o.vel_bbox, np.float32).copy(), vk)
++            elif int(getattr(tr, "missed", 0) or 0) > 0:
++                if tr.vel_bbox is not None:
++                    tr.vel_bbox = (np.asarray(tr.vel_bbox, np.float32) * 0.5).astype(np.float32)
++                if tr.vel_kps is not None:
++                    tr.vel_kps = (np.asarray(tr.vel_kps, np.float32) * 0.5).astype(np.float32)
++
++    def _partner_seen(self, s):
++        """v11.2.176: is a partner this track is crossing found on this call (missed == 0)?"""
++        tr = self.tracks.get(s)
++        if tr is None or not getattr(tr, "crossing", False):
++            return False
++        for s2, t2 in self.tracks.items():
++            if s2 != s and t2.bbox is not None and getattr(t2, "crossing", False) and int(getattr(t2, "missed", 0) or 0) == 0:
++                return True
++        return False
++
++    def _miss_limit(self, s):
++        """v11.2.176: how many missed calls a track is carried. In contact with a partner that is seen: contact_carry_max
++        (the face is behind or against its partner, which is still there); otherwise trk_max_missed (v11.2.92)."""
++        if (bool(_P.get("contact_follow", 1)) and self._partner_seen(s)
++                and s not in (getattr(self, "_found_elsewhere", None) or ())):
++            return int(_P.get("contact_carry_max", 240) or 240)
++        return int(_P["trk_max_missed"])
++
++    def _partner_side_why(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.176: "ok", or why detection j is not the partly hidden face of slot i in contact (see _partner_side)."""
++        try:
++            others = [i2 for i2 in range(len(slots)) if i2 != i and has_id_all[i2]]
++            if not others:
++                return "no_other_id"
++            i2 = max(others, key=lambda k: sim_all[k][j])
++            if sim_all[i2][j] < sim + 0.10:
++                return "margin"
++            t2 = self.tracks[slots[i2]]
++            r2 = t2.last_hit_bbox if getattr(t2, "last_hit_bbox", None) is not None else t2.match_bbox
++            if r2 is None:
++                return "no_partner_ref"
++            k_own = min(range(len(faces)), key=lambda k: _cdist_norm(r2, faces[k].bbox))
++            if k_own == j:
++                return "is_partner_det"
++            if _cdist_norm(faces[j].bbox, faces[k_own].bbox) >= 1.25:
++                return "far_from_partner"
++            kj, kk = getattr(faces[j], "kps", None), getattr(faces[k_own], "kps", None)
++            if kj is not None and kk is not None and np.size(kj) >= 10 and np.size(kk) >= 10:
++                fwk = max(8.0, float(faces[k_own].bbox[2] - faces[k_own].bbox[0]))
++                dk = np.asarray(kj, np.float32).reshape(-1, 2).mean(0) - np.asarray(kk, np.float32).reshape(-1, 2).mean(0)
++                if float(np.linalg.norm(dk)) < 0.10 * fwk and not _two_boxes(faces[j].bbox, faces[k_own].bbox):
++                    return "duplicate_points"
++            return "ok"
++        except Exception:
++            return "error"
++
++    def _partner_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.176 (SDOS-176, from v11.2.146-148): in contact, detection j is the partly hidden face of slot i: in a side-view kiss
++        the partner fills half of the crop, so it reads as the partner (measured 0.75-0.88) and as itself 0.05-0.20. It must read as
++        the partner by 0.10 or more, not be the partner's own detection, touch it, and not carry the partner's own points."""
++        return self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all) == "ok"
++
++    def _elim_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.176 (SDOS-176): two people, two faces found. Face k is clearly the other person (0.45 or more, 0.10 above this
++        face), face j is not them (under 0.40), j is nearer to where THIS person was last seen than k is, and j is a whole face
++        (its box at least 0.82 of this person's last width, its points not marked unreliable). Then j is this person, whatever
++        its own score (a side view, a turn, motion blur). A face that is only a sliver behind the other is not taken this way
++        (box under 0.82, or points marked unreliable while it is against its partner)."""
++        try:
++            if not bool(_P.get("two_elim", 1)) or len(slots) != 2 or len(faces) != 2 or not all(has_id_all):
++                return False
++            k = 1 - j; i2 = 1 - i
++            if sim_all[i2][k] < 0.45 or sim_all[i2][k] < sim_all[i2][j] + 0.10 or sim_all[i2][j] >= 0.40:
++                return False
++            tr = self.tracks[s]
++            if not tr.established:
++                return False
++            ref = tr.last_hit_bbox if getattr(tr, "last_hit_bbox", None) is not None else tr.match_bbox
++            if ref is None or _cdist_norm(ref, faces[j].bbox) >= _cdist_norm(ref, faces[k].bbox):
++                return False
++            if bool(getattr(faces[j], "_kps_weak", False)) and getattr(tr, "crossing", False):
++                return False      # (points unreliable against its partner: may be a sliver; away from it: a blurred whole face)
++            w_last = float(ref[2] - ref[0]); w_now = float(faces[j].bbox[2] - faces[j].bbox[0])
++            w_ref = w_last
++            if getattr(tr, "crossing", False):
++                # against its partner: against the widest this face was identified on its own in the last 90 calls, not
++                # only the last frame - a face sliding behind its partner shrinks a little each frame and never fell under
++                # 0.82 of the frame before (measured on the hide clip: 317 px -> 244 px, its points guessed ~40 px off)
++                _h = [w_ for c_, w_ in (getattr(self, "_sure_w", None) or {}).get(s, []) if self._call_n - c_ <= 90]
++                if _h:
++                    w_ref = max(w_ref, max(_h))
++            if w_ref > 1.0 and w_now < 0.82 * w_ref:
++                return False
++            return True
++        except Exception:
++            return False
++
++    def _log_refusal(self, i, j, s, faces, slots, sim, sim_all, has_id_all, xo, touching):
++        """v11.2.176 (log only): why a detection was refused - counts per slot, and the first 60 refusals while the faces touch."""
++        try:
++            if not touching:
++                reason = "not_touching"
++            elif xo < sim + 0.10:
++                reason = "reads_nobody_else"
++            else:
++                reason = self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all)
++            wc = getattr(self, "why_counts", None)
++            if wc is None:
++                wc = self.why_counts = {}
++            d = wc.setdefault(int(s), {})
++            d[reason] = d.get(reason, 0) + 1
++            smp = getattr(self, "why_sample", None)
++            if smp is None:
++                smp = self.why_sample = []
++            if touching and len(smp) < 60:
++                smp.append((int(getattr(self, "_call_n", 0)), int(s), int(j), reason, round(float(sim), 2), round(float(xo), 2)))
++        except Exception:
++            pass
++
+     def _identity(self, face, track, ref):
+         emb = getattr(face, "normed_embedding", None)
+         if emb is None:
+@@ -3092,6 +3285,8 @@
+         them via TrackState.predicted_face().
+         """
+         self._mark_crossings()
++        self._contact_motion()           # v11.2.176
++        self._found_elsewhere = set()    # v11.2.176: slots whose person is seen elsewhere this call (see the end of assign)
+         slots = sorted(self.tracks.keys())
+         if faces is None or (hasattr(faces, "__len__") and len(faces) == 0):
+             for t in self.tracks.values():
+@@ -3181,6 +3376,7 @@
+         # absolute floor (0.32) and has to be told about these, or it quietly
+         # throws away exactly the faces the rescue just admitted.
+         rescued = set()
++        contact_ok = set()   # v11.2.176: (slot index, face index) kept in contact by where it touches its partner, or by elimination
+         # Every slot's similarity to every face, computed up front. The main
+         # loop below visits slot 0 first, when slot 1's row has not been filled
+         # in yet, and the relative-admission rule needs all of them.
+@@ -3207,13 +3403,35 @@
+                     gate = -1.0          # trust motion, not embeddings
+                 has_id = (getattr(tr, "id_lock", None) is not None) or (tr.emb is not None)
+                 long_gap = int(getattr(tr, "missed", 0) or 0) >= 8 or bool(getattr(tr, "_paste_frozen", False))
++                # v11.2.176 (SDOS-176): is this face touching another one, and does its crop read as another tracked person?
++                # Touching: boxes overlapping, or centres within 0.55 face widths, or - once two known faces are crossing -
++                # the whole contact (the 0.55 line alone switched the decision on and off from frame to frame in a kiss).
++                touching = False
++                for f2 in faces:
++                    if f2 is f:
++                        continue
++                    if _iou(f.bbox, f2.bbox) > 0.02 or _cdist_norm(f.bbox, f2.bbox) < 0.55:
++                        touching = True
++                        break
++                _cf = bool(_P.get("contact_follow", 1))
++                if not touching and _cf and tr.established and tr.crossing:
++                    touching = True
++                _xo = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
++                _reads_other = _cf and _xo >= sim + 0.10
+                 # Gender is not a reason to drop a face. InsightFace often
+                 # calls the man a woman, and the woman a man for a few frames.
+                 # The Detect-frame photo is the identity. A wrong gender tag
+                 # must not skip him or flash her back to the original.
+                 if has_id:
+                     _abs_ok = True
+-                    if long_gap:
++                    if _reads_other and touching and self._partner_side(i, j, s, faces, slots, sim, sim_all, has_id_all):
++                        contact_ok.add((i, j))               # v11.2.176: the partly hidden face of a kiss (reads as the partner)
++                        self.partner_side_n = getattr(self, "partner_side_n", 0) + 1
++                    elif self._elim_side(i, j, s, faces, slots, sim, sim_all, has_id_all):
++                        contact_ok.add((i, j))               # v11.2.176: two people, the other one clearly the other person
++                        if (sim < 0.40) if long_gap else (sim < 0.38 and not (spatial >= 0.55 and sim >= 0.22)):
++                            self.elim_n = getattr(self, "elim_n", 0) + 1     # (log: only faces the identity gate refused)
++                    elif long_gap:
+                         if sim < 0.40:
+                             _abs_ok = False
+                     elif sim < 0.38 and not (spatial >= 0.55 and sim >= 0.22):
+@@ -3227,6 +3445,7 @@
+                         if not self._rel_admit(i, j, s, f, sim, sim_all,
+                                                has_id_all, slots):
+                             self.diag[s]["id_reject"] += 1
++                            self._log_refusal(i, j, s, faces, slots, sim, sim_all, has_id_all, _xo, touching)
+                             continue
+                         rescued.add((i, j))
+                 else:
+@@ -3356,6 +3575,10 @@
+                     continue
+                 if float(np.dot(a1[:k], a2[:k])) < 0.50:
+                     continue
++                # v11.2.176: not two boxes on one face but two people in contact - a side-view face has its partner in half its
++                # crop and reads as them. Kept when one of the pairs passed the contact test and the boxes are two separate faces.
++                if ((i, j) in contact_ok or (i2, j2) in contact_ok) and _iou(faces[j].bbox, faces[j2].bbox) < 0.40:
++                    continue
+                 t1, t2 = self.tracks[slots[i]], self.tracks[slots[i2]]
+                 r1 = refs.get(slots[i]) if refs else None
+                 r2 = refs.get(slots[i2]) if refs else None
+@@ -3518,7 +3741,7 @@
+                 tr.flip_votes = max(0, tr.flip_votes - 1)
+                 continue
+             f = faces[j]
+-            changed = self._belongs_to_other(s, f)
++            changed = self._belongs_to_other(s, f) and (i, j) not in contact_ok    # v11.2.176: a contact pair is not a flip
+ 
+             if changed and tr.established:
+                 # The class docstring specifies that during a crossing "label
+@@ -3557,7 +3780,7 @@
+             if getattr(tr, "id_lock", None) is None and tr.emb is None and not tr.crossing:
+                 good = True
+             elif (getattr(tr, "id_lock", None) is not None and lock_sim < 0.32
+-                    and (i, j) not in rescued):
++                    and (i, j) not in rescued and (i, j) not in contact_ok):
+                 # Below the absolute floor. This used to be an unconditional
+                 # "not this slot's person". The gate above admits faces down to
+                 # 0.22 when they sit where the track expects its person (the
+@@ -3584,6 +3807,18 @@
+             tr.update(f, update_embedding=good, dt_frames=dt_frames, kps_ok=_kps_ok)
+             if changed:
+                 tr.reset_appearance()
++            if lock_sim >= 0.38:
++                # v11.2.176: the widths of this face when it was identified on its own, over the last 90 calls (the sliver
++                # guard of _elim_side)
++                try:
++                    _sw = getattr(self, "_sure_w", None)
++                    if _sw is None:
++                        _sw = self._sure_w = {}
++                    _h = [e for e in _sw.get(s, []) if self._call_n - e[0] <= 90]
++                    _h.append((self._call_n, float(f.bbox[2] - f.bbox[0])))
++                    _sw[s] = _h[-120:]
++                except Exception:
++                    pass
+             result[s] = f
+             # This slot is now TRACKING this face. The confirmation count in
+             # _rel_admit exists to vet a NEW acquisition; a face the slot has
+@@ -3601,6 +3836,23 @@
+             except Exception:
+                 pass
+ 
++        # v11.2.176: the long carry in contact (contact_carry_max) is for a face hidden against its partner. When this person's
++        # own face is found ELSEWHERE in the frame (it walked out from behind the other: a crossing), the carry ends at the
++        # v11.2.92 limit, so the slot is re-acquired by identity as in v11.2.92 instead of staying glued to the partner.
++        try:
++            taken = {id(f_) for f_ in result.values()}
++            for i, s in enumerate(slots):
++                if s in result or not has_id_all[i] or self.tracks[s].missed <= int(_P["trk_max_missed"]):
++                    continue
++                for j, f_ in enumerate(faces):
++                    if id(f_) in taken:
++                        continue
++                    o_ = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
++                    if sim_all[i][j] >= 0.45 and sim_all[i][j] >= o_ + 0.10:
++                        self._found_elsewhere.add(s)
++                        break
++        except Exception:
++            pass
+         self._preserve_identity_on_expire()
+         return result
+ 
+@@ -3613,7 +3865,7 @@
+         """
+         for s in list(self.tracks.keys()):
+             tr = self.tracks[s]
+-            if tr.missed > _P["trk_max_missed"]:
++            if tr.missed > self._miss_limit(s):           # v11.2.176: longer while in contact with a partner that is seen
+                 keep_emb = tr.emb
+                 keep_lock = getattr(tr, "id_lock", None)
+                 nw = TrackState(s)
+@@ -3661,7 +3913,7 @@
+             # is the best case for carrying, not a reason to refuse.
+             if not tr.established:
+                 continue
+-            if tr.missed > _P["trk_max_missed"]:
++            if tr.missed > self._miss_limit(s):           # v11.2.176: longer while in contact with a partner that is seen
+                 continue
+             # v11.1.9: frozen after leaving frame — do not offer for paste.
+             if getattr(tr, "_paste_frozen", False):
