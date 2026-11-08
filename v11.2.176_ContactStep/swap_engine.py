@@ -230,7 +230,8 @@ _P = {
     # v11.2.176 (SDOS-176): two people in contact (a kiss, a hug). 0 = the v11.2.92 behaviour exactly.
     "contact_follow": 1,     # a face in contact is kept by where it touches its partner, and moves with the partner when missed
     "contact_carry_max": 240,  # ...and is carried while its partner is seen, up to this many frames (8 s at 30 fps; v11.2.92: 24)
-    "two_elim": 1,           # 2 people, 2 faces found: one clearly person X, the other is person Y (if it is where Y was, not a sliver)  # aligned with config ENGINE_TUNABLES / predicted hold budget
+    "two_elim": 1,
+    "fast_snap": 1,          # v11.2.176: a face moving fast (4-10 % of its width a frame and more) is followed without smoothing lag           # 2 people, 2 faces found: one clearly person X, the other is person Y (if it is where Y was, not a sliver)  # aligned with config ENGINE_TUNABLES / predicted hold budget
     # Relative identity admission (SDOS-078). A slot that has locked onto a
     # person used to accept a later detection only if it matched that one stored
     # frame at >= 0.38 (>= 0.40 after a gap) - an absolute wall. Measured on the
@@ -1425,11 +1426,27 @@ class TrackState:
             self.vel_bbox = (self.vel_bbox + (_ab_b / elapsed) * r).astype(np.float32)
             self.ab_bbox = (x_pred + _ab_a * r).astype(np.float32)
         self.obs_bbox = bb.copy()
+        # v11.2.176 (SDOS-176): the faster the face moves, the less it is smoothed. v11.2.92 blended every detection into the
+        # last position (box 0.42; the 5 points' One Euro filter barely opened with speed), so on a fast step - 60 px a frame -
+        # the paint trailed the face by up to 50 px, a ghost beside it. From 4 % of the face width a frame the smoothing fades,
+        # gone at 10 %; a still or slow face keeps all of it. Not while two faces touch (their points are steadied there).
+        _fast_w = 0.0
+        if (bool(_P.get("fast_snap", 1)) and self.bbox is not None and not bool(getattr(self, "crossing", False))
+                and self.last_hit_bbox is not None):
+            try:
+                _fw = max(8.0, float(bb[2] - bb[0]))
+                _dc = (np.array([bb[0] + bb[2], bb[1] + bb[3]], np.float32) - np.array(
+                    [self.bbox[0] + self.bbox[2], self.bbox[1] + self.bbox[3]], np.float32)) * 0.5
+                _sp = float(np.hypot(_dc[0], _dc[1])) / max(1.0, float(elapsed)) / _fw
+                _fast_w = float(np.clip((_sp - 0.04) / 0.06, 0.0, 1.0))
+            except Exception:
+                _fast_w = 0.0
         self.last_hit_bbox = bb.copy()
         if self.bbox is None:
             self.bbox = bb
         else:
-            self.bbox = (self.bbox * (1.0 - a) + bb * a).astype(np.float32)
+            _a = a + (1.0 - a) * _fast_w
+            self.bbox = (self.bbox * (1.0 - _a) + bb * _a).astype(np.float32)
 
         kps = getattr(face, "kps", None)
         if kps is not None:
@@ -1447,6 +1464,7 @@ class TrackState:
                 # cadence above 1 the old form under-smoothed by that factor.
                 r = 2.0 * math.pi * cutoff * elapsed
                 a = r / (r + 1.0)
+                a = a + (1.0 - a) * _fast_w          # v11.2.176: fast motion, no lag (see the box above)
                 sm = self.kps * (1.0 - a) + kp * a
                 # Same alpha-beta filter as vel_bbox, on its own state. Note
                 # this is a SECOND, independent filter and not a duplicate of

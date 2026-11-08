@@ -58,4 +58,35 @@ def carry_run(cf=1, b_missed=False):
 c1, c0, cb = carry_run(), carry_run(cf=0), carry_run(b_missed=True)
 check("in contact, a face missed for 60 frames is carried while its partner is seen (v11.2.92: 24)", c1 == 60 and c0 <= 25, "%d of 60 (contact_follow 0: %d)" % (c1, c0))
 check("...but when both are lost, the v11.2.92 limit stands (no face kept on a guess for long)", cb <= 25, "%d of 60" % cb)
+# fast motion: a face still for 12 frames, then a step - 60 px a frame for 3 frames
+def step_lag(snap):
+    E._P["fast_snap"] = snap
+    T = E.MultiFaceTracker([0, 1]); y = 300.0; lags = []
+    for k in range(18):
+        if 12 <= k < 15:
+            y += 60.0
+        fa, fb = F(box(325, y, 250), ea), F(box(925, 425, 250), eb)
+        T.assign([fa, fb], {})
+        if 12 <= k < 15:
+            lags.append(float(np.linalg.norm(T.tracks[0].kps.mean(0) - fa.kps.mean(0))))
+    E._P["fast_snap"] = 1
+    return lags
+l1, l0 = step_lag(1), step_lag(0)
+check("a fast step (60 px a frame): the face's points follow the detection (v11.2.92 trailed it)", max(l1) <= 3.0 and max(l0) >= 10.0,
+      "lag %s px (fast_snap 0: %s px)" % ([round(x, 1) for x in l1], [round(x, 1) for x in l0]))
+# a still face with detector jitter (+-3 px): still smoothed as before
+def jitter(snap):
+    E._P["fast_snap"] = snap
+    T = E.MultiFaceTracker([0, 1]); r = np.random.default_rng(3); outs, ins = [], []
+    for k in range(40):
+        dx, dy = r.uniform(-3, 3, 2)
+        fa, fb = F(box(325 + dx, 425 + dy, 250), ea), F(box(925, 425, 250), eb)
+        T.assign([fa, fb], {})
+        if k >= 10:
+            outs.append(T.tracks[0].kps.mean(0)); ins.append(fa.kps.mean(0))
+    E._P["fast_snap"] = 1
+    return float(np.std(np.diff(np.array(outs), axis=0))), float(np.std(np.diff(np.array(ins), axis=0)))
+o1, i1 = jitter(1); o0, _ = jitter(0)
+check("a still face with detector jitter is smoothed exactly as in v11.2.92", abs(o1 - o0) < 1e-6 and o1 < 0.8 * i1,
+      "frame-to-frame jitter %.2f px out of %.2f in (v11.2.92 %.2f)" % (o1, i1, o0))
 print("\n%s" % ("all checks passed" if fails == 0 else "%d check(s) failed" % fails))
