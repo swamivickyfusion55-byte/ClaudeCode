@@ -3940,9 +3940,13 @@ def _contact_apart(faces, tracker):
                     continue
                 ca, cb = _kc(getattr(fa, "kps", None)), _kc(getattr(fb, "kps", None))
                 if ca is None or cb is None or tk.get(sa) is None or tk.get(sb) is None:
+                    if _E._two_boxes(fa.bbox, fb.bbox):
+                        out.add((id(fa), id(fb))); out.add((id(fb), id(fa)))
                     continue
-                if (float(np.linalg.norm(ca - tk[sa])) < float(np.linalg.norm(ca - tk[sb]))
-                        and float(np.linalg.norm(cb - tk[sb])) < float(np.linalg.norm(cb - tk[sa]))):
+                if ((float(np.linalg.norm(ca - tk[sa])) < float(np.linalg.norm(ca - tk[sb]))
+                        and float(np.linalg.norm(cb - tk[sb])) < float(np.linalg.norm(cb - tk[sa])))
+                        or _E._two_boxes(fa.bbox, fb.bbox)):
+                    # (or the boxes are two faces: in a side-view kiss the points of both faces sit within ~20 px)
                     out.add((id(fa), id(fb))); out.add((id(fb), id(fa)))
     except Exception as _e:
         logging.debug("contact apart skipped: %s", _e)

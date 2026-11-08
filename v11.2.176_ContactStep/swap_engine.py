@@ -2867,6 +2867,24 @@ def _iou(a, b):
     return float(inter / u) if u > 0 else 0.0
 
 
+def _two_boxes(a, b):
+    """v11.2.176 (SDOS-176): two boxes are two faces: overlap under 0.40 and neither box's centre inside the other box. In a
+    side-view kiss the two faces' 5 points sit within about 20 px of each other (all on the front half of each face), so a points
+    test calls them one face; their boxes stay apart (measured: overlap 0.13-0.16, each centre outside the other box). A second
+    box on one face (a cheek box, a zoomed box) has its centre inside the first."""
+    try:
+        a = np.asarray(a, dtype=np.float32).reshape(-1); b = np.asarray(b, dtype=np.float32).reshape(-1)
+        if _iou(a, b) >= 0.40:
+            return False
+        for p, q in ((a, b), (b, a)):
+            cx, cy = (p[0] + p[2]) * .5, (p[1] + p[3]) * .5
+            if q[0] <= cx <= q[2] and q[1] <= cy <= q[3]:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _cdist_norm(a, b):
     if a is None or b is None:
         return 9.0
@@ -3126,7 +3144,7 @@ class MultiFaceTracker:
             if kj is not None and kk is not None and np.size(kj) >= 10 and np.size(kk) >= 10:
                 fwk = max(8.0, float(faces[k_own].bbox[2] - faces[k_own].bbox[0]))
                 dk = np.asarray(kj, np.float32).reshape(-1, 2).mean(0) - np.asarray(kk, np.float32).reshape(-1, 2).mean(0)
-                if float(np.linalg.norm(dk)) < 0.10 * fwk:
+                if float(np.linalg.norm(dk)) < 0.10 * fwk and not _two_boxes(faces[j].bbox, faces[k_own].bbox):
                     return "duplicate_points"
             return "ok"
         except Exception:

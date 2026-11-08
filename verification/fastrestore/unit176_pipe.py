@@ -45,4 +45,46 @@ fresh()
 recs2 = {0: rec(500, 230, xid=0.7), 1: rec(640, 200, xid=-0.9)}
 ra2, rb2 = cp._rival_landmarks(recs2, 0), cp._rival_landmarks(recs2, 1)
 check("no decision made (contact_follow 0): the v11.2.92 rule, the bigger box in front", len(ra2) == 0 and len(rb2) == 1)
+# 5) a side-view kiss on the tracker: each face's 5 points all on its front half, so the two faces' points sit ~15 px apart while
+# the boxes stay two faces (overlap ~0.15, each centre outside the other box); the face behind reads as its partner (0.85)
+import swap_engine as E
+class F:
+    def __init__(s, b, emb, kc):
+        s.bbox = np.array(b, np.float32); s.kps = np.array(kc, np.float32)[None, :] + np.array(
+            [[-12, -20], [12, -20], [0, 0], [-10, 20], [10, 20]], np.float32)
+        s.normed_embedding = emb; s.embedding = emb; s.det_score = 0.7; s.landmark_2d_106 = None; s.gender = 1; s.sex = "M"
+rng = np.random.default_rng(5)
+def unit(v): return v / np.linalg.norm(v)
+ea, eb = unit(rng.normal(size=512)), unit(rng.normal(size=512))
+def side_kiss(two_boxes=True):
+    T = E.MultiFaceTracker([0, 1]); xa, xb = 300.0, 760.0; got = wrong = kept_two = 0
+    for k in range(70):
+        if k < 30:
+            xa += 6.0; xb -= 6.0                                  # (approach, frontal: each face's points in its middle)
+            fa = F([xa, 300, xa + 200, 500], ea, (xa + 100, 400)); fb = F([xb, 300, xb + 200, 500], eb, (xb + 100, 400))
+        else:                                                    # the kiss: A's box x480-680, B's x630-830 (overlap 0.14)
+            fa = F([480, 300, 680, 500], unit(0.12 * ea + 0.88 * eb + rng.normal(size=512) * 0.01), (648, 400))
+            fb = F([630, 300, 830, 500], eb, (662, 400))
+        faces = [fa, fb]
+        if not two_boxes:
+            E_tb = E._two_boxes; E._two_boxes = lambda a, b: False
+        try:
+            ap = cp._contact_apart(faces, T); kept = cp._dedupe_faces(faces, apart=ap)
+            res = T.assign(kept, {})
+        finally:
+            if not two_boxes:
+                E._two_boxes = E_tb
+        if k >= 30:
+            kept_two += int(len(kept) == 2); got += int(res.get(0) is fa and res.get(1) is fb)
+            wrong += int(res.get(0) is fb or res.get(1) is fa)
+    return kept_two, got, wrong
+k2, g2, w2 = side_kiss()
+check("side-view kiss (points of both faces ~15 px apart, boxes apart): both faces kept and each given to its own person",
+      k2 == 40 and g2 == 40 and w2 == 0, "%d of 40 frames both kept, %d both right, %d wrong" % (k2, g2, w2))
+k0, g0, w0 = side_kiss(two_boxes=False)
+check("(without the box test - the points test only - the face behind was merged away or refused)", g0 < 20,
+      "%d of 40 both kept, %d both right" % (k0, g0))
+check("two boxes on one face (a cheek box, its centre inside the face's box) are not 'two faces'",
+      not E._two_boxes([600, 300, 810, 600], [656, 300, 856, 600]) and not E._two_boxes([0, 0, 100, 100], [5, 5, 105, 105]))
+check("a side-view pair (overlap 0.14, centres outside each other's box) is two faces", E._two_boxes([480, 300, 680, 500], [630, 300, 830, 500]))
 print("\n%s" % ("all checks passed" if fails == 0 else "%d check(s) failed" % fails))
