@@ -261,6 +261,17 @@ if KW.get("patches"):          # Patch Removal (v11.2.96): make_patchclip.py gro
         _pi2, _pm2 = WORK + "/patch_frame2.jpg", WORK + "/patch_mask2.png"
         cv2.imwrite(_pi2, _g["ref2"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm2, _g["refmask2"])
         cfg["patches"].append(dict(image=_pi2, mask=_pm2, t=float(_g["ref_t2"]), group="m1"))
+if KW.get("patches") and KW.get("app_mask") == "1" and "nmarks" not in np.load(KW["patches"]).files:
+    # v11.2.179: send the mark exactly as the app does - frame JPEG + an OPAQUE ARGB mask PNG (black, white paint), base64 -
+    # through the Space adapter's own _load_patches, instead of writing a grey mask file directly
+    import base64 as _b64, phoenix_api_adapter as _PA
+    _g = np.load(KW["patches"]); _am = np.zeros(_g["refmask"].shape[:2] + (4,), np.uint8); _am[..., 3] = 255
+    _am[_g["refmask"] > 127, :3] = 255
+    _ok1, _jb = cv2.imencode(".jpg", _g["ref"], [cv2.IMWRITE_JPEG_QUALITY, 95]); _ok2, _mb = cv2.imencode(".png", _am)
+    _items, _err = _PA._load_patches({"patches": [{"image_b64": _b64.b64encode(_jb.tobytes()).decode(),
+                                                  "mask_b64": _b64.b64encode(_mb.tobytes()).decode(), "t": float(_g["ref_t"])}]})
+    print("APP-MASK patches:", _items, _err, flush=True)
+    cfg["patches"] = _items or []
 if KW.get("pg"):               # v11.2.141: the app's M / F per slot (settings.person_gender), e.g. pg=0,1
     cfg["person_gender"] = [None if v in ("", "x") else int(v) for v in KW["pg"].split(",")]
 if KW.get("belly"):            # v11.2.110: lower-belly clear skin
