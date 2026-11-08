@@ -45,6 +45,15 @@ fresh()
 recs2 = {0: rec(500, 230, xid=0.7), 1: rec(640, 200, xid=-0.9)}
 ra2, rb2 = cp._rival_landmarks(recs2, 0), cp._rival_landmarks(recs2, 1)
 check("no decision made (contact_follow 0): the v11.2.92 rule, the bigger box in front", len(ra2) == 0 and len(rb2) == 1)
+# 4b) two frontal faces first touching: the face going behind is 6-8 % BIGGER on the first frames, then 12-15 % smaller as it is
+# covered (measured on the frontal smooch) - the first clear difference decides at once (it used to wait 4 frames)
+fresh(); seq = [1.07, 1.06, 1.08, 0.85, 0.85, 0.88, 0.88, 0.82, 0.75, 0.70]
+res = [cp._front_relations({0: rec(500, 200 * r ** 0.5), 1: rec(640, 200)}, g)[(0, 1)] for g, r in enumerate(seq)]
+check("first touch a near tie, then the other face clearly bigger: it is in front from that frame on", res[:3] == [True] * 3 and not any(res[3:]),
+      str(res))
+fresh(); seq = [0.80] * 6 + [1.12] + [0.80] * 6
+res = [cp._front_relations({0: rec(500, 200 * r ** 0.5), 1: rec(640, 200)}, g)[(0, 1)] for g, r in enumerate(seq)]
+check("...but once decided on a clear difference, one contrary frame does not change it", not any(res), str(res))
 # 5) a side-view kiss on the tracker: each face's 5 points all on its front half, so the two faces' points sit ~15 px apart while
 # the boxes stay two faces (overlap ~0.15, each centre outside the other box); the face behind reads as its partner (0.85)
 import swap_engine as E

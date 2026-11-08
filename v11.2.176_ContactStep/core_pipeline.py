@@ -3872,20 +3872,32 @@ def _front_relations(records, g):
             st = _FRONT_MEM.get(key)
             if want is not None:
                 if st is None:
-                    st = [want, 0, int(g), int(g) if src == "identity" else None]
+                    st = [want, 0, int(g), int(g) if src == "identity" else None, True]
                 else:
                     if st[0] != want:
                         _FRONT_STATS["changes"] += 1
                     st[0], st[1], st[2] = want, 0, int(g)
                     if src == "identity":
                         st[3] = int(g)
+                    if len(st) < 5:
+                        st.append(True)
+                    st[4] = True
                 _FRONT_STATS[src] += 1
             else:
                 r = _ar(rlo) / _ar(rhi)
+                _clear = r >= 1.10 or r <= 1.0 / 1.10
                 if st is None:
-                    st = [r >= 1.0, 0, int(g), None]
+                    st = [r >= 1.0, 0, int(g), None, _clear]
                 elif st[3] is not None and 0 <= int(g) - st[3] <= 60:
                     st[2] = int(g)                       # an identity decision holds through frames without a reading
+                elif len(st) >= 5 and not st[4] and _clear and st[2] != int(g):
+                    # the first decision was a near tie (boxes within 10 %, as when two faces first touch): the first clear
+                    # difference decides at once - the face going behind loses box size as it is covered (measured on the
+                    # frontal smooch: the face behind 6-8 % BIGGER on the first touching frames, 12-15 % smaller from then on)
+                    if (r >= 1.10) != st[0]:
+                        st[0] = r >= 1.10
+                        _FRONT_STATS["changes"] += 1
+                    st[1], st[2], st[4] = 0, int(g), True
                 elif st[2] != int(g):
                     w = (r >= 1.10) if not st[0] else not (r <= 1.0 / 1.10)
                     if w != st[0]:
