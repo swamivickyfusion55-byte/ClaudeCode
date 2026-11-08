@@ -1587,6 +1587,9 @@ def _geom_record(face, track, alpha, guard, src, lmk=None):
         # for any motion the tracker can model, whereas extrapolation trails
         # the subject and then snaps at the next detection.
         "det": not bool(getattr(face, "predicted", False)),
+        # v11.2.176: how much this detection's crop reads as ANOTHER person (_mark_cross_identity); None when unknown
+        "xid": (None if bool(getattr(face, "predicted", False)) or getattr(face, "_xid", None) is None
+                else float(getattr(face, "_xid"))),
     }
 
 
@@ -1837,7 +1840,11 @@ def _rival_landmarks(records, slot):
         if s2 == slot or r2 is None or r2.get("lmk") is None:
             continue
         area2 = float(max(1.0, (r2["bbox"][2] - r2["bbox"][0]) * (r2["bbox"][3] - r2["bbox"][1])))
-        if area2 <= my_area:
+        _k = (min(slot, s2), max(slot, s2))
+        if _k in _FRONT_NOW:              # v11.2.176: the steady front / behind decision of this frame (_front_relations)
+            if (not _FRONT_NOW[_k]) if _k[0] == s2 else _FRONT_NOW[_k]:
+                continue                  # (this face is the one in front)
+        elif area2 <= my_area:
             continue                      # painted before us; not an occluder
         if _bbox_iou(me["bbox"], r2["bbox"]) < 0.06:
             continue
@@ -3793,6 +3800,108 @@ def _face_looks_marginal(f) -> bool:
         return False
 
 
+def _mark_cross_identity(assigned, tracker):
+    """v11.2.176 (SDOS-176, from v11.2.144): on each face given to a person, ``_xid`` = cosine to the OTHER person's identity
+    lock minus cosine to its own. The face behind in a kiss has its middle covered by the partner, so its crop reads as the
+    partner (+0.6 to +0.8); the face in front reads as itself (-0.9). Used only for front / behind (_front_relations)."""
+    try:
+        if not bool(_E._P.get("contact_follow", 1)) or not assigned or len(assigned) < 2:
+            return
+        locks = {}
+        for s, tr in tracker.tracks.items():
+            e = getattr(tr, "id_lock", None) if tr is not None else None
+            if e is None and tr is not None:
+                e = getattr(tr, "emb", None)
+            if e is not None:
+                v = np.asarray(e, np.float32).reshape(-1); n = float(np.linalg.norm(v))
+                if v.size >= 8 and n > 1e-6:
+                    locks[s] = v / n
+        if len(locks) < 2:
+            return
+        for s, f in assigned.items():
+            e = getattr(f, "normed_embedding", None)
+            if e is None or s not in locks:
+                continue
+            v = np.asarray(e, np.float32).reshape(-1); n = float(np.linalg.norm(v))
+            if v.size != locks[s].size or n < 1e-6:
+                continue
+            v = v / n
+            f._xid = max(float(v @ l) for s2, l in locks.items() if s2 != s and l.size == v.size) - float(v @ locks[s])
+    except Exception as _e:
+        logging.debug("cross identity skipped: %s", _e)
+
+
+_FRONT_MEM = {}      # v11.2.176: (slot_lo, slot_hi) -> [lo_in_front, frames_the_other_way, last_frame, last_identity_frame]
+_FRONT_NOW = {}      # v11.2.176: the frame being painted: (slot_lo, slot_hi) -> lo is in front
+_FRONT_STATS = {"identity": 0, "seen": 0, "size": 0, "changes": 0}
+
+
+def _front_relations(records, g):
+    """v11.2.176 (SDOS-176): who is in front, for every overlapping pair, decided ONCE per frame and kept steady. v11.2.92 took
+    the bigger box as the one in front, afresh on every frame; in a side-view kiss the two boxes are the same size within a few
+    per cent, so the face in front changed from frame to frame, each change cutting the other face out where they overlap -
+    the shake, and the revert and back. Evidence, strongest first:
+      1. identity: a face whose crop reads as the other person (by 0.25) while the other reads as itself (by 0.25) is BEHIND
+         (its middle is covered by the other); held for 60 frames when there is no reading;
+      2. sight: a face not seen within 2 frames (carried on a guess) is never in front of one that is;
+      3. size: the bigger box, changed only when the other has been 10 % bigger for 4 frames in a row."""
+    rel = {}
+    items = [(s, r) for s, r in records.items() if r is not None and r.get("bbox") is not None]
+
+    def _ar(r):
+        b = r["bbox"]
+        return float(max(1.0, (b[2] - b[0]) * (b[3] - b[1])))
+    for i_ in range(len(items)):
+        for j_ in range(i_ + 1, len(items)):
+            (sa, ra), (sb, rb) = items[i_], items[j_]
+            if _bbox_iou(ra["bbox"], rb["bbox"]) < 0.06:
+                continue
+            key = (min(sa, sb), max(sa, sb))
+            rlo, rhi = (ra, rb) if key[0] == sa else (rb, ra)
+            want, src = None, None
+            xl, xh = rlo.get("xid_near"), rhi.get("xid_near")
+            if xl is not None and xh is not None:
+                if xl >= 0.25 and xh <= -0.25:
+                    want, src = False, "identity"
+                elif xh >= 0.25 and xl <= -0.25:
+                    want, src = True, "identity"
+            if want is None:
+                sl = bool(rlo.get("seen_near", rlo.get("det"))); sh = bool(rhi.get("seen_near", rhi.get("det")))
+                if sl != sh:
+                    want, src = sl, "seen"
+            st = _FRONT_MEM.get(key)
+            if want is not None:
+                if st is None:
+                    st = [want, 0, int(g), int(g) if src == "identity" else None]
+                else:
+                    if st[0] != want:
+                        _FRONT_STATS["changes"] += 1
+                    st[0], st[1], st[2] = want, 0, int(g)
+                    if src == "identity":
+                        st[3] = int(g)
+                _FRONT_STATS[src] += 1
+            else:
+                r = _ar(rlo) / _ar(rhi)
+                if st is None:
+                    st = [r >= 1.0, 0, int(g), None]
+                elif st[3] is not None and 0 <= int(g) - st[3] <= 60:
+                    st[2] = int(g)                       # an identity decision holds through frames without a reading
+                elif st[2] != int(g):
+                    w = (r >= 1.10) if not st[0] else not (r <= 1.0 / 1.10)
+                    if w != st[0]:
+                        st[1] += 1
+                        if st[1] >= 4:
+                            st[0], st[1] = w, 0
+                            _FRONT_STATS["changes"] += 1
+                    else:
+                        st[1] = 0
+                    st[2] = int(g)
+                _FRONT_STATS["size"] += 1
+            _FRONT_MEM[key] = st
+            rel[key] = bool(st[0])
+    return rel
+
+
 def _contact_apart(faces, tracker):
     """v11.2.176 (SDOS-176, from v11.2.144): pairs of detections that are two different people, by the tracker's geometry. In a
     side-view kiss the partner fills half of a face's ArcFace crop, so the two embeddings agree at 0.8-0.9 and the de-duplication
@@ -3892,6 +4001,7 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
         logging.debug("deferred embedding stage skipped: %s", e)
 
     assigned = tracker.assign(faces, ref_map, dt_frames=dt_frames)
+    _mark_cross_identity(assigned, tracker)
 
     # v11.1.9: stamp frame size onto every live track so predict() can freeze
     # once the bbox leaves the shot.
@@ -4814,6 +4924,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
             except Exception:
                 _src_gender[idx] = None
         _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_src_gender)
+        _FRONT_MEM.clear(); _FRONT_NOW.clear()
+        for _fk in _FRONT_STATS:
+            _FRONT_STATS[_fk] = 0
         logging.info("Face mode: %s · sources=%d · source genders (0=F 1=M): %s",
                      max_faces if max_faces < 99 else "multi", len(smap), _src_gender)
         u(8, f"Face mode: {max_faces if max_faces < 99 else 'multi'} · sources={len(smap)} · gender={_src_gender}")
@@ -6733,6 +6846,12 @@ def _run_job_body(jid, src_paths, vp, cfg):
                                           end_gap=end_gap,
                                           hold_after=_cadence_taper)
                     if rec is not None:
+                        # v11.2.176: seen within 2 frames, and how much its recent real crops read as the other person
+                        rec = dict(rec)
+                        rec["seen_near"] = any(abs(int(gg) - int(g)) <= 2 and rr.get("det") for gg, rr in _tl)
+                        _xs = [float(rr["xid"]) for gg, rr in _tl
+                               if abs(int(gg) - int(g)) <= 3 and rr.get("det") and rr.get("xid") is not None]
+                        rec["xid_near"] = float(np.median(_xs)) if _xs else None
                         out[slot] = rec
                 return out
 
@@ -7217,9 +7336,20 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         _use["det"] = False
                     _paint[slot] = _use
 
+                _FRONT_NOW.clear()
+                try:
+                    if bool(_E._P.get("contact_follow", 1)):
+                        _FRONT_NOW.update(_front_relations(records, g))       # v11.2.176: steady front / behind
+                except Exception as _fe:
+                    _FRONT_NOW.clear()
+                    logging.debug("front order skipped: %s", _fe)
+
+                def _ahead(sl):
+                    return sum(1 for (_a, _b), _lo_front in _FRONT_NOW.items()
+                               if (sl == _a and _lo_front) or (sl == _b and not _lo_front))
                 order = sorted(_paint.keys(),
-                               key=lambda sl: float((_paint[sl]["bbox"][2] - _paint[sl]["bbox"][0]) *
-                                                    (_paint[sl]["bbox"][3] - _paint[sl]["bbox"][1])))
+                               key=lambda sl: (_ahead(sl), float((_paint[sl]["bbox"][2] - _paint[sl]["bbox"][0]) *
+                                                                 (_paint[sl]["bbox"][3] - _paint[sl]["bbox"][1]))))
                 any_ok = False
                 _pn = set()
                 for slot in order:
@@ -7407,6 +7537,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
             logging.info("CONTACT: partly hidden faces kept %d, kept by elimination (2 people) %d, kept apart from the "
                          "de-duplication %d", int(getattr(_tk, "partner_side_n", 0) or 0), int(getattr(_tk, "elim_n", 0) or 0),
                          int(getattr(_tk, "contact_apart_n", 0) or 0))
+            logging.info("FRONT/BEHIND: decided by identity on %d face-pair frames, by sight on %d, by size (held) on %d; changes %d",
+                         _FRONT_STATS["identity"], _FRONT_STATS["seen"], _FRONT_STATS["size"], _FRONT_STATS["changes"])
             logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
             for _s, _gs in sorted((stats.get("painted_g") or {}).items()):
                 _miss = [x for x in range(_n_out) if x not in _gs]
