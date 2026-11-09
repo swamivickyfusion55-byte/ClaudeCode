@@ -1,0 +1,165 @@
+diff -ru -x source.zip /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/README.md Phoenix_APK_Builder_1.2.50_Fix/README.md
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/README.md	2026-11-08 11:46:28.000000000 +0000
++++ Phoenix_APK_Builder_1.2.50_Fix/README.md	2026-11-09 02:42:51.767453251 +0000
+@@ -8,7 +8,17 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.49
++# Phoenix APK Builder 1.2.50 (fix)
++
++**Fix (install error "App not installed as package appears to be invalid"):**
++- `source.zip` in the 1.2.50 pack was an old copy (app 1.2.46, versionCode 166) - the Space builds only from `source.zip`, so
++  it built 1.2.46, and a phone with 1.2.49 (versionCode 169) refuses an older version with exactly that message. `source.zip`
++  is now the 1.2.50 sources, with versionCode **170** (above 1.2.49).
++- The page never offers an APK of another version again ("Wrong version built").
++- The direct download link now really exists: after a build, tap **Download PhoenixMobile-1.2.50-debug.apk** (or open
++  `https://<your-space>.hf.space/phoenix-apk`). Chrome can resume it; a cut-off file is never offered.
++- Upload **every** file of this pack, including `source.zip`, `app.py` and `Dockerfile`, then wait for the Space to rebuild.
++  The page title must read "Phoenix Mobile 1.2.50 Builder".
+ 
+ Upload every file in this pack, including `source.zip`, replacing the old ones.
+ Then open the Space and press Build APK.
+diff -ru -x source.zip /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/app.py Phoenix_APK_Builder_1.2.50_Fix/app.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/app.py	2026-11-09 02:26:00.000000000 +0000
++++ Phoenix_APK_Builder_1.2.50_Fix/app.py	2026-11-09 02:41:14.387627354 +0000
+@@ -161,7 +161,18 @@
+     if apk_out is None:
+         import glob
+         found = sorted(glob.glob(os.path.join(ROOT, "PhoenixMobile-*-debug.apk")), key=os.path.getmtime)
+-        apk_out = found[-1] if found else None
++        if found:
++            # 1.2.50 fix: the Space's source.zip was an older app (1.2.46, versionCode 166). Its APK was offered, and a phone
++            # with a newer Phoenix refuses an older version as "package appears to be invalid". Never offer another version.
++            yield (
++                log,
++                f"**Wrong version built:** {os.path.basename(found[-1])}, not {VER}. The Space's source.zip is an older app. "
++                f"Upload this pack's source.zip (app {VER}) and build again. Do not install the old file: a phone with a newer "
++                "Phoenix refuses it as \"package appears to be invalid\".",
++                None,
++                None,
++            )
++            return
+     sha_out = SHA if os.path.isfile(SHA) else None
+     if apk_out is None:
+         yield (
+@@ -192,9 +203,9 @@
+     yield (
+         log,
+         f"**Build passed** in {mins}m {secs:02d}s - APK is {size_mb:.1f} MB. "
+-        "Use the direct link below, not a file Chrome has marked Download failed. "
+-        "A cut-off file is what the phone calls an invalid package. "
+-        "The link can be resumed: " + _apk_url()
++        f"**[Download PhoenixMobile-{VER}-debug.apk]({_apk_url()})** - a direct link that Chrome can resume. "
++        "If Chrome says Download failed, delete that file and use the link again: a cut-off file is what the phone "
++        "calls an invalid package."
+         + (f"\n\n```\n{info}\n```" if info else "")
+         + "\n\n" + INSTALL_TIP,
+         apk_out,
+@@ -269,7 +280,7 @@
+         yield "\n".join(lines)
+         time.sleep(0.4)
+     lines.append("")
+-    lines.append("Done. Give each Space a minute, then open it. The log must say v11.2.173 before you start a job.")
++    lines.append("Done. Give each Space a minute, then open it. The log must say v11.2.179 before you start a job.")
+     yield "\n".join(lines)
+ 
+ 
+@@ -277,7 +288,7 @@
+     gr.HTML(
+         "<div id='phx-head'><h1>Phoenix Mobile 1.2.50</h1>"
+         "<p>Builds Phoenix Mobile 1.2.50. Tap outlines a dark patch. Paint still works. "
+-        "If a download says failed, delete it. Do not install it.</p></div>"
++        "If a download says failed, delete it. Do not install it. After a build, use the direct download link.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -324,36 +335,38 @@
+     )
+ 
+ def _apk_url() -> str:
+-    return "/phoenix-apk"
++    """The direct download link. On a Space, an absolute link to the app's own host (the page runs in a frame)."""
++    host = os.environ.get("SPACE_HOST", "").strip()
++    return f"https://{host}/phoenix-apk" if host else "/phoenix-apk"
+ 
+ 
+-def _mount_download():
+-    """A plain file link. Gradio's own download of a 90 MB APK is what Chrome marks failed."""
+-    app = getattr(demo, "app", None)
+-    if app is None:
+-        return
+-    from fastapi.responses import FileResponse
++def _ready_apk():
++    """Only this version's APK, and only when it is a complete zip."""
++    return APK if os.path.isfile(APK) and _zip_complete(APK) else None
+ 
+-    def _latest():
+-        if os.path.isfile(APK) and _zip_complete(APK):
+-            return APK
+-        import glob
+-        found = [p for p in glob.glob(os.path.join(ROOT, "PhoenixMobile-*-debug.apk")) if _zip_complete(p)]
+-        return sorted(found, key=os.path.getmtime)[-1] if found else None
+ 
+-    @app.get("/phoenix-apk")
+-    def phoenix_apk():
+-        path = _latest()
+-        if path is None:
+-            from fastapi import HTTPException
+-            raise HTTPException(status_code=404, detail="No complete APK yet. Press Build APK first.")
+-        return FileResponse(
+-            path,
+-            media_type="application/vnd.android.package-archive",
+-            filename=os.path.basename(path),
+-        )
++# 1.2.50 fix: the route is added to our own FastAPI app, and Gradio is mounted on it. 1.2.50 added the route to demo.app
++# before launch(), when demo.app did not exist yet, so it was silently skipped and the 92 MB APK still went through
++# Gradio's own file download - the one Chrome marks "Download failed".
++from fastapi import FastAPI, HTTPException
++from fastapi.responses import FileResponse
++
++server = FastAPI()
++
++
++@server.get("/phoenix-apk")
++def phoenix_apk():
++    path = _ready_apk()
++    if path is None:
++        raise HTTPException(status_code=404, detail=f"No complete {VER} APK yet. Press Build APK first.")
++    return FileResponse(path, media_type="application/vnd.android.package-archive", filename=os.path.basename(path))
+ 
+ 
+ demo.queue(max_size=4)
+-_mount_download()
+-demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
++demo.show_error = True
++server = gr.mount_gradio_app(server, demo, path="/")
++
++if __name__ == "__main__":
++    import uvicorn
++
++    uvicorn.run(server, host="0.0.0.0", port=int(os.environ.get("PORT", "7860")))
+diff -ru -x source.zip /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/build.sh Phoenix_APK_Builder_1.2.50_Fix/build.sh
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/build.sh	2026-11-08 11:46:28.000000000 +0000
++++ Phoenix_APK_Builder_1.2.50_Fix/build.sh	2026-11-09 02:41:14.345420992 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.49}"
++VER="${VER:-1.2.50}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ru -x source.zip /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.50_Fix/src/app/build.gradle.kts
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/upapk150/x/Phoenix_APK_Builder_1.2.50_Tap/src/app/build.gradle.kts	2026-11-09 02:06:36.000000000 +0000
++++ Phoenix_APK_Builder_1.2.50_Fix/src/app/build.gradle.kts	2026-11-09 02:41:14.342219009 +0000
+@@ -13,7 +13,7 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 169
++        versionCode = 170
+         versionName = "1.2.50"
+     }
+ 
