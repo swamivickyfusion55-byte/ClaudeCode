@@ -4272,7 +4272,8 @@ def _arc_reuse(faces, tracker, smap):
     occlusion model do not use embeddings. Switch: swap_engine._P["arc_skip"] (0 = embed every face, as v11.2.92)."""
     try:
         _ARC_STATS["frames"] += 1
-        if not int(_E._P.get("arc_skip", 1)) or tracker is None or len(faces) != 2 or len(smap or {}) != 2:
+        if (not int(_E._P.get("arc_skip", 1)) or not _ARC_STATS.get("on", True) or tracker is None or len(faces) != 2
+                or len(smap or {}) != 2):
             return 0
         if int(getattr(tracker, "_call_n", 0) or 0) % 3 == 0:
             return 0
@@ -4975,6 +4976,28 @@ def _faces_touch(recs):
     return False
 
 
+def _side_pose(recs, h_thr=None):
+    """v11.2.204 (SDOS-204): a face of this frame is turned more than about 40 degrees. The nose's sideways offset from the eye
+    midpoint, roll-corrected, in eye distances (the engine's own profile measure, calibrated on AFLW2000's true yaw: frontal
+    0.00-0.25, 36-45 deg 0.34-0.51, 55-71 deg 0.76-1.48). 0.40 = about 40 deg. Switch: swap_engine._P["side_key_h"]."""
+    try:
+        thr = float(h_thr if h_thr is not None else _E._P.get("side_key_h", 0.40))
+        for r in (recs or {}).values():
+            k = None if r is None else r.get("kps")
+            if k is None or np.size(k) < 6:
+                continue
+            k = np.asarray(k, np.float32).reshape(-1, 2)
+            le, re, nose = k[0], k[1], k[2]
+            ev = re - le; ed = float(np.linalg.norm(ev)) + 1e-6
+            roll = float(np.arctan2(ev[1], ev[0])); c, sn = float(np.cos(-roll)), float(np.sin(-roll))
+            rel = nose - (le + re) * 0.5
+            if abs(float(rel[0] * c - rel[1] * sn)) / ed >= thr:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _adaptive_swap_gap(base_gap, motion_class, quality):
     base = max(1, int(base_gap))
     # base=1 still means every keyframe. Ultra/Best used to ignore a wider
@@ -5174,16 +5197,10 @@ def _run_job_body(jid, src_paths, vp, cfg):
             skip_n = 1
             base_det_int = 1
             swap_gap_base = int(SKIP_N.get(quality, 1) or 1)
-            # v11.2.204 (SDOS-204): Ultra with "Swap every N" = 2 or 3 - every frame while the faces touch (contact keys,
-            # below), every Nth frame while they are apart (plus MotionKeys on a fast move or change). Ultra with 1 / Auto:
-            # every frame, as before.
-            _un = str(cfg.get("swap_n") or "").strip()
-            if quality == "Ultra" and _un in ("2", "3"):
-                swap_gap_base = int(_un)
-                logging.info("ULTRA, swap every %d frames while the faces are apart, every frame while they touch", swap_gap_base)
-            elif quality == "Optimized":
+            # v11.2.204 (SDOS-204): only Optimized changes here (Ultra, Best, Balanced, Fast exactly as v11.2.203).
+            if quality == "Optimized":
                 # v11.2.204: Optimized (the app's recommended preset) with two faces - every 2nd frame apart (was every
-                # 5th), every frame while they touch. One-face Optimized jobs are unchanged.
+                # 5th), every frame while they touch or a face is turned past ~40 deg (smart keys, below).
                 swap_gap_base = 2
                 logging.info("OPTIMIZED, two faces: swap every 2nd frame while apart, every frame while they touch")
 
@@ -5206,6 +5223,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 swap_gap_base = 2
                 base_det_int = 1
 
+        _smart_job = quality == "Optimized" and bool(int(_E._P.get("smart_keys", 1)))     # v11.2.204 (SDOS-204)
         cpu_n = os.cpu_count() or 4
         # Detection/tracking run sequentially before workers; ORT+OpenCV+x264
         # already consume _native_threads. Default VIDEO_WORKERS=1 on HF CPU.
@@ -5348,6 +5366,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
         _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_src_gender)
         _FRONT_MEM.clear(); _FRONT_NOW.clear()
         _ARC_STATS.update(reused=0, frames=0, blocked=0)   # v11.2.203: per job
+        _ARC_STATS["on"] = (quality == "Optimized")         # v11.2.204: the ArcFace skip only in Optimized (Ultra untouched)
         for _fk in _FRONT_STATS:
             _FRONT_STATS[_fk] = 0
         logging.info("Face mode: %s · sources=%d · source genders (0=F 1=M): %s",
@@ -5898,6 +5917,20 @@ def _run_job_body(jid, src_paths, vp, cfg):
             n = len(cframes)
             stats["frames_in"] += n
             keyf = [(gidx[k] % skip_n == 0) for k in range(n)]
+            # v11.2.204 (SDOS-204), Optimized, one face: while the face was last seen turned past ~40 deg, this chunk is
+            # detected and swapped on every frame (a swap on interpolated points between sparse detections is the weaker
+            # choice; this keeps every swap on a real detection).
+            if _smart_job and not multi_face_safe and skip_n > 1:
+                try:
+                    _t0 = _tracker.tracks.get(0) if hasattr(_tracker, "tracks") else None
+                    _k0 = getattr(_t0, "last_hit_kps", None) if _t0 is not None else None
+                    if _k0 is None and _t0 is not None:
+                        _k0 = getattr(_t0, "kps", None)
+                    if _k0 is not None and _side_pose({0: {"kps": _k0}}):
+                        keyf = [True] * n
+                        stats["side_chunks"] = int(stats.get("side_chunks", 0)) + 1
+                except Exception:
+                    pass
             results = {}
 
             # Hard cuts in this chunk. `_cut_prev_sig` carries the previous
@@ -7286,6 +7319,8 @@ def _run_job_body(jid, src_paths, vp, cfg):
             # (see _FaceMotionKeys) and swapped on when it moves or changes fast. With the switch off, or at Ultra, this is
             # exactly the loop it replaces: only the key frames are visited.
             _fmk_on = bool(_FMK.enabled() and (swap_gap_base > 1 or skip_n > 1))
+            _smart_keys = _smart_job and (swap_gap_base > 1 or skip_n > 1)       # v11.2.204
+            _loop_all = _fmk_on or _smart_keys
             _key_set = set(key_indices)
             _recs_cache = {}
 
@@ -7295,13 +7330,20 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         _recs_cache.clear()
                     _recs_cache[gg] = _records_at(gg)
                 return _recs_cache[gg]
-            for k in (range(n) if _fmk_on else key_indices):
+            for k in (range(n) if _loop_all else key_indices):
                 g = gidx[k]
-                is_key = (k in _key_set) if _fmk_on else True
+                is_key = (k in _key_set) if _loop_all else True
                 forced = None
                 if _fmk_on and k > 0 and int(gidx[k - 1]) == int(g) - 1:
                     forced = _FMK.check(cframes[k - 1], cframes[k], _recs_c(int(g) - 1), _recs_c(int(g)), g)
-                if not (is_key or forced):
+                # v11.2.204 (SDOS-204), Optimized only: every frame is swapped while two faces touch (contact) or while a
+                # face is turned more than about 40 degrees (side pose), whatever the swap interval.
+                _sk = None
+                if _smart_keys and (multi_face_safe or is_key):
+                    _rs = _recs_c(int(g))
+                    _sk = ("contact" if (multi_face_safe and _faces_touch(_rs)) else
+                           "side" if _side_pose(_rs) else None)
+                if not (is_key or forced or _sk):
                     continue
                 visible = key_swap_ok.get(k) or {}
                 recs = _records_at(gidx[k])
@@ -7312,12 +7354,12 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 # the original clip.
                 mclass = key_motion_map.get(k, "MEDIUM")
                 gap = _adaptive_swap_gap(swap_gap_base, mclass, quality)
-                _ck = gap > 1 and multi_face_safe and _faces_touch(recs)       # v11.2.204: contact keys
-                if _ck:
+                _gap0 = gap
+                if _sk:
                     gap = 1
-                due = is_key and (g < initial_force_until or last_swap_g[0] <= -10**8 or (g - last_swap_g[0]) >= gap)
-                if _ck and due and (g - last_swap_g[0]) < _adaptive_swap_gap(swap_gap_base, mclass, quality):
-                    stats["contact_keys"] = int(stats.get("contact_keys", 0)) + 1
+                due = (is_key or bool(_sk)) and (g < initial_force_until or last_swap_g[0] <= -10**8 or (g - last_swap_g[0]) >= gap)
+                if _sk and due and (g - last_swap_g[0]) < _gap0 and not forced:
+                    stats[_sk + "_keys"] = int(stats.get(_sk + "_keys", 0)) + 1
                 if due or forced:
                     selected.append(k)
                     last_swap_g[0] = g
@@ -8057,8 +8099,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 logging.info("MOTION-KEYS: %d extra swaps for fast motion (%d for travel, %d for change of look) out of %d frames checked; "
                              "peak change per frame %.2f",
                              int(_FMK.extra), int(_FMK.by_move), int(_FMK.by_change), int(_FMK.seen), float(_FMK.peak_change))
-            logging.info("CONTACT-KEYS: %d extra swaps because the two faces touched (every frame is swapped while they touch)",
-                         int(stats.get("contact_keys", 0)))
+            if quality == "Optimized":
+                logging.info("SMART-KEYS (Optimized): %d extra swaps because two faces touched, %d because a face was turned "
+                             "more than about 40 degrees (every frame is swapped then); one face: %d chunks detected and "
+                             "swapped on every frame for a side pose", int(stats.get("contact_keys", 0)),
+                             int(stats.get("side_keys", 0)), int(stats.get("side_chunks", 0)))
         except Exception:
             pass
         try:

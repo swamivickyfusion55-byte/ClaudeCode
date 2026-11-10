@@ -276,7 +276,7 @@ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
 FPS = [15, 24, 30, 40, 50, 60]
 
 VERSION = "v11.2.204"
-BUILD = "ContactKeys · two faces: every frame swapped in contact; Optimized every 2nd apart, Ultra every Nth (2-3) apart; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+BUILD = "ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
 VERSION_FULL = f"{VERSION} ({BUILD})"
 
 @dataclass

@@ -371,9 +371,8 @@ def apply_hq():
     return "900p (HD+)", gr.update(), 30, "Ultra", "None", "1", "1", "4"
 
 def apply_quality():
-    # v11.2.204: Quality = Ultra, swap every 2nd frame while two faces are apart, every frame while they touch (and on a fast
-    # move or change, MotionKeys). One-face jobs: Ultra swaps every frame whatever this is.
-    return "720p (HD)", gr.update(), 30, "Ultra", "None", "2", "1", "4"
+    # Quality: 720p, Swap=1, no polish by default
+    return "720p (HD)", gr.update(), 30, "Ultra", "None", "1", "1", "4"
 
 def apply_optimized():
     # HF Pro CPU default: 720p, self-managed skip/det, no enhancer, fast encode.
@@ -478,10 +477,10 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
             gr.HTML('''<div class="hint">
 • <b>Speed</b>: 640p · Swap=3 (fastest; expression refreshes less often)<br>
 • <b>Balanced</b>: 720p · Swap=1<br>
-• <b>Optimized (Recommended)</b>: 720p · self-managed skip/det · two faces: swap every frame while they touch, every 2nd apart (v11.2.204)<br>
+• <b>Optimized (Recommended)</b>: 720p · self-managed skip/det · swaps every frame while two faces touch or a face is turned past ~40°; two faces apart: every 2nd frame (v11.2.204)<br>
 • <b>Stable</b>: 720p · Swap=1 · re-detect every 1 (face refreshed every frame)<br>
 • <b>Mobile HQ</b>: 680p · Ultra · Swap=1 · no enhancer<br>
-• <b>Quality</b>: 720p · Ultra · two faces: swap every frame while they touch, every 2nd apart (v11.2.204)<br>• <b>HQ</b>: 900p · Ultra · swap every frame<br>
+• <b>Quality / HQ</b>: higher quality · Swap=1<br>
 💡 Lower <b>Swap every N</b> = smoother face, slower. Use Speed Controls below to fine-tune.
 </div>''')
 
@@ -501,7 +500,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
                 v_swap = gr.Dropdown(["Auto","1","2","3","4","6","8","10"], value="1", label="Swap every N (manual)")
                 v_det = gr.Dropdown(["Auto","1","2","3","4","6","8"], value="1", label="Re-detect every N (manual)")
                 v_det_int = gr.Dropdown(["2","4","6","8","12","16"], value="2", label="Det Interval (manual)")
-            gr.HTML('<div class="hint"><b>Auto</b> lets the Quality preset above drive the frame-skip (this is what makes Fast/Balanced/Optimized actually faster). Setting an explicit number overrides the preset — <b>Swap=1</b> + <b>Re-detect=1</b> refreshes the face on every frame: the most expression detail, and the slowest. Since v11.1.0 every output frame is composited whatever these are set to, so a higher number costs expression freshness rather than face presence or placement. Multi-face jobs track every frame, and how often the swap network runs follows the <b>Quality</b> preset (Ultra = every frame, Best = every 2nd, Balanced = every 4th, Fast = every 6th) - except <b>Ultra with Swap = 2 or 3</b> (v11.2.204, the <b>Quality</b> preset): every 2nd / 3rd frame while the two faces are apart. In every preset, every frame is swapped while two faces touch (v11.2.204). Since v11.2.90 a face that moves or turns fast is also swapped on the frames in between (Best/Balanced/Fast), so those presets no longer step on fast turns; the job log line <b>MOTION-KEYS</b> says how many extra swaps that took.</div>')
+            gr.HTML('<div class="hint"><b>Auto</b> lets the Quality preset above drive the frame-skip (this is what makes Fast/Balanced/Optimized actually faster). Setting an explicit number overrides the preset — <b>Swap=1</b> + <b>Re-detect=1</b> refreshes the face on every frame: the most expression detail, and the slowest. Since v11.1.0 every output frame is composited whatever these are set to, so a higher number costs expression freshness rather than face presence or placement. Multi-face jobs track every frame, and how often the swap network runs follows the <b>Quality</b> preset (Ultra = every frame, Best = every 2nd, Balanced = every 4th, Fast = every 6th). <b>Optimized</b> (v11.2.204): two faces apart every 2nd frame; every frame while two faces touch or a face is turned past about 40 degrees. Ultra is unchanged: every frame. Since v11.2.90 a face that moves or turns fast is also swapped on the frames in between (Best/Balanced/Fast), so those presets no longer step on fast turns; the job log line <b>MOTION-KEYS</b> says how many extra swaps that took.</div>')
             v_enh = gr.Dropdown(
                 [
                     "None",

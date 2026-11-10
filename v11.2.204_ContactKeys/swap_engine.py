@@ -231,6 +231,8 @@ _P = {
     "contact_follow": 1,     # a face in contact is kept by where it touches its partner, and moves with the partner when missed
     "contact_carry_max": 240,  # ...and is carried while its partner is seen, up to this many frames (8 s at 30 fps; v11.2.92: 24)
     "two_elim": 1,
+    "smart_keys": 1,         # v11.2.204: Optimized - every frame swapped in contact or a side pose over ~40 deg
+    "side_key_h": 0.40,      # v11.2.204: side pose = nose offset >= 0.40 eye distances (about 40 deg, AFLW2000-calibrated)
     "arc_skip": 1,           # v11.2.203: two people far apart and clearly tracked - reuse each one's identity, ArcFace every 3rd call
     "fast_snap": 1,          # v11.2.176: a face moving fast (4-10 % of its width a frame and more) is followed without smoothing lag           # 2 people, 2 faces found: one clearly person X, the other is person Y (if it is where Y was, not a sliver)  # aligned with config ENGINE_TUNABLES / predicted hold budget
     # Relative identity admission (SDOS-078). A slot that has locked onto a
