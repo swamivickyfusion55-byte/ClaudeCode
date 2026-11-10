@@ -59,6 +59,25 @@ fs = [F([600, 300, 800, 500], ea), F([900, 300, 1100, 500], eb)]
 r = cp._arc_reuse(fs, T, {0: 0, 1: 1})
 check("a face that is not on its person's last box: no reuse", r == 0)
 
+# a new shot with the two people on swapped sides: the skip must not hold the wrong binding (compared with no skip)
+def swap_run(skip):
+    E._P["arc_skip"] = skip
+    T = E.MultiFaceTracker([0, 1]); wrong = []
+    for k in range(60):
+        xa, xb = (150, 900) if k < 20 else (900, 150)
+        fa, fb = F([xa, 300, xa + 200, 500], ea), F([xb, 300, xb + 200, 500], eb)
+        faces = [fa, fb]; cp._arc_reuse(faces, T, {0: 0, 1: 1})
+        for f in faces:
+            if f.normed_embedding is None: f.normed_embedding = f.embedding = f._true
+        res = cp._persistent_track_pairs.__wrapped__(faces, T) if hasattr(cp._persistent_track_pairs, "__wrapped__") else None
+        res = T.assign(faces, {}); cp._arc_verify(res, T)
+        if k >= 20:
+            wrong.append(int(res.get(0) is not fa or res.get(1) is not fb))
+    E._P["arc_skip"] = 1
+    return sum(wrong), (max(i for i, w in enumerate(wrong) if w) + 1 if any(wrong) else 0)
+w92, last92 = swap_run(0); w203, last203 = swap_run(1)
+check("a new shot with the two people swapped: the skip relabels no later than without it",
+      last203 <= last92 + 3 and w203 <= w92 + 3, "wrong frames %d, last wrong %d (no skip: %d, %d)" % (w203, last203, w92, last92))
 # ---- encryption ----------------------------------------------------------------------------------------------------------
 os.makedirs(WORK, exist_ok=True)
 big = os.path.join(WORK, "video_plain.bin"); data = os.urandom(9_500_000)          # 3 chunks of 4 MiB

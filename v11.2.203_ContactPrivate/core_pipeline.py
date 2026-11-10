@@ -4276,6 +4276,8 @@ def _arc_reuse(faces, tracker, smap):
             return 0
         if int(getattr(tracker, "_call_n", 0) or 0) % 3 == 0:
             return 0
+        if int(getattr(tracker, "_call_n", 0) or 0) < int(getattr(tracker, "_arc_block_until", -1) or -1):
+            return 0                                # (a checked frame disagreed recently: a new shot, people swapped)
         if any(getattr(f, "normed_embedding", None) is not None for f in faces):
             return 0
         trs = [t for t in tracker.tracks.values() if t is not None]
@@ -4309,6 +4311,32 @@ def _arc_reuse(faces, tracker, smap):
     except Exception as _e:
         logging.debug("arc reuse skipped: %s", _e)
         return 0
+
+
+def _arc_verify(assigned, tracker):
+    """v11.2.203: on a frame whose faces were really embedded (not reused), each face must read as its own person at least as
+    much as the other (within 0.05). If not - a new shot with the two people on swapped sides, say - the ArcFace skip stops for
+    60 calls, so the tracker's own relabelling (which needs several real embeddings in a row) is never held off by reuse."""
+    try:
+        if not assigned or len(assigned) != 2 or tracker is None:
+            return
+        if any(getattr(f, "_arc_reused", False) for f in assigned.values()):
+            return
+        trs = {s: tracker.tracks.get(s) for s in assigned}
+        for s, f in assigned.items():
+            e = getattr(f, "normed_embedding", None)
+            o = [t for s2, t in trs.items() if s2 != s]
+            if e is None or trs[s] is None or trs[s].emb is None or not o or o[0] is None or o[0].emb is None:
+                continue
+            e = np.asarray(e, np.float32).reshape(-1)
+            own = float(e @ np.asarray(trs[s].emb, np.float32).reshape(-1)) / max(1e-9, float(np.linalg.norm(trs[s].emb)))
+            oth = float(e @ np.asarray(o[0].emb, np.float32).reshape(-1)) / max(1e-9, float(np.linalg.norm(o[0].emb)))
+            if oth > own + 0.05:
+                tracker._arc_block_until = int(getattr(tracker, "_call_n", 0) or 0) + 60
+                _ARC_STATS["blocked"] = _ARC_STATS.get("blocked", 0) + 1
+                return
+    except Exception as _e:
+        logging.debug("arc verify skipped: %s", _e)
 
 
 def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
@@ -4364,6 +4392,7 @@ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=N
         logging.debug("deferred embedding stage skipped: %s", e)
 
     assigned = tracker.assign(faces, ref_map, dt_frames=dt_frames)
+    _arc_verify(assigned, tracker)                # v11.2.203: a checked frame that disagrees stops the ArcFace skip for 60 calls
     _mark_cross_identity(assigned, tracker)
 
     # v11.1.9: stamp frame size onto every live track so predict() can freeze
@@ -5288,7 +5317,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                 _src_gender[idx] = None
         _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_src_gender)
         _FRONT_MEM.clear(); _FRONT_NOW.clear()
-        _ARC_STATS.update(reused=0, frames=0)        # v11.2.203: per job
+        _ARC_STATS.update(reused=0, frames=0, blocked=0)   # v11.2.203: per job
         for _fk in _FRONT_STATS:
             _FRONT_STATS[_fk] = 0
         logging.info("Face mode: %s · sources=%d · source genders (0=F 1=M): %s",
@@ -7901,8 +7930,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
             logging.info("CONTACT: partly hidden faces kept %d, kept by elimination (2 people) %d, kept apart from the "
                          "de-duplication %d", int(getattr(_tk, "partner_side_n", 0) or 0), int(getattr(_tk, "elim_n", 0) or 0),
                          int(getattr(_tk, "contact_apart_n", 0) or 0))
-            logging.info("SPEED: ArcFace passes skipped %d (two people far apart, identity reused; every 3rd call still checked)",
-                         int(_ARC_STATS.get("reused", 0)))
+            logging.info("SPEED: ArcFace passes skipped %d (two people far apart, identity reused; every 3rd call still checked; "
+                         "skip stopped after a disagreeing check %d times)", int(_ARC_STATS.get("reused", 0)),
+                         int(_ARC_STATS.get("blocked", 0)))
             logging.info("FRONT/BEHIND: decided by identity on %d face-pair frames, by sight on %d, by size (held) on %d; changes %d",
                          _FRONT_STATS["identity"], _FRONT_STATS["seen"], _FRONT_STATS["size"], _FRONT_STATS["changes"])
             logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
