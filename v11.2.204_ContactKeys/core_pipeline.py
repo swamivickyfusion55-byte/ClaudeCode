@@ -5154,7 +5154,14 @@ def _run_job_body(jid, src_paths, vp, cfg):
         def _fps_scaled(n):
             return max(1, int(round(int(n) * float(fps) / _REF_FPS)))
 
-        if quality == "Optimized":
+        if quality == "Optimized" and bool(int(_E._P.get("smart_keys", 1))):
+            # v11.2.204 (SDOS-204): Optimized, one face, like two faces - the face is found on EVERY frame (as Ultra) and
+            # swapped on every 2nd frame while frontal; every frame while turned past ~40 deg (smart keys, below), plus
+            # MotionKeys on a fast move. (v11.2.203: found and swapped on every 5th frame.) Two-face jobs set their own
+            # cadence below.
+            skip_n = 1
+            base_det_int = 1
+        elif quality == "Optimized":
             # Self-managed CPU tier: ignore literal "1" dropdown defaults so
             # skip/det actually engage. det_int is in KEYFRAME space.
             skip_n = _fps_scaled(SKIP_N["Optimized"])
@@ -5193,6 +5200,9 @@ def _run_job_body(jid, src_paths, vp, cfg):
         # old fill path stamped a face ROI copied from a neighbouring frame and
         # could land it on the other person. That path no longer exists.
         swap_gap_base = skip_n
+        if quality == "Optimized" and bool(int(_E._P.get("smart_keys", 1))) and not multi_face_safe:
+            swap_gap_base = 2                                 # v11.2.204: one face, Optimized - every 2nd frame while frontal
+            logging.info("OPTIMIZED, one face: found on every frame, swapped every 2nd frame while frontal, every frame turned past ~40 deg")
         if multi_face_safe:
             skip_n = 1
             base_det_int = 1
