@@ -1,0 +1,897 @@
+Only in v11.2.203_ContactPrivate: SDOS-203_ContactPrivate.md
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/app.py v11.2.203_ContactPrivate/app.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/app.py	2026-11-08 17:00:44.000000000 +0000
++++ v11.2.203_ContactPrivate/app.py	2026-11-10 04:46:41.179359679 +0000
+@@ -14,7 +14,7 @@
+     ensure_runtime_dirs()
+ except Exception:
+     os.makedirs("/tmp/gradio", exist_ok=True)
+-    ALLOWED_PATHS = ["/tmp/gradio", "/data"]
++    ALLOWED_PATHS = ["/tmp/gradio", "/data/phoenix_outputs"]
+ 
+ import gradio as gr
+ 
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/config.py v11.2.203_ContactPrivate/config.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/config.py	2026-11-10 03:58:30.000000000 +0000
++++ v11.2.203_ContactPrivate/config.py	2026-11-10 04:46:41.178352378 +0000
+@@ -19,15 +19,14 @@
+ for _k, _v in ENV_DEFAULTS.items():
+     os.environ.setdefault(_k, _v)
+ 
++# v11.2.203: Gradio may hand out files only from these folders. "/data" as a whole (and /data/phoenix_jobs, where the inputs
++# saved for a restart are) is no longer listed: only results (/data/phoenix_outputs) and the temporary folders.
+ ALLOWED_PATHS = [
+     "/tmp/gradio",
+     "/tmp/phoenix_uploads",
+     "/tmp/phoenix_detect",
+     "/data/gradio_tmp",
+-    "/data/phoenix_uploads",
+     "/data/phoenix_outputs",
+-    "/data/phoenix_jobs",
+-    "/data",
+ ]
+ 
+ def ensure_runtime_dirs() -> None:
+@@ -276,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.202"
+-BUILD = "saved uploads stay private to the Space and are deleted after 24 hours"
++VERSION = "v11.2.203"
++BUILD = "ContactPrivate · the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/core_pipeline.py v11.2.203_ContactPrivate/core_pipeline.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/core_pipeline.py	2026-11-10 03:58:30.000000000 +0000
++++ v11.2.203_ContactPrivate/core_pipeline.py	2026-11-10 05:10:34.002649751 +0000
+@@ -283,6 +283,107 @@
+ except Exception:
+     pass
+ 
++# ---- v11.2.203 (SDOS-203): saved inputs encrypted at rest -------------------------------------------------------------------
++# The video, the replacement faces and the painted patch frames kept for a restart are written AES-256-GCM encrypted when the
++# Space secret PHOENIX_STORE_KEY is set (Space settings -> Variables and secrets -> New secret; any long random text). Each file
++# gets its own key (HKDF-SHA256 from the secret and a random salt) and is sealed in 4 MiB chunks: a changed, cut or reordered
++# file does not decrypt. The key is never written to disk. Without the secret the files are kept as before (plain) and the log
++# says so. A restart decrypts them into /tmp (not the persistent disk) for the job and deletes that copy afterwards.
++_STORE_MAGIC = b"PHXENC1\n"
++_STORE_CHUNK = 4 << 20
++
++
++def _store_secret():
++    v = (os.environ.get("PHOENIX_STORE_KEY") or "").strip()
++    return v.encode("utf-8") if len(v) >= 16 else None
++
++
++def _store_aes():
++    try:
++        from Cryptodome.Cipher import AES as _AES      # pycryptodomex, installed with pyzipper
++        return _AES
++    except Exception:
++        return None
++
++
++def _hkdf(secret, salt, info=b"phoenix-store-v1", n=32):
++    import hmac, hashlib
++    prk = hmac.new(salt, secret, hashlib.sha256).digest()
++    out, t, i = b"", b"", 1
++    while len(out) < n:
++        t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest(); out += t; i += 1
++    return out[:n]
++
++
++def _store_can_encrypt():
++    return _store_secret() is not None and _store_aes() is not None
++
++
++def _encrypt_file(src, dest):
++    """src (plain) -> dest (sealed). Raises on any failure; dest is only complete when this returns."""
++    AES = _store_aes(); secret = _store_secret()
++    if AES is None or secret is None:
++        raise RuntimeError("encryption unavailable")
++    salt = os.urandom(16); base = os.urandom(8); key = _hkdf(secret, salt)
++    tmp = str(dest) + ".part"
++    with open(src, "rb") as fi, open(tmp, "wb") as fo:
++        fo.write(_STORE_MAGIC + salt + base)
++        i = 0
++        cur = fi.read(_STORE_CHUNK)
++        while True:
++            nxt = fi.read(_STORE_CHUNK)
++            last = 1 if not nxt else 0
++            c = AES.new(key, AES.MODE_GCM, nonce=base + i.to_bytes(4, "big"))
++            c.update(b"%d:%d" % (i, last))
++            ct, tag = c.encrypt_and_digest(cur)
++            fo.write(len(ct).to_bytes(4, "big") + ct + tag)
++            if last:
++                break
++            cur, i = nxt, i + 1
++    os.replace(tmp, dest)
++    _lock_file(dest)
++
++
++def _decrypt_file(src, dest):
++    """sealed src -> plain dest. Raises if the file was changed, cut or the secret differs."""
++    AES = _store_aes(); secret = _store_secret()
++    if AES is None or secret is None:
++        raise RuntimeError("the Space secret PHOENIX_STORE_KEY is not set")
++    with open(src, "rb") as fi, open(dest, "wb") as fo:
++        if fi.read(len(_STORE_MAGIC)) != _STORE_MAGIC:
++            raise ValueError("not a sealed file")
++        salt = fi.read(16); base = fi.read(8); key = _hkdf(secret, salt)
++        i, done = 0, False
++        while True:
++            hdr = fi.read(4)
++            if not hdr:
++                break
++            n = int.from_bytes(hdr, "big"); ct = fi.read(n); tag = fi.read(16)
++            if len(ct) != n or len(tag) != 16:
++                raise ValueError("sealed file is cut")
++            nxt = fi.peek(1)[:1] if hasattr(fi, "peek") else b""
++            last = 0 if nxt else 1
++            c = AES.new(key, AES.MODE_GCM, nonce=base + i.to_bytes(4, "big"))
++            c.update(b"%d:%d" % (i, last))
++            fo.write(c.decrypt_and_verify(ct, tag))
++            i += 1
++            if last:
++                done = True
++                break
++        if not done:
++            raise ValueError("sealed file is cut")
++
++
++def _resume_tmp(jid):
++    d = Path(tempfile.gettempdir()) / "phoenix_resume" / str(jid)
++    d.mkdir(parents=True, exist_ok=True)
++    try:
++        os.chmod(d, 0o700)
++    except Exception:
++        pass
++    return d
++
++
+ def _input_keep(jid):
+     d = JOB_STATE_ROOT / "inputs" / jid
+     d.mkdir(parents=True, exist_ok=True)
+@@ -312,30 +413,56 @@
+ 
+ 
+ def _keep_job_inputs(jid, src_paths, vp, cfg):
+-    """Copy the uploaded video and faces onto the Space disk before work starts."""
++    """Copy the uploaded video, faces and painted patch frames onto the Space disk before work starts, for a restart.
++    v11.2.203: sealed (AES-256-GCM) when the Space secret PHOENIX_STORE_KEY is set; the result-ZIP password is never saved."""
+     import json
+     try:
+         d = _input_keep(jid)
++        enc = _store_can_encrypt()
++        sfx = ".enc" if enc else ""
++        def _put(src, name):
++            dest = d / (name + sfx)
++            if enc:
++                _encrypt_file(src, dest)
++            else:
++                shutil.copy2(src, dest)
++                _lock_file(dest)
++            return dest.name
+         kept = {}
+         for idx, p in src_paths.items():
+-            name = f"face{int(idx)}.jpg"
+-            dest = d / name
+-            shutil.copy2(p, dest)
+-            _lock_file(dest)
+-            kept[str(int(idx))] = name
+-        vdest = d / "video.mp4"
+-        shutil.copy2(vp, vdest)
+-        _lock_file(vdest)
++            kept[str(int(idx))] = _put(p, f"face{int(idx)}.jpg")
++        vname = _put(vp, "video.mp4")
++        saved = _jsonable(cfg)
++        had_pw = bool((saved.get("password") or "").strip()) if isinstance(saved, dict) else False
++        if isinstance(saved, dict):
++            saved.pop("password", None)                      # v11.2.203: never at rest
++            pk = []
++            for k, it in enumerate(saved.get("patches") or []):
++                if not isinstance(it, dict):
++                    continue
++                it = dict(it)
++                for key_, nm in (("image", f"patch{k}_frame.jpg"), ("mask", f"patch{k}_mask.png")):
++                    if it.get(key_) and os.path.isfile(str(it[key_])):
++                        it[key_] = _put(str(it[key_]), nm)
++                pk.append(it)
++            if pk:
++                saved["patches"] = pk
+         meta = d / "resume.json"
+         meta.write_text(json.dumps({
+-            "src": kept, "video": "video.mp4", "cfg": _jsonable(cfg),
++            "src": kept, "video": vname, "cfg": saved, "enc": bool(enc), "had_password": had_pw,
+             "expires_at": time.time() + 86400,
+         }, separators=(",", ":")), encoding="utf-8")
+         _lock_file(meta)
+-        logging.info("Kept job %s inputs on disk (%d faces), private, deleted after 24 hours", jid, len(kept))
++        logging.info("Kept job %s inputs on disk (%d faces), %s, deleted after 24 hours", jid, len(kept),
++                     "ENCRYPTED (AES-256-GCM)" if enc else
++                     "NOT encrypted - add the Space secret PHOENIX_STORE_KEY to encrypt them")
+         return True
+     except Exception as e:
+         logging.warning("Could not keep job %s inputs: %s", jid, e)
++        try:
++            _drop_job_inputs(jid)
++        except Exception:
++            pass
+         return False
+ 
+ 
+@@ -343,23 +470,46 @@
+     import json
+     d = JOB_STATE_ROOT / "inputs" / jid
+     meta = d / "resume.json"
+-    video = d / "video.mp4"
+-    if not meta.is_file() or not video.is_file() or video.stat().st_size < 1000:
++    if not meta.is_file():
+         return None
+     try:
+         raw = json.loads(meta.read_text(encoding="utf-8"))
+         if time.time() > float(raw.get("expires_at") or 0):
+             return None
+-        src = {}
+-        for k, name in (raw.get("src") or {}).items():
++        enc = bool(raw.get("enc"))
++        vsrc = d / str(raw.get("video") or "video.mp4")
++        if not vsrc.is_file() or vsrc.stat().st_size < 1000:
++            return None
++        out_dir = _resume_tmp(jid) if enc else None
++        def _get(name):
+             fp = d / str(name)
+             if not fp.is_file():
+-                return None
+-            src[int(k)] = str(fp)
++                raise FileNotFoundError(str(name))
++            if not enc:
++                return str(fp)
++            dest = out_dir / str(name)[:-4]                      # (drop ".enc")
++            _decrypt_file(fp, dest)
++            return str(dest)
++        src = {int(k): _get(name) for k, name in (raw.get("src") or {}).items()}
+         if not src:
+             return None
+-        return src, str(video), raw.get("cfg") or {}
+-    except Exception:
++        video = _get(vsrc.name)
++        cfg = dict(raw.get("cfg") or {})
++        pts = []
++        for it in cfg.get("patches") or []:
++            if isinstance(it, dict):
++                it = dict(it)
++                for key_ in ("image", "mask"):
++                    if it.get(key_) and "/" not in str(it[key_]):
++                        it[key_] = _get(it[key_])
++                pts.append(it)
++        if pts:
++            cfg["patches"] = pts
++        if raw.get("had_password"):
++            logging.info("RESUMED job %s: its result-ZIP password is not kept on disk, so this run makes no encrypted ZIP", jid)
++        return src, video, cfg
++    except Exception as e:
++        logging.warning("RESUME of job %s not possible: %s", jid, e)
+         return None
+ 
+ 
+@@ -393,8 +543,8 @@
+             if now >= exp or st in ("done", "error", "cancelled"):
+                 shutil.rmtree(d, ignore_errors=True)
+                 logging.info("Deleted saved upload for job %s", jid)
+-    paint = Path("/data/phoenix_patches")
+-    if paint.is_dir():
++    for paint in (Path("/data/phoenix_patches"), Path(tempfile.gettempdir()) / "phoenix_patches"):
++      if paint.is_dir():
+         for d in list(paint.iterdir()):
+             try:
+                 if d.is_dir() and now - d.stat().st_mtime > 86400:
+@@ -4110,6 +4260,89 @@
+     return out
+ 
+ 
++_ARC_STATS = {"reused": 0, "frames": 0}
++
++
++def _arc_reuse(faces, tracker, smap):
++    """v11.2.203 (SDOS-203): skip the ArcFace pass (about 0.12 s per face on 2 CPU threads) on frames where it cannot change who
++    is who: a two-person job, exactly two faces found, each one sitting on its own person's box from the call before (overlap
++    0.5 or more with it, under 0.1 with the other), the two far apart (centres 1.5 face sizes or more), neither person missed or
++    crossing the other. Each face then carries its own person's identity as already learned. Every third call is still
++    embedded (a check), and contact, a crossing, a third face, a missed person or a new shot always embed. The masks and the
++    occlusion model do not use embeddings. Switch: swap_engine._P["arc_skip"] (0 = embed every face, as v11.2.92)."""
++    try:
++        _ARC_STATS["frames"] += 1
++        if not int(_E._P.get("arc_skip", 1)) or tracker is None or len(faces) != 2 or len(smap or {}) != 2:
++            return 0
++        if int(getattr(tracker, "_call_n", 0) or 0) % 3 == 0:
++            return 0
++        if int(getattr(tracker, "_call_n", 0) or 0) < int(getattr(tracker, "_arc_block_until", -1) or -1):
++            return 0                                # (a checked frame disagreed recently: a new shot, people swapped)
++        if any(getattr(f, "normed_embedding", None) is not None for f in faces):
++            return 0
++        trs = [t for t in tracker.tracks.values() if t is not None]
++        if len(trs) != 2:
++            return 0
++        for t in trs:
++            if (not t.established or t.emb is None or int(getattr(t, "missed", 0) or 0) != 0 or getattr(t, "crossing", False)
++                    or getattr(t, "last_hit_bbox", None) is None):
++                return 0
++        if _E._cdist_norm(faces[0].bbox, faces[1].bbox) < 1.5 or _E._cdist_norm(trs[0].last_hit_bbox, trs[1].last_hit_bbox) < 1.5:
++            return 0
++        pick = {}
++        for k, f in enumerate(faces):
++            ious = [_bbox_iou(f.bbox, t.last_hit_bbox) for t in trs]
++            a = int(np.argmax(ious))
++            if ious[a] < 0.5 or ious[1 - a] >= 0.1:
++                return 0
++            pick[k] = trs[a]
++        if pick[0] is pick[1]:
++            return 0
++        for k, f in enumerate(faces):
++            e = np.asarray(pick[k].emb, np.float32).reshape(-1)
++            e = e / max(1e-9, float(np.linalg.norm(e)))
++            f.embedding = e                     # (insightface's Face derives normed_embedding from embedding; read-only there)
++            try:
++                if getattr(f, "normed_embedding", None) is None:
++                    f.normed_embedding = e
++            except Exception:
++                pass
++            f._emb_img = None
++            f._emb_kps = None
++            f._arc_reused = True
++        _ARC_STATS["reused"] += 2
++        return 2
++    except Exception as _e:
++        logging.debug("arc reuse skipped: %s", _e)
++        return 0
++
++
++def _arc_verify(assigned, tracker):
++    """v11.2.203: on a frame whose faces were really embedded (not reused), each face must read as its own person at least as
++    much as the other (within 0.05). If not - a new shot with the two people on swapped sides, say - the ArcFace skip stops for
++    60 calls, so the tracker's own relabelling (which needs several real embeddings in a row) is never held off by reuse."""
++    try:
++        if not assigned or len(assigned) != 2 or tracker is None:
++            return
++        if any(getattr(f, "_arc_reused", False) for f in assigned.values()):
++            return
++        trs = {s: tracker.tracks.get(s) for s in assigned}
++        for s, f in assigned.items():
++            e = getattr(f, "normed_embedding", None)
++            o = [t for s2, t in trs.items() if s2 != s]
++            if e is None or trs[s] is None or trs[s].emb is None or not o or o[0] is None or o[0].emb is None:
++                continue
++            e = np.asarray(e, np.float32).reshape(-1)
++            own = float(e @ np.asarray(trs[s].emb, np.float32).reshape(-1)) / max(1e-9, float(np.linalg.norm(trs[s].emb)))
++            oth = float(e @ np.asarray(o[0].emb, np.float32).reshape(-1)) / max(1e-9, float(np.linalg.norm(o[0].emb)))
++            if oth > own + 0.05:
++                tracker._arc_block_until = int(getattr(tracker, "_call_n", 0) or 0) + 60
++                _ARC_STATS["blocked"] = _ARC_STATS.get("blocked", 0) + 1
++                return
++    except Exception as _e:
++        logging.debug("arc verify skipped: %s", _e)
++
++
+ def _persistent_track_pairs(faces, smap, refs, tracker, max_faces, frame_shape=None,
+                             dt_frames=1.0):
+     """Associate detections to replacement slots via the v11 MultiFaceTracker.
+@@ -4147,6 +4380,7 @@
+     # always did, carrying exactly the embeddings it always did.
+     faces = _as_face_list(faces)
+     try:
++        _arc_reuse(faces, tracker, smap)          # v11.2.203: two people far apart and clearly tracked - no new ArcFace pass
+         _embed_faces(faces)
+         # _dedupe_faces ran inside _fa_get without embeddings, where it falls
+         # back to IoU plus a centre-distance test (it is written to degrade
+@@ -4162,6 +4396,7 @@
+         logging.debug("deferred embedding stage skipped: %s", e)
+ 
+     assigned = tracker.assign(faces, ref_map, dt_frames=dt_frames)
++    _arc_verify(assigned, tracker)                # v11.2.203: a checked frame that disagrees stops the ArcFace skip for 60 calls
+     _mark_cross_identity(assigned, tracker)
+ 
+     # v11.1.9: stamp frame size onto every live track so predict() can freeze
+@@ -5086,6 +5321,7 @@
+                 _src_gender[idx] = None
+         _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_src_gender)
+         _FRONT_MEM.clear(); _FRONT_NOW.clear()
++        _ARC_STATS.update(reused=0, frames=0, blocked=0)   # v11.2.203: per job
+         for _fk in _FRONT_STATS:
+             _FRONT_STATS[_fk] = 0
+         logging.info("Face mode: %s · sources=%d · source genders (0=F 1=M): %s",
+@@ -7698,6 +7934,9 @@
+             logging.info("CONTACT: partly hidden faces kept %d, kept by elimination (2 people) %d, kept apart from the "
+                          "de-duplication %d", int(getattr(_tk, "partner_side_n", 0) or 0), int(getattr(_tk, "elim_n", 0) or 0),
+                          int(getattr(_tk, "contact_apart_n", 0) or 0))
++            logging.info("SPEED: ArcFace passes skipped %d (two people far apart, identity reused; every 3rd call still checked; "
++                         "skip stopped after a disagreeing check %d times)", int(_ARC_STATS.get("reused", 0)),
++                         int(_ARC_STATS.get("blocked", 0)))
+             logging.info("FRONT/BEHIND: decided by identity on %d face-pair frames, by sight on %d, by size (held) on %d; changes %d",
+                          _FRONT_STATS["identity"], _FRONT_STATS["seen"], _FRONT_STATS["size"], _FRONT_STATS["changes"])
+             logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
+@@ -7990,6 +8229,15 @@
+             st = (jobs.get(jid) or {}).get("status")
+         if st == "done":
+             _drop_job_inputs(jid)
++        # v11.2.203: the decrypted copies of a resumed job, and this job's painted patch frames, are not kept after it
++        shutil.rmtree(Path(tempfile.gettempdir()) / "phoenix_resume" / str(jid), ignore_errors=True)
++        for _it in (cfg.get("patches") or []) if isinstance(cfg, dict) else []:
++            try:
++                _pd = Path(str((_it or {}).get("image") or "")).parent
++                if _pd.name and "phoenix_patches" in str(_pd.parent):
++                    shutil.rmtree(_pd, ignore_errors=True)
++            except Exception:
++                pass
+ 
+ def _age(ts):
+     a = int(time.time() - ts)
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/phoenix_api_adapter.py v11.2.203_ContactPrivate/phoenix_api_adapter.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/phoenix_api_adapter.py	2026-11-08 23:45:58.000000000 +0000
++++ v11.2.203_ContactPrivate/phoenix_api_adapter.py	2026-11-10 04:46:41.177224306 +0000
+@@ -157,7 +157,7 @@
+     if hasattr(video, "name") and not isinstance(video, (str, bytes, bytearray)):
+         video = getattr(video, "name", None)
+     if isinstance(video, (bytes, bytearray)):
+-        root = Path("/data/phoenix_uploads") if os.path.isdir("/data") else Path("/tmp/phoenix_uploads")
++        root = Path("/tmp/phoenix_uploads")                   # v11.2.203: never the persistent disk (nothing deleted it there)
+         root.mkdir(parents=True, exist_ok=True)
+         dest = root / f"up_{uuid.uuid4().hex[:10]}.mp4"
+         dest.write_bytes(video)
+@@ -437,7 +437,9 @@
+             return None, _json_error("patches must be a JSON list", "invalid_patches")
+     if not isinstance(items, list):
+         return None, _json_error("patches must be a list", "invalid_patches")
+-    root = Path("/data/phoenix_patches") if os.path.isdir("/data") else Path(tempfile.gettempdir()) / "phoenix_patches"
++    # v11.2.203: painted frames go to the container's temporary disk, not the persistent /data; the job keeps its own
++    # (encrypted) copy for a restart and deletes this folder when it ends
++    root = Path(tempfile.gettempdir()) / "phoenix_patches"
+     out = []
+     for k, it in enumerate(items[:20]):
+         if not isinstance(it, dict):
+diff -ru -x __pycache__ /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/swap_engine.py v11.2.203_ContactPrivate/swap_engine.py
+--- /tmp/claude-0/-home-user-ClaudeCode/53ae7b21-e3b3-5c92-ac7e-facd0947dd55/scratchpad/up202/x/Phoenix_v11.2.202_Private24h/swap_engine.py	2026-11-09 18:14:28.000000000 +0000
++++ v11.2.203_ContactPrivate/swap_engine.py	2026-11-10 04:44:18.600524660 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.92-fastrestore"
++ENGINE_VERSION = "aequus-1.2.203-contactprivate"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -226,7 +226,13 @@
+     "trk_cross_iou": 0.12,   # tracks this close are considered "crossing"
+     "trk_flip_margin": 0.14, # identity margin needed to justify a label flip
+     "trk_flip_frames": 5,    # ...sustained for this many frames
+-    "trk_max_missed": 24,  # aligned with config ENGINE_TUNABLES / predicted hold budget
++    "trk_max_missed": 24,
++    # v11.2.176 (SDOS-176): two people in contact (a kiss, a hug). 0 = the v11.2.92 behaviour exactly.
++    "contact_follow": 1,     # a face in contact is kept by where it touches its partner, and moves with the partner when missed
++    "contact_carry_max": 240,  # ...and is carried while its partner is seen, up to this many frames (8 s at 30 fps; v11.2.92: 24)
++    "two_elim": 1,
++    "arc_skip": 1,           # v11.2.203: two people far apart and clearly tracked - reuse each one's identity, ArcFace every 3rd call
++    "fast_snap": 1,          # v11.2.176: a face moving fast (4-10 % of its width a frame and more) is followed without smoothing lag           # 2 people, 2 faces found: one clearly person X, the other is person Y (if it is where Y was, not a sliver)  # aligned with config ENGINE_TUNABLES / predicted hold budget
+     # Relative identity admission (SDOS-078). A slot that has locked onto a
+     # person used to accept a later detection only if it matched that one stored
+     # frame at >= 0.38 (>= 0.40 after a gap) - an absolute wall. Measured on the
+@@ -941,7 +947,7 @@
+     __slots__ = ("slot", "bbox", "obs_bbox", "kps", "lmk", "vel_bbox", "vel_kps",
+                  "emb", "id_lock", "hits", "missed", "mask_ema", "cm_dmean", "cm_ratio",
+                  "flip_votes", "crossing", "last_face", "det_score", "last_hit_bbox",
+-                 "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps",
++                 "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps", "_contact_vel",
+                  "fake", "fake_corr", "fake_size", "fake_frame",
+                  "_frame_wh", "_paste_frozen", "_reacquired",
+                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
+@@ -1025,6 +1031,7 @@
+         self.last_hit_bbox = None
+         self.last_dt = 1.0        # output frames between the last two detections
+         self.last_hit_kps = None  # raw keypoints at the last real detection
++        self._contact_vel = None  # v11.2.176: (bbox velocity, kps velocity) of the partner while in contact
+         self.hull_ema = None      # smoothed landmark hull (aligned space)
+         self.occl_w = 0.0         # CONTINUOUS occlusion weight in [0,1]
+         self.alpha_ema = 1.0      # smoothed composite opacity
+@@ -1112,6 +1119,17 @@
+         steps = max(1, int(round(n)))
+         m0 = self.missed
+         self.missed = m0 + steps
++        cv_ = getattr(self, "_contact_vel", None)
++        if cv_ is not None and not self._paste_frozen:
++            # v11.2.176: in contact, carried with the partner's motion (MultiFaceTracker._contact_motion), not on at its own
++            vb, vk = cv_
++            if self.bbox is not None:
++                self.bbox = (self.bbox + vb * float(steps)).astype(np.float32)
++            if self.obs_bbox is not None:
++                self.obs_bbox = (self.obs_bbox + vb * float(steps)).astype(np.float32)
++            if self.kps is not None and vk is not None:
++                self.kps = (self.kps + vk * float(steps)).astype(np.float32)
++            return self.bbox
+         # Already left the frame — count the miss but do not keep coasting.
+         if self._paste_frozen:
+             return self.bbox
+@@ -1409,11 +1427,27 @@
+             self.vel_bbox = (self.vel_bbox + (_ab_b / elapsed) * r).astype(np.float32)
+             self.ab_bbox = (x_pred + _ab_a * r).astype(np.float32)
+         self.obs_bbox = bb.copy()
++        # v11.2.176 (SDOS-176): the faster the face moves, the less it is smoothed. v11.2.92 blended every detection into the
++        # last position (box 0.42; the 5 points' One Euro filter barely opened with speed), so on a fast step - 60 px a frame -
++        # the paint trailed the face by up to 50 px, a ghost beside it. From 4 % of the face width a frame the smoothing fades,
++        # gone at 10 %; a still or slow face keeps all of it. Not while two faces touch (their points are steadied there).
++        _fast_w = 0.0
++        if (bool(_P.get("fast_snap", 1)) and self.bbox is not None and not bool(getattr(self, "crossing", False))
++                and self.last_hit_bbox is not None):
++            try:
++                _fw = max(8.0, float(bb[2] - bb[0]))
++                _dc = (np.array([bb[0] + bb[2], bb[1] + bb[3]], np.float32) - np.array(
++                    [self.bbox[0] + self.bbox[2], self.bbox[1] + self.bbox[3]], np.float32)) * 0.5
++                _sp = float(np.hypot(_dc[0], _dc[1])) / max(1.0, float(elapsed)) / _fw
++                _fast_w = float(np.clip((_sp - 0.04) / 0.06, 0.0, 1.0))
++            except Exception:
++                _fast_w = 0.0
+         self.last_hit_bbox = bb.copy()
+         if self.bbox is None:
+             self.bbox = bb
+         else:
+-            self.bbox = (self.bbox * (1.0 - a) + bb * a).astype(np.float32)
++            _a = a + (1.0 - a) * _fast_w
++            self.bbox = (self.bbox * (1.0 - _a) + bb * _a).astype(np.float32)
+ 
+         kps = getattr(face, "kps", None)
+         if kps is not None:
+@@ -1431,6 +1465,7 @@
+                 # cadence above 1 the old form under-smoothed by that factor.
+                 r = 2.0 * math.pi * cutoff * elapsed
+                 a = r / (r + 1.0)
++                a = a + (1.0 - a) * _fast_w          # v11.2.176: fast motion, no lag (see the box above)
+                 sm = self.kps * (1.0 - a) + kp * a
+                 # Same alpha-beta filter as vel_bbox, on its own state. Note
+                 # this is a SECOND, independent filter and not a duplicate of
+@@ -2833,6 +2868,24 @@
+     return float(inter / u) if u > 0 else 0.0
+ 
+ 
++def _two_boxes(a, b):
++    """v11.2.176 (SDOS-176): two boxes are two faces: overlap under 0.40 and neither box's centre inside the other box. In a
++    side-view kiss the two faces' 5 points sit within about 20 px of each other (all on the front half of each face), so a points
++    test calls them one face; their boxes stay apart (measured: overlap 0.13-0.16, each centre outside the other box). A second
++    box on one face (a cheek box, a zoomed box) has its centre inside the first."""
++    try:
++        a = np.asarray(a, dtype=np.float32).reshape(-1); b = np.asarray(b, dtype=np.float32).reshape(-1)
++        if _iou(a, b) >= 0.40:
++            return False
++        for p, q in ((a, b), (b, a)):
++            cx, cy = (p[0] + p[2]) * .5, (p[1] + p[3]) * .5
++            if q[0] <= cx <= q[2] and q[1] <= cy <= q[3]:
++                return False
++        return True
++    except Exception:
++        return False
++
++
+ def _cdist_norm(a, b):
+     if a is None or b is None:
+         return 9.0
+@@ -3021,6 +3074,147 @@
+                     ta.crossing = True
+                     tb.crossing = True
+ 
++    def _contact_motion(self):
++        """v11.2.176 (SDOS-176): a track in contact with another (crossing) that is missed moves with its PARTNER's velocity when
++        the partner was matched on the last call - in a kiss or a hug the two heads move together - and otherwise with its own
++        velocity halved on every call. Constant-velocity coasting carried a face missed when the heads met (the approach stops
++        dead) on into the partner, or left it behind when the couple moved: the paint drifted, then snapped back."""
++        if not bool(_P.get("contact_follow", 1)):
++            return
++        for s, tr in self.tracks.items():
++            tr._contact_vel = None
++            if not getattr(tr, "crossing", False) or tr.bbox is None or not tr.established:
++                continue
++            best = None
++            for s2, t2 in self.tracks.items():
++                if s2 == s or t2.bbox is None:
++                    continue
++                d = _cdist_norm(tr.match_bbox, t2.match_bbox)
++                if best is None or d < best[0]:
++                    best = (d, t2)
++            if best is None:
++                continue
++            o = best[1]
++            if int(getattr(o, "missed", 0) or 0) == 0 and o.vel_bbox is not None:
++                vk = None
++                if o.vel_kps is not None:
++                    vk = np.broadcast_to(np.asarray(o.vel_kps, np.float32).reshape(-1, 2).mean(0), (5, 2)).copy()
++                tr._contact_vel = (np.asarray(o.vel_bbox, np.float32).copy(), vk)
++            elif int(getattr(tr, "missed", 0) or 0) > 0:
++                if tr.vel_bbox is not None:
++                    tr.vel_bbox = (np.asarray(tr.vel_bbox, np.float32) * 0.5).astype(np.float32)
++                if tr.vel_kps is not None:
++                    tr.vel_kps = (np.asarray(tr.vel_kps, np.float32) * 0.5).astype(np.float32)
++
++    def _partner_seen(self, s):
++        """v11.2.176: is a partner this track is crossing found on this call (missed == 0)?"""
++        tr = self.tracks.get(s)
++        if tr is None or not getattr(tr, "crossing", False):
++            return False
++        for s2, t2 in self.tracks.items():
++            if s2 != s and t2.bbox is not None and getattr(t2, "crossing", False) and int(getattr(t2, "missed", 0) or 0) == 0:
++                return True
++        return False
++
++    def _miss_limit(self, s):
++        """v11.2.176: how many missed calls a track is carried. In contact with a partner that is seen: contact_carry_max
++        (the face is behind or against its partner, which is still there); otherwise trk_max_missed (v11.2.92)."""
++        if (bool(_P.get("contact_follow", 1)) and self._partner_seen(s)
++                and s not in (getattr(self, "_found_elsewhere", None) or ())):
++            return int(_P.get("contact_carry_max", 240) or 240)
++        return int(_P["trk_max_missed"])
++
++    def _partner_side_why(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.176: "ok", or why detection j is not the partly hidden face of slot i in contact (see _partner_side)."""
++        try:
++            others = [i2 for i2 in range(len(slots)) if i2 != i and has_id_all[i2]]
++            if not others:
++                return "no_other_id"
++            i2 = max(others, key=lambda k: sim_all[k][j])
++            if sim_all[i2][j] < sim + 0.10:
++                return "margin"
++            t2 = self.tracks[slots[i2]]
++            r2 = t2.last_hit_bbox if getattr(t2, "last_hit_bbox", None) is not None else t2.match_bbox
++            if r2 is None:
++                return "no_partner_ref"
++            k_own = min(range(len(faces)), key=lambda k: _cdist_norm(r2, faces[k].bbox))
++            if k_own == j:
++                return "is_partner_det"
++            if _cdist_norm(faces[j].bbox, faces[k_own].bbox) >= 1.25:
++                return "far_from_partner"
++            kj, kk = getattr(faces[j], "kps", None), getattr(faces[k_own], "kps", None)
++            if kj is not None and kk is not None and np.size(kj) >= 10 and np.size(kk) >= 10:
++                fwk = max(8.0, float(faces[k_own].bbox[2] - faces[k_own].bbox[0]))
++                dk = np.asarray(kj, np.float32).reshape(-1, 2).mean(0) - np.asarray(kk, np.float32).reshape(-1, 2).mean(0)
++                if float(np.linalg.norm(dk)) < 0.10 * fwk and not _two_boxes(faces[j].bbox, faces[k_own].bbox):
++                    return "duplicate_points"
++            return "ok"
++        except Exception:
++            return "error"
++
++    def _partner_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.176 (SDOS-176, from v11.2.146-148): in contact, detection j is the partly hidden face of slot i: in a side-view kiss
++        the partner fills half of the crop, so it reads as the partner (measured 0.75-0.88) and as itself 0.05-0.20. It must read as
++        the partner by 0.10 or more, not be the partner's own detection, touch it, and not carry the partner's own points."""
++        return self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all) == "ok"
++
++    def _elim_side(self, i, j, s, faces, slots, sim, sim_all, has_id_all):
++        """v11.2.176 (SDOS-176): two people, two faces found. Face k is clearly the other person (0.45 or more, 0.10 above this
++        face), face j is not them (under 0.40), j is nearer to where THIS person was last seen than k is, and j is a whole face
++        (its box at least 0.82 of this person's last width, its points not marked unreliable). Then j is this person, whatever
++        its own score (a side view, a turn, motion blur). A face that is only a sliver behind the other is not taken this way
++        (box under 0.82, or points marked unreliable while it is against its partner)."""
++        try:
++            if not bool(_P.get("two_elim", 1)) or len(slots) != 2 or len(faces) != 2 or not all(has_id_all):
++                return False
++            k = 1 - j; i2 = 1 - i
++            if sim_all[i2][k] < 0.45 or sim_all[i2][k] < sim_all[i2][j] + 0.10 or sim_all[i2][j] >= 0.40:
++                return False
++            tr = self.tracks[s]
++            if not tr.established:
++                return False
++            ref = tr.last_hit_bbox if getattr(tr, "last_hit_bbox", None) is not None else tr.match_bbox
++            if ref is None or _cdist_norm(ref, faces[j].bbox) >= _cdist_norm(ref, faces[k].bbox):
++                return False
++            if bool(getattr(faces[j], "_kps_weak", False)) and getattr(tr, "crossing", False):
++                return False      # (points unreliable against its partner: may be a sliver; away from it: a blurred whole face)
++            w_last = float(ref[2] - ref[0]); w_now = float(faces[j].bbox[2] - faces[j].bbox[0])
++            w_ref = w_last
++            if getattr(tr, "crossing", False):
++                # against its partner: against the widest this face was identified on its own in the last 90 calls, not
++                # only the last frame - a face sliding behind its partner shrinks a little each frame and never fell under
++                # 0.82 of the frame before (measured on the hide clip: 317 px -> 244 px, its points guessed ~40 px off)
++                _h = [w_ for c_, w_ in (getattr(self, "_sure_w", None) or {}).get(s, []) if self._call_n - c_ <= 90]
++                if _h:
++                    w_ref = max(w_ref, max(_h))
++            if w_ref > 1.0 and w_now < 0.82 * w_ref:
++                return False
++            return True
++        except Exception:
++            return False
++
++    def _log_refusal(self, i, j, s, faces, slots, sim, sim_all, has_id_all, xo, touching):
++        """v11.2.176 (log only): why a detection was refused - counts per slot, and the first 60 refusals while the faces touch."""
++        try:
++            if not touching:
++                reason = "not_touching"
++            elif xo < sim + 0.10:
++                reason = "reads_nobody_else"
++            else:
++                reason = self._partner_side_why(i, j, s, faces, slots, sim, sim_all, has_id_all)
++            wc = getattr(self, "why_counts", None)
++            if wc is None:
++                wc = self.why_counts = {}
++            d = wc.setdefault(int(s), {})
++            d[reason] = d.get(reason, 0) + 1
++            smp = getattr(self, "why_sample", None)
++            if smp is None:
++                smp = self.why_sample = []
++            if touching and len(smp) < 60:
++                smp.append((int(getattr(self, "_call_n", 0)), int(s), int(j), reason, round(float(sim), 2), round(float(xo), 2)))
++        except Exception:
++            pass
++
+     def _identity(self, face, track, ref):
+         emb = getattr(face, "normed_embedding", None)
+         if emb is None:
+@@ -3092,6 +3286,8 @@
+         them via TrackState.predicted_face().
+         """
+         self._mark_crossings()
++        self._contact_motion()           # v11.2.176
++        self._found_elsewhere = set()    # v11.2.176: slots whose person is seen elsewhere this call (see the end of assign)
+         slots = sorted(self.tracks.keys())
+         if faces is None or (hasattr(faces, "__len__") and len(faces) == 0):
+             for t in self.tracks.values():
+@@ -3181,6 +3377,7 @@
+         # absolute floor (0.32) and has to be told about these, or it quietly
+         # throws away exactly the faces the rescue just admitted.
+         rescued = set()
++        contact_ok = set()   # v11.2.176: (slot index, face index) kept in contact by where it touches its partner, or by elimination
+         # Every slot's similarity to every face, computed up front. The main
+         # loop below visits slot 0 first, when slot 1's row has not been filled
+         # in yet, and the relative-admission rule needs all of them.
+@@ -3207,13 +3404,35 @@
+                     gate = -1.0          # trust motion, not embeddings
+                 has_id = (getattr(tr, "id_lock", None) is not None) or (tr.emb is not None)
+                 long_gap = int(getattr(tr, "missed", 0) or 0) >= 8 or bool(getattr(tr, "_paste_frozen", False))
++                # v11.2.176 (SDOS-176): is this face touching another one, and does its crop read as another tracked person?
++                # Touching: boxes overlapping, or centres within 0.55 face widths, or - once two known faces are crossing -
++                # the whole contact (the 0.55 line alone switched the decision on and off from frame to frame in a kiss).
++                touching = False
++                for f2 in faces:
++                    if f2 is f:
++                        continue
++                    if _iou(f.bbox, f2.bbox) > 0.02 or _cdist_norm(f.bbox, f2.bbox) < 0.55:
++                        touching = True
++                        break
++                _cf = bool(_P.get("contact_follow", 1))
++                if not touching and _cf and tr.established and tr.crossing:
++                    touching = True
++                _xo = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
++                _reads_other = _cf and _xo >= sim + 0.10
+                 # Gender is not a reason to drop a face. InsightFace often
+                 # calls the man a woman, and the woman a man for a few frames.
+                 # The Detect-frame photo is the identity. A wrong gender tag
+                 # must not skip him or flash her back to the original.
+                 if has_id:
+                     _abs_ok = True
+-                    if long_gap:
++                    if _reads_other and touching and self._partner_side(i, j, s, faces, slots, sim, sim_all, has_id_all):
++                        contact_ok.add((i, j))               # v11.2.176: the partly hidden face of a kiss (reads as the partner)
++                        self.partner_side_n = getattr(self, "partner_side_n", 0) + 1
++                    elif self._elim_side(i, j, s, faces, slots, sim, sim_all, has_id_all):
++                        contact_ok.add((i, j))               # v11.2.176: two people, the other one clearly the other person
++                        if (sim < 0.40) if long_gap else (sim < 0.38 and not (spatial >= 0.55 and sim >= 0.22)):
++                            self.elim_n = getattr(self, "elim_n", 0) + 1     # (log: only faces the identity gate refused)
++                    elif long_gap:
+                         if sim < 0.40:
+                             _abs_ok = False
+                     elif sim < 0.38 and not (spatial >= 0.55 and sim >= 0.22):
+@@ -3227,6 +3446,7 @@
+                         if not self._rel_admit(i, j, s, f, sim, sim_all,
+                                                has_id_all, slots):
+                             self.diag[s]["id_reject"] += 1
++                            self._log_refusal(i, j, s, faces, slots, sim, sim_all, has_id_all, _xo, touching)
+                             continue
+                         rescued.add((i, j))
+                 else:
+@@ -3356,6 +3576,10 @@
+                     continue
+                 if float(np.dot(a1[:k], a2[:k])) < 0.50:
+                     continue
++                # v11.2.176: not two boxes on one face but two people in contact - a side-view face has its partner in half its
++                # crop and reads as them. Kept when one of the pairs passed the contact test and the boxes are two separate faces.
++                if ((i, j) in contact_ok or (i2, j2) in contact_ok) and _iou(faces[j].bbox, faces[j2].bbox) < 0.40:
++                    continue
+                 t1, t2 = self.tracks[slots[i]], self.tracks[slots[i2]]
+                 r1 = refs.get(slots[i]) if refs else None
+                 r2 = refs.get(slots[i2]) if refs else None
+@@ -3518,7 +3742,7 @@
+                 tr.flip_votes = max(0, tr.flip_votes - 1)
+                 continue
+             f = faces[j]
+-            changed = self._belongs_to_other(s, f)
++            changed = self._belongs_to_other(s, f) and (i, j) not in contact_ok    # v11.2.176: a contact pair is not a flip
+ 
+             if changed and tr.established:
+                 # The class docstring specifies that during a crossing "label
+@@ -3557,7 +3781,7 @@
+             if getattr(tr, "id_lock", None) is None and tr.emb is None and not tr.crossing:
+                 good = True
+             elif (getattr(tr, "id_lock", None) is not None and lock_sim < 0.32
+-                    and (i, j) not in rescued):
++                    and (i, j) not in rescued and (i, j) not in contact_ok):
+                 # Below the absolute floor. This used to be an unconditional
+                 # "not this slot's person". The gate above admits faces down to
+                 # 0.22 when they sit where the track expects its person (the
+@@ -3584,6 +3808,18 @@
+             tr.update(f, update_embedding=good, dt_frames=dt_frames, kps_ok=_kps_ok)
+             if changed:
+                 tr.reset_appearance()
++            if lock_sim >= 0.38:
++                # v11.2.176: the widths of this face when it was identified on its own, over the last 90 calls (the sliver
++                # guard of _elim_side)
++                try:
++                    _sw = getattr(self, "_sure_w", None)
++                    if _sw is None:
++                        _sw = self._sure_w = {}
++                    _h = [e for e in _sw.get(s, []) if self._call_n - e[0] <= 90]
++                    _h.append((self._call_n, float(f.bbox[2] - f.bbox[0])))
++                    _sw[s] = _h[-120:]
++                except Exception:
++                    pass
+             result[s] = f
+             # This slot is now TRACKING this face. The confirmation count in
+             # _rel_admit exists to vet a NEW acquisition; a face the slot has
+@@ -3601,6 +3837,23 @@
+             except Exception:
+                 pass
+ 
++        # v11.2.176: the long carry in contact (contact_carry_max) is for a face hidden against its partner. When this person's
++        # own face is found ELSEWHERE in the frame (it walked out from behind the other: a crossing), the carry ends at the
++        # v11.2.92 limit, so the slot is re-acquired by identity as in v11.2.92 instead of staying glued to the partner.
++        try:
++            taken = {id(f_) for f_ in result.values()}
++            for i, s in enumerate(slots):
++                if s in result or not has_id_all[i] or self.tracks[s].missed <= int(_P["trk_max_missed"]):
++                    continue
++                for j, f_ in enumerate(faces):
++                    if id(f_) in taken:
++                        continue
++                    o_ = max([sim_all[i2][j] for i2 in range(len(slots)) if i2 != i and has_id_all[i2]] or [-1.0])
++                    if sim_all[i][j] >= 0.45 and sim_all[i][j] >= o_ + 0.10:
++                        self._found_elsewhere.add(s)
++                        break
++        except Exception:
++            pass
+         self._preserve_identity_on_expire()
+         return result
+ 
+@@ -3613,7 +3866,7 @@
+         """
+         for s in list(self.tracks.keys()):
+             tr = self.tracks[s]
+-            if tr.missed > _P["trk_max_missed"]:
++            if tr.missed > self._miss_limit(s):           # v11.2.176: longer while in contact with a partner that is seen
+                 keep_emb = tr.emb
+                 keep_lock = getattr(tr, "id_lock", None)
+                 nw = TrackState(s)
+@@ -3661,7 +3914,7 @@
+             # is the best case for carrying, not a reason to refuse.
+             if not tr.established:
+                 continue
+-            if tr.missed > _P["trk_max_missed"]:
++            if tr.missed > self._miss_limit(s):           # v11.2.176: longer while in contact with a partner that is seen
+                 continue
+             # v11.1.9: frozen after leaving frame — do not offer for paste.
+             if getattr(tr, "_paste_frozen", False):
+@@ -3754,19 +4007,3 @@
+     
+     return float(np.clip(penalty, 0.0, 1.0))
+ 
+-
+-
+-def _two_boxes(a, b):
+-    """Not part of the 11.2.92 swap. Kept so the later contact code can still tell two faces apart.
+-    The 11.2.92 swap never calls this."""
+-    try:
+-        a = np.asarray(a, dtype=np.float32).reshape(-1); b = np.asarray(b, dtype=np.float32).reshape(-1)
+-        if _iou(a, b) >= 0.40:
+-            return False
+-        for p, q in ((a, b), (b, a)):
+-            cx, cy = (p[0] + p[2]) * .5, (p[1] + p[3]) * .5
+-            if q[0] <= cx <= q[2] and q[1] <= cy <= q[3]:
+-                return False
+-        return True
+-    except Exception:
+-        return False

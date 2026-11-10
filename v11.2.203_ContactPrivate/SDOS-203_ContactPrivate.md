@@ -95,17 +95,95 @@ What stays as in 202:
 
 ## 3. Verification (from the pack's own files)
 
-UNITS
+**Unit checks** (stand-in faces and files, and insightface's own `Face` objects), run from the final files: **44 of 44 pass**.
+- `unit176.py` 12 and `unit176_pipe.py` 14: the 176-179 tracker and contact rules.
+- `unit203.py` 18: the ArcFace skip and the encryption.
+
+- two people far apart: ArcFace skipped on about 2 calls in 3, every face still given to its own person  [40 faces skipped, 20 embedded, 0 wrong assignments]
+- two people close (a kiss, a hug): ArcFace runs on every face  [0 skipped]
+- a third face in the picture: ArcFace runs on every face  [0 skipped]
+- arc_skip 0: every face embedded (v11.2.92)  [0 skipped]
+- a face that is not on its person's last box: no reuse
+- a new shot with the two people swapped: the skip relabels no later than without it  [wrong frames 1, last wrong 1 (no skip: 0, 0)]
+- with insightface's own Face objects the skip works too (normed_embedding comes from embedding)  [16 faces reused]
+- round trip: the decrypted file is identical (9.5 MB, 3 chunks)
+- the sealed file does not contain the plain bytes
+- a changed byte is refused
+- a cut file (last chunk missing) is refused
+- chunks in another order are refused
+- another secret cannot open it
+- saved inputs are sealed files (.enc)  [['face0.jpg.enc', 'face1.jpg.enc', 'patch0_frame.jpg.enc', 'patch0_mask.png.enc', 'resume.json', 'video.mp4.enc']]
+- the result-ZIP password is not saved
+- a restart decrypts the video, faces and patch frames into /tmp, identical to the originals  [/tmp/phoenix_resume/UNIT0203/video.mp4]
+- without the secret a sealed job cannot be resumed (and says so), nothing crashes
+- without the secret: kept as before (plain), still without the ZIP password  [['face0.jpg', 'face1.jpg', 'patch0_frame.jpg', 'patch0_mask.png', 'resume.json', 'video.mp4']]
 
 **The real job, v11.2.202 -> v11.2.203:**
 
-TABLE
+The real job (`bench_pipeline.py`: the Space's own pipeline on CPU, 2 threads, the paste masks recorded), then
+`identity_check.py` and `contact_lag.py` on the output. "Revert" means under 40 % of the usual paint on the person's visible
+face; "weak" 40-70 %; "mix-up" means the face shows the other person's replacement. All 203 numbers are from the final files.
 
-## 4. Limits
+| Clip | v11.2.202 | v11.2.203 |
+|---|---|---|
+| **Side-view kiss**, A behind | revert 44, mix-up 44, weak 10; worst 62 px off | **revert 0, mix-up 0**, weak 12; worst 16 px off |
+| **Side-view kiss**, B in front | revert 35, mix-up 0, weak 15; worst 33 px off | **revert 7**, mix-up 0, weak 15; worst 8 px off |
+| Side-view kiss: the other person's paint on a face | up to 82 % (5 % or more on 92 face-frames) | **at most 4 %** (0 face-frames) |
+| **Harsh step** (180 px in 3 frames) | worst 50 px off, a 41 px jump | **worst 4.8 px, jump 2.9 px** |
+| **Hide** (A a sliver behind B) | A weak 30 | **A weak 3**; no revert or mix-up in either |
+| **Cross** (A walks behind B) | A weak 7, B weak 4; A jump 25 px | A weak 8, B weak 4; A jump 5.7 px |
 
-LIMITS
+**Speed** (the harsh step clip, the same 2 cores, run after each other):
 
-## 5. Install
+| Build | Time | ArcFace passes |
+|---|---|---|
+| v11.2.202 | 531 s | 168 |
+| v11.2.203 with the skip off (it did not act in the first run, see section 4) | 509 s | 168 |
+| v11.2.203 | **498 s** | **74** (94 skipped) |
+
+- The skip saves about 2 % on a clip where the two are apart throughout. ArcFace is only about 4 % of a job here (0.12 s a
+  pass against about 3.3 s of swap work per face per frame).
+- On contact clips it skips little: 8 passes on the kiss, 24 on the cross, 0 on the hide.
+- The rest of the 202 -> 203 difference (about 4 %) is within run-to-run noise.
+- The output quality is the same: the step clip gives identical scores with and without the skip.
+
+**Privacy (unit checks above):**
+- The saved files are sealed (`.enc`), and the plain bytes are not in them.
+- A changed byte, a cut file, swapped chunks or another secret are refused.
+- The ZIP password is not saved.
+- A restart decrypts into `/tmp` and gets identical files.
+- Without the secret, the 202 behaviour is kept, still without the password.
+
+## 4. What did not work first
+
+1. **The first 203 build's ArcFace skip never acted in the real pipeline** (log: "skipped 0"). insightface's `Face` objects
+   derive `normed_embedding` from `embedding` (a read-only property), so setting it raised, and the code caught the error and
+   embedded as before. The stand-in faces of the unit test allowed it, which is why the test passed. Fixed: the skip sets
+   `embedding`, and a unit check now uses insightface's own `Face`. The step clip and the kiss were run again on the fixed
+   files (the table).
+2. **A shot cut with the two people on swapped sides:** the first skip would have kept reusing the wrong identity, because
+   every skipped frame cancelled the tracker's relabelling vote. Fixed with the disagreeing-check stop, before any bench run.
+
+## 5. Limits
+
+1. **Synthetic tests only.** Cut-out faces from public photos, not real people moving. The numbers show the direction and size
+   of a change, not a promise for every clip.
+2. **Speed:** the quality-neutral gain is small (about 2 %, up to about 6 % with run noise). The swap model dominates and
+   cannot be skipped or batched without changing the result. Real speed needs more CPU (an upgraded Space) or fewer swapped
+   frames (a quality choice).
+3. **The ArcFace skip, at a shot cut where the two people land exactly on each other's previous spots:** 1 frame shows the
+   other person's replacement (stand-in test). Without the skip: 0. From the next frame it is right, because a disagreeing
+   check stops the skip for 60 frames. Switch `arc_skip: 0` restores the 11.2.92 behaviour.
+4. **From 176-179 (unchanged here):**
+   - The face in front of a side-view kiss thins on 7 frames (likely the 11.2.92 lip masks, not confirmed).
+   - Smooch: 1 frame wrong at the first touch.
+   - Hug: 2 more weak frames than 11.2.92.
+   - Step clip: one interpolated frame 19 px ahead.
+5. **Encryption protects the saved uploads on the disk, not the running app.** The Space process holds the key while it
+   runs. Anyone who can change the Space's code or settings (a leaked write token) could read new uploads. Results (12 hours)
+   are not encrypted at rest, unless you set a ZIP password. A job resumed after a restart makes no password ZIP.
+
+## 6. Install
 
 - Upload the pack's files. Changed from 202: `swap_engine.py`, `core_pipeline.py`, `phoenix_api_adapter.py`, `config.py`,
   `app.py`. No new package: the AES library (pycryptodomex) comes with `pyzipper`, already in `requirements.txt`.
