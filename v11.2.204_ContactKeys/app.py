@@ -478,7 +478,7 @@ with gr.Blocks(title="Swamitech Phoenix", analytics_enabled=False, css=CSS) as d
             gr.HTML('''<div class="hint">
 • <b>Speed</b>: 640p · Swap=3 (fastest; expression refreshes less often)<br>
 • <b>Balanced</b>: 720p · Swap=1<br>
-• <b>Optimized (Recommended)</b>: 720p · self-managed skip/det · HF Pro CPU default<br>
+• <b>Optimized (Recommended)</b>: 720p · self-managed skip/det · two faces: swap every frame while they touch, every 2nd apart (v11.2.204)<br>
 • <b>Stable</b>: 720p · Swap=1 · re-detect every 1 (face refreshed every frame)<br>
 • <b>Mobile HQ</b>: 680p · Ultra · Swap=1 · no enhancer<br>
 • <b>Quality</b>: 720p · Ultra · two faces: swap every frame while they touch, every 2nd apart (v11.2.204)<br>• <b>HQ</b>: 900p · Ultra · swap every frame<br>

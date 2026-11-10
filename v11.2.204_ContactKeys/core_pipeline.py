@@ -5181,6 +5181,11 @@ def _run_job_body(jid, src_paths, vp, cfg):
             if quality == "Ultra" and _un in ("2", "3"):
                 swap_gap_base = int(_un)
                 logging.info("ULTRA, swap every %d frames while the faces are apart, every frame while they touch", swap_gap_base)
+            elif quality == "Optimized":
+                # v11.2.204: Optimized (the app's recommended preset) with two faces - every 2nd frame apart (was every
+                # 5th), every frame while they touch. One-face Optimized jobs are unchanged.
+                swap_gap_base = 2
+                logging.info("OPTIMIZED, two faces: swap every 2nd frame while apart, every frame while they touch")
 
         # Quality split (1-face). Every output frame is still composited.
         # Ultra: swap 1, det 1 — professional talking-head (do NOT skip).
