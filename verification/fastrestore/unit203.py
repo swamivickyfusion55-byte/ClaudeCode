@@ -78,6 +78,24 @@ def swap_run(skip):
 w92, last92 = swap_run(0); w203, last203 = swap_run(1)
 check("a new shot with the two people swapped: the skip relabels no later than without it",
       last203 <= last92 + 3 and w203 <= w92 + 3, "wrong frames %d, last wrong %d (no skip: %d, %d)" % (w203, last203, w92, last92))
+# the real face objects: insightface's Face (normed_embedding is a read-only property derived from embedding)
+try:
+    from insightface.app.common import Face as _IFace
+    T = E.MultiFaceTracker([0, 1]); took = 0
+    for k in range(12):
+        fs = []
+        for x, e in ((150, ea), (900, eb)):
+            f = _IFace(bbox=np.array([x, 300, x + 200, 500], np.float32), kps=F([x, 300, x + 200, 500], e).kps, det_score=0.9)
+            f._emb_img = "img"; f._emb_kps = f.kps; f._true = e; fs.append(f)
+        took += cp._arc_reuse(fs, T, {0: 0, 1: 1})
+        for f in fs:
+            if f.normed_embedding is None:
+                f.embedding = f._true
+        T.assign(fs, {})
+    ok_ = took > 0 and all(abs(float(np.linalg.norm(f.normed_embedding)) - 1.0) < 1e-3 for f in fs)
+    check("with insightface's own Face objects the skip works too (normed_embedding comes from embedding)", ok_, "%d faces reused" % took)
+except ImportError:
+    check("(insightface not installed: Face check not run)", True)
 # ---- encryption ----------------------------------------------------------------------------------------------------------
 os.makedirs(WORK, exist_ok=True)
 big = os.path.join(WORK, "video_plain.bin"); data = os.urandom(9_500_000)          # 3 chunks of 4 MiB

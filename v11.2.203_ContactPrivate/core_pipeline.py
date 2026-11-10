@@ -4301,8 +4301,12 @@ def _arc_reuse(faces, tracker, smap):
         for k, f in enumerate(faces):
             e = np.asarray(pick[k].emb, np.float32).reshape(-1)
             e = e / max(1e-9, float(np.linalg.norm(e)))
-            f.normed_embedding = e
-            f.embedding = e
+            f.embedding = e                     # (insightface's Face derives normed_embedding from embedding; read-only there)
+            try:
+                if getattr(f, "normed_embedding", None) is None:
+                    f.normed_embedding = e
+            except Exception:
+                pass
             f._emb_img = None
             f._emb_kps = None
             f._arc_reused = True
