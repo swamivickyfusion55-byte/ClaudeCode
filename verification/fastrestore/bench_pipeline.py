@@ -272,6 +272,8 @@ if KW.get("patches") and KW.get("app_mask") == "1" and "nmarks" not in np.load(K
                                                   "mask_b64": _b64.b64encode(_mb.tobytes()).decode(), "t": float(_g["ref_t"])}]})
     print("APP-MASK patches:", _items, _err, flush=True)
     cfg["patches"] = _items or []
+if KW.get("skin"):             # v11.2.205: skin tone per slot, e.g. skin=0.5,0
+    cfg["skin_tone"] = [float(v) for v in KW["skin"].split(",")]
 if KW.get("pg"):               # v11.2.141: the app's M / F per slot (settings.person_gender), e.g. pg=0,1
     cfg["person_gender"] = [None if v in ("", "x") else int(v) for v in KW["pg"].split(",")]
 if KW.get("belly"):            # v11.2.110: lower-belly clear skin

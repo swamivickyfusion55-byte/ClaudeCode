@@ -1,0 +1,1153 @@
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/SDOS-204_ContactKeys.md v11.2.205_SkinTone/SDOS-204_ContactKeys.md
+--- v11.2.204_ContactKeys/SDOS-204_ContactKeys.md	2026-11-10 08:25:32.415750504 +0000
++++ v11.2.205_SkinTone/SDOS-204_ContactKeys.md	2026-11-11 09:06:18.216508640 +0000
+@@ -68,24 +68,27 @@
+ - **What these clips cannot show:** their faces are still photos (no talking, no blinking), so the expression refresh that
+   every-frame swapping buys does not appear in any score. Judge that on real footage.
+ 
+-**Optimized, v11.2.203 (every 5th frame) -> v11.2.204** (the app's Optimized settings: swap Auto, detect Auto, interval 4):
++**Optimized against Ultra** (the final v11.2.204 files; Ultra is the same code as v11.2.203; same bench, 2 threads):
+ 
+-| Clip | v11.2.203 Optimized | v11.2.204 Optimized |
++| Clip | Ultra | Optimized v11.2.204 |
+ |---|---|---|
+-| Harsh step | 334 s, 124 swaps; worst 4.8 px; no revert, mix-up or weak frame | *running at delivery* |
+-| Side-view kiss | 426 s, 130 swaps; A revert 0 / mix-up 0, B revert 7 / mix-up 0; other's paint 4 % | *running at delivery* |
+-| One face, strong side pose, compared with Ultra (an output closer to Ultra's is better) | *queued* | *queued* |
++| Harsh step (two people apart throughout) | 497.5 s, 240 swaps; identity correct 120 + 120, no revert or weak frame; worst 4.8 px | **385.5 s (23 % faster)**, 168 swaps; identity correct 120 + 120, no revert or weak frame; worst 4.8 px (the same placement) |
++| Side-view kiss (in contact most of the clip) | 585.1 s; B: revert 7 / weak 15, A: weak 12; no mix-up | **492.5 s (16 % faster)**, every frame in contact swapped (101 contact + 17 side-pose swaps); B: revert 7 / weak 15, no mix-up - the same as Ultra |
++| One face, a strong side pose on every frame | 62.3 s and 81.9 s (two runs) | 78.2 s, 87.3 s and 77.1 s (three runs): every frame is a side pose, so it swaps every frame like Ultra |
+ 
+-v11.2.203's Optimized scored the same as Ultra on these still-photo clips while swapping every 5th frame. 204's Optimized
+-swaps more often (every 2nd frame apart, every frame in contact or a side pose), so it will be slower than 203's Optimized and
+-faster than Ultra wherever the faces are apart and frontal. The numbers follow when the runs finish.
++- Apart and frontal, Optimized is about a fifth faster than Ultra with the same scores.
++- In contact it swaps every frame, like Ultra. It was still 16 % faster on the kiss clip, from its lighter encoding and the
++  ArcFace skip (Optimized only).
++- On the all-side-pose clip it does the same swaps as Ultra. The runs differed by up to 25 s from one run to the next on this
++  shared CPU: that spread, not a slowdown, is the difference between the columns (an earlier reading of "Optimized slower than
++  Ultra" was this noise; re-runs confirmed it).
+ 
+ ## 3. Limits
+ 
+ 1. **Synthetic tests only, and still faces.** The expression refresh (mouth, eyes) is not measured by any score here.
+-2. **Optimized is now slower than v11.2.203's Optimized**, by design: every 2nd frame instead of every 5th, and every frame
+-   in contact or a side pose. Against Ultra it saves time only where the faces are apart and frontal (about 20 % on the
+-   step clips). It saves nothing in a kiss or a hug, where it swaps every frame like Ultra.
++2. **Against Ultra, Optimized saves time mainly where the faces are apart and frontal** (23 % on the step clip). In a kiss or
++   a hug it swaps every frame like Ultra; the 16 % it still saved on the kiss clip comes from its lighter encoding and the
++   ArcFace skip, not from fewer swaps.
+ 3. **Optimized keeps its other settings:**
+    - a lighter encoding (CRF 20, where Ultra uses 18);
+    - audio at 192k, where Ultra uses 320k;
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/SDOS-205_SkinTone.md v11.2.205_SkinTone/SDOS-205_SkinTone.md
+--- v11.2.204_ContactKeys/SDOS-205_SkinTone.md	1970-01-01 00:00:00.000000000 +0000
++++ v11.2.205_SkinTone/SDOS-205_SkinTone.md	2026-11-11 09:16:10.618611262 +0000
+@@ -0,0 +1,166 @@
++# SDOS-205 — SkinTone: brighten or darken the chosen people's skin, whole body
++
++**Pack:** v11.2.205, which is v11.2.204 with the skin tone added. Engine `aequus-1.2.205-skintone`. The face swap is unchanged
++(Ultra and Optimized exactly as SDOS-204). **App:** Phoenix Mobile 1.2.51 (APK Builder 1.2.51, versionCode 171) adds the step.
++
++**Asked:**
++- "Also add a beautiful step and preview brighten or darken the skin tone for whole body"
++- "The skin tone need to be done for selected character(s) only."
++
++All tests use synthetic media: insightface's public sample photo, and two-person scenes layered from cut-outs of it. No user
++footage was looked at.
++
++---
++
++## 1. What you get
++
++**In the app: step 04 "Skin tone"**, between Replacement faces and Output & quality.
++- One row per replacement face, with that person's face, a slider from **Darker** to **Brighter** (a deep-to-light skin
++  track, steps of 5 %), and a chip that reads "Natural", "+25 % brighter" or "15 % darker". Tap the chip to go back to Natural.
++- **Preview at N %** tones the frame picked in step 01 on the Space, exactly as the video will be done.
++- The result shows **Before | After** with a line to drag (or tap). Each toned person is tagged at their face.
++- The setting goes with the job. **All natural** resets it. An older Space ignores it.
++
++**On the Space:** every finished frame (after the face swap) is changed for the chosen people only:
++- their face (the swapped face included), neck, arms, hands and legs;
++- nothing else: not the other people, not clothes or hair, not the background.
++
++With every slider at Natural (the default) nothing runs and nothing changes: Ultra is exactly SDOS-204's Ultra.
++
++## 2. How it decides what is the chosen person's skin
++
++1. **Skin.** Google MediaPipe's multiclass selfie segmenter (classes: background / hair / body skin / face skin / clothes /
++   other) runs once per frame, on a square around the chosen people.
++2. **Whose body.** MediaPipe's interactive segmenter (MagicTouch) is given a point on each tracked person's face. It returns that
++   person — head, body, arms, hands — as one object. One call per tracked person near the chosen ones.
++   - Inside a person's own object no pixel can be background, so there skin is weighed against hair and clothes only. This
++     catches shaded arms the skin model took for background.
++3. **Where two people's objects overlap** (a hug, a hand on the other person), the way from each face decides:
++   - the length of the way to the pixel over the picture;
++   - background is very costly to cross, and each step between skin and not-skin costs about a face size, as does a visible
++     edge where one limb lies on another;
++   - a soft body-shaped territory and each person's own skin colour (from their cheeks) weigh in too.
++4. **Faces always belong to their own person.** Another person's face is never changed: 0.00 levels in every test below.
++5. **The change itself** works on lightness (Lab):
++   - **Brighter** lifts the mid-tones and keeps the highlights: +100 % takes mid-grey skin from 128 to 168.
++   - **Darker** scales lightness down, so shadows keep their detail, and deepens the colour a little, like a natural tan:
++     -100 % takes 128 to 77.
++   - The hue is kept (within 3 degrees).
++6. **In a video:**
++   - The mask is smoothed over time: a still part keeps its mask, a moving part takes the new one at once.
++   - It is fitted to the picture's own edges with a guided filter, and reset at a shot cut.
++   - A chosen person lost for a few frames keeps their tone for 12 frames, fading, so it never flashes off and on.
++
++**Who is #1:** the person the job puts replacement face #1 on.
++- The job matches people by the Detect references; without references, by each replacement face's gender.
++- The Preview matches them the same way. The app sends it the references and the replacement faces.
++- Only two people of the same gender with no Detect references can be matched differently. The Preview's message then says how
++  it matched them, and capturing each person in Detect (step 02) removes the doubt.
++
++**Models:** both download on first use from Google's model store (22 MB, checksums checked) into the Space's model folder.
++Without them the step still works, in a weaker way:
++- skin is found by the colour of each person's own face skin;
++- ownership comes from the way from each face.
++
++The log says which method ran.
++
++## 3. Verification
++
++**Unit checks:** `verification/skintone/unit205.py`, 30 of 30 pass. They cover:
++- the setting (the list, 1-based dicts, out-of-range values, junk);
++- the tone curve (direction, black and white kept, no banding, hue kept);
++- the colour-only fallback (the chosen person's face and arm change; the other person, a red shirt and the wall do not);
++- hold and fade, the shot cut, broken records (the frame is returned unchanged);
++- the adapter's matching (references, gender, left to right);
++- a job resumed after a restart keeps its skin tone.
++
++The earlier suites pass on this pack: `unit176` 12, `unit176_pipe` 14, `unit203` 18, `unit204` 7.
++
++**Six people at a table** (insightface's sample photo, each person chosen in turn, +60 %):
++
++| | Result |
++|---|---|
++| The chosen person's face | brighter by 16.1 to 18.8 levels |
++| The other five faces | 0.00 levels, for every choice |
++| Arms | each arm goes to its own person, including an arm reaching down to the table past another person's head |
++
++On this crowded photo two arms that lie against another person are shared, and get part of the change (the next table
++measures this exactly).
++
++**Two people layered with known owners** (`make_pair.py`: a man behind a woman, and two women whose arms meet; 48 frames each,
++the front person sliding across the back one; `eval_pair.py`, +60 %). The numbers are the share of the full change each part
++received:
++
++| Scene, chosen | Chosen person's skin | Other person's skin | Chosen person's clothes / hair | Background | Frame-to-frame |
++|---|---|---|---|---|---|
++| Man and woman, the man | 0.86 | 0.047 | 0.08 | 0.001 | 0.002 |
++| Man and woman, the woman | 0.78 | 0.002 | 0.14 | 0.001 | 0.009 |
++| Two women, the one behind | 0.68 | 0.079 | 0.10 | 0.000 | 0.008 |
++| Two women, the one in front | 0.71 | 0.027 | 0.12 | 0.001 | 0.018 |
++| **Mean** | **0.76** | **0.039** | **0.11** | **0.001** | |
++
++- The other person gets **4 % on average**. Almost all of it is the one arm where the front woman's hand reaches across and
++  touches the other woman's hand. On the closest frame that arm gets about a fifth of the change.
++- "Chosen person's clothes / hair" is mostly the edge of the reference skin map itself (made at 256 px for the whole photo),
++  not visible tint. On the plain test shapes, clothes and wall measure 0.00.
++
++**Through the real Space app** (`app_check205.py`: `app.py` on Gradio 4.44.1; the face-swap models stubbed; MediaPipe and
++scikit-image real; called with `gradio_client` as the phone app calls it). On both scenes:
++- `phoenix_skin_preview` is listed and answers with the toned frame, the untouched frame and JSON.
++- Brighter #1 on the man-and-woman scene: +14.6 levels on his skin, the woman's skin unchanged (0.00).
++- Darker #2: -36.4 levels on her skin, his unchanged (-0.02).
++- With the replacement faces sent (#1 a woman's face), #1 is the woman: +13.4 levels, the man +0.01. That is how the job paired
++  them.
++- On the two-women frame of closest contact the other woman changes by 21 % of the chosen one's change, and 6 % for darker.
++- A frame with no face gives a clear message.
++
++**The real job** (`bench_pipeline.py`, the man-and-woman scene, 48 frames, Ultra, two faces swapped, 2 threads):
++
++| | Ultra | Ultra + skin tone on person #1 |
++|---|---|---|
++| Time | 120.4 s | 142.2 s (**+18 %**; 0.35 s a frame) |
++| Faces | swapped on 48 of 48 frames | the same |
++| Skin | - | person #1 (the woman, as replacement #1 was put on her) +8.1 levels; the man +0.1; background +0.04 |
++
++The 0.35 s a frame is made up of:
++- the skin model, 0.12 s;
++- the person model, 0.16 s for the two people;
++- the "way" step, 0.06 s on the 28 frames where the two overlapped.
++
++**App 1.2.51** (no Android SDK here):
++- The new step (`SkinToneStep.kt`) compiles with Kotlin 2.0.21 and its Compose compiler against the Compose 1.7 API.
++- The new view-model code compiles together with the app's real `HfApi.kt` and `HfSettings.kt`.
++- `MainActivity.kt` gains no new compile error.
++- A deliberate mistake was caught each time, so the check is real.
++- Not run on a phone: the APK Builder is the real build.
++
++## 4. Limits
++
++1. **Two people's skin touching** (a hand on the other's arm, cheek to cheek outside the face) can get part of the change:
++   4 % on average in the tests, about a fifth on the one contested arm. Faces never. Preview first: it shows exactly what the
++   video will do.
++2. **Cost:** about 0.35 s a frame with two people near each other (+18 % on Ultra in the test). It runs only when a slider is
++   off Natural.
++3. **Very small people** (a face under about 40 px in a wide shot) are segmented coarsely: the skin model works at 256 px.
++4. **The models come from Google's model store on first use.** If the Space cannot reach it, the colour-only method runs and
++   the log says so.
++5. **Synthetic tests only.** Still photos layered and moved: no real motion blur, changing light or real hugs.
++6. **Who #1 is:** two people of the same gender with no Detect references may be matched differently in the Preview and the
++   video. Capture each person in Detect.
++7. **People without a replacement face** (bystanders) cannot be chosen, and their skin is not changed.
++
++## 5. Install
++
++**Space:** upload the pack's files. New: `skin_tone.py`. Changed:
++- `core_pipeline.py`: the frame hook and the setting;
++- `phoenix_api_adapter.py`: the setting and `phoenix_skin_preview`;
++- `app.py`: the endpoint;
++- `config.py`, `swap_engine.py`: version strings.
++
++The log at start reads `Phoenix v11.2.205`. A job with a skin tone logs `SKIN-TONE: person #1 brighter 50%` at the start, and at
++the end `SKIN-TONE: skin: MediaPipe multiclass selfie segmenter; person: MediaPipe MagicTouch; N frames, ... ms a frame ...`.
++
++**App:** upload the APK Builder 1.2.51 pack (every file, including `source.zip`). The page title must read "Phoenix Mobile 1.2.51
++Builder". Build, then install over 1.2.50.
++
++SDOS-204 in this pack now compares Optimized only with Ultra, with the final numbers.
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/app.py v11.2.205_SkinTone/app.py
+--- v11.2.204_ContactKeys/app.py	2026-11-10 08:06:38.893573728 +0000
++++ v11.2.205_SkinTone/app.py	2026-11-11 08:50:31.103147552 +0000
+@@ -21,7 +21,7 @@
+ # Stable machine API for Phoenix Mobile / external clients.
+ from phoenix_api_adapter import (
+     api_submit_video, api_job_status, api_download, api_cancel,
+-    api_detect_video_frame, _jpeg_rgb, api_patch_preview,
++    api_detect_video_frame, _jpeg_rgb, api_patch_preview, api_skin_preview,
+ )
+ 
+ # Import pipeline (models, jobs, swap, temporal, device helpers, …)
+@@ -655,6 +655,13 @@
+         _api_patch_btn = gr.Button("API Patch Preview")
+         _api_patch_out = gr.File(type="filepath", label="API patch preview")
+         _api_patch_msg = gr.Textbox(label="API patch preview status")
++        # v11.2.205 (SDOS-205): the app's Skin tone step - [0] the video, [1] a JSON string -> toned frame, original, JSON
++        _api_skin_video = gr.File(type="filepath", label="API skin video")
++        _api_skin_settings = gr.Textbox(label="API skin settings JSON")
++        _api_skin_btn = gr.Button("API Skin Preview")
++        _api_skin_out = gr.File(type="filepath", label="API skin preview")
++        _api_skin_orig = gr.File(type="filepath", label="API skin original")
++        _api_skin_msg = gr.Textbox(label="API skin preview status")
+         _api_file_out = gr.File(label="API output file")
+ 
+         # Image API compatibility controls. These remain hidden and exist only
+@@ -697,6 +704,9 @@
+     _api_submit_btn.click(api_submit_video, inputs=[_api_video, _api_face1, _api_face2, _api_face3, _api_face4, _api_settings], outputs=[_api_json_out], api_name="phoenix_submit_video")
+     _api_patch_btn.click(api_patch_preview, inputs=[_api_patch_image, _api_patch_mask], outputs=[_api_patch_out, _api_patch_msg],
+                          api_name="phoenix_patch_preview", concurrency_limit=1)
++    _api_skin_btn.click(api_skin_preview, inputs=[_api_skin_video, _api_skin_settings],
++                        outputs=[_api_skin_out, _api_skin_orig, _api_skin_msg],
++                        api_name="phoenix_skin_preview", concurrency_limit=1)
+     _api_detect_btn.click(api_detect_video_frame, inputs=[_api_detect_video, _api_detect_pct], outputs=[_api_detect_image, _api_detect_msg, _api_detect_face1, _api_detect_face2, _api_detect_face3, _api_detect_face4], api_name="phoenix_detect_video_frame")
+     # queue=False: these three are near-instant (a dict lookup, serving an
+     # already-rendered file, setting a cancel flag) and were previously
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/config.py v11.2.205_SkinTone/config.py
+--- v11.2.204_ContactKeys/config.py	2026-11-10 08:06:38.894057320 +0000
++++ v11.2.205_SkinTone/config.py	2026-11-11 09:05:28.709502722 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.204"
+-BUILD = "ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.205"
++BUILD = "SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/core_pipeline.py v11.2.205_SkinTone/core_pipeline.py
+--- v11.2.204_ContactKeys/core_pipeline.py	2026-11-10 08:19:54.208186659 +0000
++++ v11.2.205_SkinTone/core_pipeline.py	2026-11-11 08:50:24.285755564 +0000
+@@ -5818,6 +5818,20 @@
+             logging.exception("manual patch planning failed - the job continues without it")
+             _patch_tracks = []
+ 
++        # v11.2.205 (SDOS-205): the skin tone of the chosen people, on every finished frame
++        _skin = None
++        try:
++            import skin_tone as _STN
++            _amts = _STN.parse_amounts(cfg.get("skin_tone"))
++            if _amts:
++                _skin = _STN.SkinTone(_amts)
++                logging.info("SKIN-TONE: %s", ", ".join(
++                    "person #%d %s %d%%" % (s_ + 1, "brighter" if a_ > 0 else "darker", round(abs(a_) * 100))
++                    for s_, a_ in sorted(_amts.items())))
++        except Exception:
++            logging.exception("skin tone setup failed - the job continues without it")
++            _skin = None
++
+         FRAME_Q_MAX = max(48, min(chunk_n * 2, 240))
+         RESULT_Q_MAX = max(48, min(chunk_n * 2, 240))
+         frame_q = queue.Queue(maxsize=FRAME_Q_MAX)
+@@ -7738,7 +7752,8 @@
+                     # Genuinely nothing tracked here (before the first face
+                     # appears, or long after the last one left), and nothing
+                     # still fading out either.
+-                    writer_ok = _safe_result_put(frm)
++                    writer_ok = _safe_result_put(frm if _skin is None else
++                                                 _skin.apply(frm, frm, {}, cut=int(g) in _cut_gs))
+                     if writer_ok: stats["frames_out"] += 1
+                     continue
+ 
+@@ -7897,6 +7912,8 @@
+                 except Exception:
+                     pass
+                 stats["tl"].append(sum(1 << int(_s) for _s in _pn))
++                if _skin is not None:                                        # v11.2.205
++                    out = _skin.apply(out, frm, records, cut=int(g) in _cut_gs)
+                 writer_ok = _safe_result_put(out)
+                 if writer_ok: stats["frames_out"] += 1
+ 
+@@ -8109,6 +8126,8 @@
+                 logging.info("MOTION-KEYS: %d extra swaps for fast motion (%d for travel, %d for change of look) out of %d frames checked; "
+                              "peak change per frame %.2f",
+                              int(_FMK.extra), int(_FMK.by_move), int(_FMK.by_change), int(_FMK.seen), float(_FMK.peak_change))
++            if _skin is not None:
++                logging.info(_skin.summary())
+             if quality == "Optimized":
+                 logging.info("SMART-KEYS (Optimized): %d extra swaps because two faces touched, %d because a face was turned "
+                              "more than about 40 degrees (every frame is swapped then); one face: %d chunks detected and "
+@@ -8702,7 +8721,7 @@
+     return "cpu" if ("cpu only" in s or s.strip() == "cpu") else "gpu"
+ 
+ 
+-def submit_video(s1, s2, s3, s4, vid, secs, fps, res, quality, enhancer, swap_n, det_n, det_int, password, refs, trim_start, trim_end, face_mode, enhance_scope, device_mode, face_enhance=False, request: gr.Request = None, smooth_motion: str = "Fast (blend)", patches=None):
++def submit_video(s1, s2, s3, s4, vid, secs, fps, res, quality, enhancer, swap_n, det_n, det_int, password, refs, trim_start, trim_end, face_mode, enhance_scope, device_mode, face_enhance=False, request: gr.Request = None, smooth_motion: str = "Fast (blend)", patches=None, skin_tone=None):
+     if vid is None:
+         return "❌ Upload a target video", _hist_html(), gr.update(choices=_get_done_choices()), _video_progress_html(), _device_status_text()
+     if s1 is None and s2 is None and s3 is None and s4 is None:
+@@ -8765,7 +8784,8 @@
+                device_mode=pref,
+                use_gpu=use_gpu,
+                smooth_motion=(smooth_motion or "Fast (blend)"),
+-               patches=patches or None)
++               patches=patches or None,
++               skin_tone=skin_tone or None)                      # v11.2.205 (SDOS-205)
+ 
+     try:
+         _save_ui_session(
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/phoenix_api_adapter.py v11.2.205_SkinTone/phoenix_api_adapter.py
+--- v11.2.204_ContactKeys/phoenix_api_adapter.py	2026-11-10 07:45:10.884935718 +0000
++++ v11.2.205_SkinTone/phoenix_api_adapter.py	2026-11-11 09:13:06.147203284 +0000
+@@ -95,7 +95,7 @@
+         "secs", "fps", "res", "quality", "enhancer", "swap_n", "det_n",
+         "det_int", "password", "trim_start", "trim_end", "face_mode",
+         "enhance_scope", "device_mode", "smooth_motion", "target_refs",
+-        "face_enhance",
++        "face_enhance", "skin_tone",
+     }
+     return {k: s[k] for k in allowed if k in s}
+ 
+@@ -616,6 +616,7 @@
+         None,
+         smooth_motion=defaults.get("smooth_motion") or "Fast (blend)",
+         patches=patches or None,
++        skin_tone=_skin_setting(defaults.get("skin_tone")),
+     )
+ 
+     message = str(result[0]) if result else ""
+@@ -677,6 +678,153 @@
+         return None
+ 
+ 
++def _skin_setting(raw):
++    """v11.2.205: the app's skin_tone ([a1..a4], -1..1 per replacement slot; 0 = unchanged) -> a plain list, or None."""
++    try:
++        import skin_tone as _STN
++        a = _STN.parse_amounts(raw)
++    except Exception:
++        logging.exception("skin_tone setting")
++        return None
++    if not a:
++        return None
++    out = [0.0, 0.0, 0.0, 0.0]
++    for k, v in a.items():
++        out[int(k)] = round(float(v), 3)
++    logging.info("skin tone: %s", out)
++    return out
++
++
++def _slot_people(faces, refs, slots, fill=True):
++    """Detected faces -> {slot: face}: by the Detect-frame references where given (as the job binds them), the rest left to
++    right in slot order (the job's own positional start)."""
++    faces = list(faces or [])
++    out, used = {}, set()
++    if refs:
++        pairs = []
++        for s_ in slots:
++            r = refs[s_] if s_ < len(refs) else None
++            if r is None:
++                continue
++            for i, f in enumerate(faces):
++                e = getattr(f, "normed_embedding", None)
++                if e is not None:
++                    pairs.append((float(np.dot(np.asarray(r, np.float32).ravel(), np.asarray(e, np.float32).ravel())), s_, i))
++        for sim, s_, i in sorted(pairs, reverse=True):
++            if sim < 0.25 or s_ in out or i in used:
++                continue
++            out[s_], _ = faces[i], used.add(i)
++    if not fill:
++        return out
++    rest = [i for i in range(len(faces)) if i not in used]
++    for s_ in slots:
++        if s_ not in out and rest:
++            out[s_] = faces[rest.pop(0)]
++    return out
++
++
++def _bind_people(faces, refs, slots, src_gender=None):
++    """Detected faces -> ({slot: face}, how), the way the job pairs them: Detect references first (ArcFace), then each
++    replacement face's gender against the detected person's gender (the job's tracker gets the same slot genders), then the
++    rest left to right. Two people of the same gender without references are paired left to right here, while the job pairs
++    them at the start of the clip - capture them in Detect to be sure."""
++    import swap_engine as _E
++    faces = list(faces or [])
++    has_refs = bool(refs) and any(r is not None for r in refs)
++    out = _slot_people(faces, refs, slots, fill=False) if has_refs else {}
++    used = {id(f) for f in out.values()}
++    by_gender = False
++    for s_ in slots:
++        if s_ in out:
++            continue
++        g = (src_gender or {}).get(s_)
++        if g not in (0, 1):
++            continue
++        cand = [f for f in faces if id(f) not in used and _E._det_gender(f) == g]
++        if cand:
++            out[s_] = cand[0]
++            used.add(id(cand[0]))
++            by_gender = True
++    rest = [f for f in faces if id(f) not in used]
++    for s_ in slots:
++        if s_ not in out and rest:
++            out[s_] = rest.pop(0)
++    how = "Detect references" if has_refs else ("the replacement faces' gender" if by_gender else "left to right")
++    return out, how
++
++
++def api_skin_preview(video, settings=None):
++    """v11.2.205 (SDOS-205): the Skin tone step's Preview. One frame of the video (settings.position_pct, as Detect) with the
++    chosen people's skin brightened or darkened exactly as the job does it (skin_tone.SkinTone on that frame).
++    settings: {"position_pct": 0-100, "skin_tone": [a1, a2, a3, a4] (-1..1, 0 = unchanged), "target_refs": [...] (as the
++    job), "faces": [...] (the replacement faces, uploaded paths or null: people are then matched as the job matches them),
++    "slots": [1, 2] (the replacement slots in use; default: one per face found)}
++    -> (the toned frame, the same frame untouched, JSON: ok, people [{slot, box (0-1), amount, skin}], ms, ...)."""
++    t0 = time.time()
++    video = _coerce_video(video)
++    if video is None:
++        return None, None, json.dumps({"ok": False, "error": "Upload a target video first"})
++    try:
++        import skin_tone as _STN
++        raw = _settings_dict(settings)
++        amounts = _STN.parse_amounts(raw.get("skin_tone"))
++        pos = float(raw.get("position_pct", raw.get("frame_percent", 0)) or 0)
++        cp._load()
++        frm, idx, total = cp._grab_frame(video, pos)
++        if frm is None:
++            return None, None, json.dumps({"ok": False, "error": f"Could not read the frame at {pos:.0f}%"})
++        faces = cp._sort_faces_left(cp._fa_get(frm))[:4]
++        if not faces:
++            return None, None, json.dumps({"ok": False, "error": "No face found on this frame - pick a frame where the "
++                                                                  "people's faces are visible"})
++        slots = []
++        for v in (raw.get("slots") or []):
++            try:
++                if 1 <= int(v) <= 4 and int(v) - 1 not in slots:
++                    slots.append(int(v) - 1)
++            except (TypeError, ValueError):
++                pass
++        if not slots:
++            slots = list(range(len(faces)))
++        refs = _load_target_refs(raw.get("target_refs")) if raw.get("target_refs") else []
++        src_gender = {}
++        for k, p in enumerate(list(raw.get("faces") or [])[:4]):
++            try:
++                if isinstance(p, dict):
++                    p = p.get("path") or p.get("name")
++                im = cp._as_bgr_image(str(p)) if p and os.path.isfile(str(p)) else None
++                sf = cp._cached_source_face(im) if im is not None else None
++                if sf is not None:
++                    import swap_engine as _E
++                    src_gender[k] = _E._det_gender(sf)
++            except Exception:
++                logging.exception("skin preview: replacement face %d", k + 1)
++        if src_gender:
++            try:
++                cp._embed_faces(faces)
++            except Exception:
++                pass
++        bound, how = _bind_people(faces, refs, slots, src_gender)
++        people = {s_: dict(kps=np.asarray(f.kps, np.float32), bbox=np.asarray(f.bbox, np.float32)) for s_, f in bound.items()}
++        out, masks, info = _STN.preview(frm, people, amounts)
++        H, W = frm.shape[:2]
++        res = {"ok": True, "frame": int(idx), "frames": int(total), "width": int(W), "height": int(H),
++               "people": [{"slot": int(s_) + 1,
++                           "box": [round(float(v), 4) for v in (people[s_]["bbox"] / np.array([W, H, W, H], np.float32))],
++                           "amount": round(float(amounts.get(s_, 0.0)), 3),
++                           "skin": round(float(masks[s_].mean()), 4) if s_ in masks else 0.0}
++                          for s_ in sorted(people)],
++               "not_found": [int(s_) + 1 for s_ in amounts if s_ not in people],
++               "by": how,
++               "backend": info.get("backend"), "ms": int((time.time() - t0) * 1000), "version": VERSION_FULL}
++        logging.info("phoenix_skin_preview: %s", {k: v for k, v in res.items() if k != "people"})
++        return (_jpeg_rgb(cv2.cvtColor(out, cv2.COLOR_BGR2RGB), "skinprev"),
++                _jpeg_rgb(cv2.cvtColor(frm, cv2.COLOR_BGR2RGB), "skinorig"), json.dumps(res))
++    except Exception as exc:
++        logging.exception("api_skin_preview")
++        return None, None, json.dumps({"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:180]}"})
++
++
+ def api_detect_video_frame(video, position_pct=0):
+     """Detect up to four faces at a selected video position for mobile frame picking."""
+     video = _coerce_video(video)
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/skin_tone.py v11.2.205_SkinTone/skin_tone.py
+--- v11.2.204_ContactKeys/skin_tone.py	1970-01-01 00:00:00.000000000 +0000
++++ v11.2.205_SkinTone/skin_tone.py	2026-11-11 09:07:23.512470707 +0000
+@@ -0,0 +1,630 @@
++"""v11.2.205 SkinTone (SDOS-205): brighten or darken the skin of the chosen people only - face, neck, arms, hands, legs.
++
++How a frame is changed
++  1. Skin: Google MediaPipe's multiclass selfie segmenter (selfie_multiclass_256x256: background / hair / body skin /
++     face skin / clothes / other) gives each pixel's chance of being skin. Once per frame, on a square around the chosen people.
++  2. Whose body: MediaPipe's interactive segmenter (MagicTouch), given a point on a person's face, returns that person -
++     head, body, arms, hands - as one object. One call per tracked person in that square.
++     Inside a person's own object no pixel is background, so skin is weighed against hair and clothes only there.
++  3. Where two people's objects overlap (a tight hug), the way from each face decides: the length of the way to the pixel over
++     the picture, where background is very costly and every step between skin and not-skin costs about a face size, plus a
++     soft body-shaped territory and each person's own skin colour (sampled on their cheeks).
++  4. Faces always belong to their own person: another person's face is never changed.
++  5. The change: lightness in Lab. Brighter lifts the mid-tones (a gamma curve, highlights kept); darker scales lightness down
++     and deepens the colour a little, as a natural tan. Hue is kept.
++  6. In a video the mask is smoothed over time (a still part keeps its mask, a moving part takes the new one at once), refined
++     to the picture's own edges (guided filter), and reset at a shot cut.
++  Without MagicTouch, step 3 alone decides whose skin it is; without the multiclass model, skin is found by the colour of each
++  person's own face skin. Both are logged.
++
++amounts: {slot: a}, a in [-1, 1]; slot 0 is the app's replacement slot #1. 0 = unchanged.
++"""
++import hashlib
++import logging
++import os
++import threading
++import time
++import urllib.request
++
++import cv2
++import numpy as np
++
++_BASE = "https://storage.googleapis.com/mediapipe-models/"
++MODELS = {
++    "skin": dict(name="selfie_multiclass_256x256.tflite",
++                 url=_BASE + "image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite",
++                 sha256="c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0", size=16371837),
++    "person": dict(name="magic_touch.tflite",
++                   url=_BASE + "interactive_segmenter/magic_touch/float32/1/magic_touch.tflite",
++                   sha256="e24338a717c1b7ad8d159666677ef400babb7f33b8ad60c4d96db4ecf694cd25", size=6227884),
++}
++
++SEG_SIDE = 256          # the skin model's input size
++PERSON_SIDE = 512       # the square given to the person model
++GRID_LONG = 480         # the working grid: the frame's long side in pixels
++EPS_BG = 0.02           # "nobody's" share: skin no tracked person reaches cheaply stays as it is
++TAU = 3.0               # a way of TAU face sizes over skin leaves 1/e of a person's claim
++BG_COST = 25.0          # a step through background costs this many steps over skin
++SKIN_STEP = 1.0         # a step between skin and not-skin costs this many face sizes
++EDGE_DIV = 120.0        # a visible edge of EDGE_DIV levels costs one face size (one limb lying on another)
++OVERLAP = 0.25          # two people's objects overlapping more than this somewhere: the way from each face decides there
++OVERLAP_MODE = "ways"   # how an overlap is shared: "ways" (way from each face), "prior" (body shape), "share" (person model)
++REFINE_EPS = 0.02       # the edge refinement's smoothness (guided filter eps, in 0-1 grey levels)
++HOLD_FRAMES = 12        # a chosen person not found for a few frames keeps their last place, fading out
++_DL_LOCK = threading.Lock()
++_TL = threading.local()
++_STATE = {"skin": "", "person": ""}      # why a model is not used ("" = fine / not tried)
++
++
++def parse_amounts(raw):
++    """[a1, a2, a3, a4] (index = slot), or {"1": a, ...} (1-based app slot numbers) -> {slot0: a} with a in [-1, 1]."""
++    out = {}
++    try:
++        if isinstance(raw, str) and raw.strip():
++            import json
++            raw = json.loads(raw)
++        if isinstance(raw, (list, tuple)):
++            items = [(i, v) for i, v in enumerate(raw[:4])]
++        elif isinstance(raw, dict):
++            items = []
++            for k, v in raw.items():
++                ks = str(k).strip().lower().replace("slot", "").replace("#", "")
++                if ks.isdigit() and 1 <= int(ks) <= 4:
++                    items.append((int(ks) - 1, v))
++        else:
++            items = []
++        for i, v in items:
++            try:
++                a = float(v)
++            except (TypeError, ValueError):
++                continue
++            if not np.isfinite(a):
++                continue
++            a = float(np.clip(a, -1.0, 1.0))
++            if abs(a) >= 0.005:
++                out[int(i)] = a
++    except Exception:
++        logging.warning("skin_tone: unreadable setting %r - skin tone off", str(raw)[:80])
++        return {}
++    return out
++
++
++# ---- the models ----------------------------------------------------------------------------------------------------------
++def _model_dirs():
++    ds = [os.environ.get("PHOENIX_MODEL_DIR", ""), "/data/phoenix_models", os.path.expanduser("~/.phoenix_models"),
++          "/tmp/phoenix_models"]
++    return [d for d in ds if d]
++
++
++def _sha256(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def model_path(kind, download=True):
++    m = MODELS[kind]
++    env = os.environ.get("PHOENIX_SKIN_MODEL" if kind == "skin" else "PHOENIX_PERSON_MODEL", "").strip()
++    if env and os.path.isfile(env):
++        return env
++
++    def _have():
++        for d in _model_dirs():
++            p = os.path.join(d, m["name"])
++            if os.path.isfile(p) and os.path.getsize(p) == m["size"]:
++                return p
++        return None
++    p = _have()
++    if p or not download:
++        return p
++    with _DL_LOCK:
++        p = _have()
++        if p:
++            return p
++        for d in _model_dirs():
++            tmp = os.path.join(d, m["name"] + ".part%d" % os.getpid())
++            try:
++                os.makedirs(d, exist_ok=True)
++                t0 = time.time()
++                with urllib.request.urlopen(m["url"], timeout=60) as r, open(tmp, "wb") as f:
++                    while True:
++                        b = r.read(1 << 20)
++                        if not b:
++                            break
++                        f.write(b)
++                if _sha256(tmp) != m["sha256"]:
++                    os.remove(tmp)
++                    logging.warning("skin_tone: the downloaded %s has the wrong checksum - not used", m["name"])
++                    return None
++                p = os.path.join(d, m["name"])
++                os.replace(tmp, p)
++                logging.info("skin_tone: %s saved to %s (%.1f s)", m["name"], p, time.time() - t0)
++                return p
++            except Exception as e:
++                logging.warning("skin_tone: could not save %s in %s: %s", m["name"], d, e)
++                try:
++                    os.remove(tmp)
++                except Exception:
++                    pass
++    return None
++
++
++def _mp():
++    os.environ.setdefault("GLOG_minloglevel", "2")
++    import mediapipe as mp
++    from mediapipe.tasks import python as mpt
++    from mediapipe.tasks.python import vision
++    return mp, mpt, vision
++
++
++def _skin_model():
++    seg = getattr(_TL, "skin", None)
++    if seg is not None or _STATE["skin"]:
++        return seg
++    try:
++        mp, mpt, vision = _mp()
++        p = model_path("skin")
++        if not p:
++            raise RuntimeError("the skin model is not available")
++        seg = vision.ImageSegmenter.create_from_options(vision.ImageSegmenterOptions(
++            base_options=mpt.BaseOptions(model_asset_path=p), running_mode=vision.RunningMode.IMAGE,
++            output_category_mask=False, output_confidence_masks=True))
++        _TL.skin, _TL.mp = seg, mp
++        return seg
++    except Exception as e:
++        _STATE["skin"] = "%s: %s" % (type(e).__name__, str(e)[:160])
++        logging.warning("skin_tone: MediaPipe skin segmenter unavailable (%s) - skin is found by each person's own face "
++                        "colour instead", _STATE["skin"])
++        return None
++
++
++def _person_model():
++    seg = getattr(_TL, "person", None)
++    if seg is not None or _STATE["person"]:
++        return seg
++    try:
++        mp, mpt, vision = _mp()
++        from mediapipe.tasks.python.components import containers
++        p = model_path("person")
++        if not p:
++            raise RuntimeError("the person model is not available")
++        seg = vision.InteractiveSegmenter.create_from_options(vision.InteractiveSegmenterOptions(
++            base_options=mpt.BaseOptions(model_asset_path=p), output_category_mask=False, output_confidence_masks=True))
++        _TL.person, _TL.mp, _TL.kp = seg, mp, containers.keypoint.NormalizedKeypoint
++        _TL.roi = vision.InteractiveSegmenterRegionOfInterest
++        return seg
++    except Exception as e:
++        _STATE["person"] = "%s: %s" % (type(e).__name__, str(e)[:160])
++        logging.warning("skin_tone: MediaPipe person segmenter unavailable (%s) - whose skin it is comes from the way from "
++                        "each face only", _STATE["person"])
++        return None
++
++
++def _skin_prob(rgb256):
++    """256x256 RGB uint8 -> (body skin + face skin chance, background chance), float32 [0, 1]; None without the model."""
++    seg = _skin_model()
++    if seg is None:
++        return None
++    mp = _TL.mp
++    cm = seg.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb256))).confidence_masks
++    if cm is None or len(cm) < 4:
++        return None
++
++    def _a(i):
++        a = cm[i].numpy_view().astype(np.float32)
++        return a[:, :, 0] if a.ndim == 3 else a
++    return np.clip(_a(2) + _a(3), 0.0, 1.0), np.clip(_a(0), 0.0, 1.0)
++
++
++def _person_prob(rgb, pt):
++    """RGB uint8 square + a point (pixels) on the person -> that person's chance per pixel; None without the model."""
++    seg = _person_model()
++    if seg is None:
++        return None
++    mp, KP, RoI = _TL.mp, _TL.kp, _TL.roi
++    h, w = rgb.shape[:2]
++    roi = RoI(format=RoI.Format.KEYPOINT, keypoint=KP(float(np.clip(pt[0] / w, 0, 1)), float(np.clip(pt[1] / h, 0, 1))))
++    cm = seg.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb)), roi).confidence_masks
++    if not cm:
++        return None
++    a = cm[0].numpy_view().astype(np.float32)
++    return np.clip(a[:, :, 0] if a.ndim == 3 else a, 0.0, 1.0)
++
++
++def backend():
++    return "; ".join([
++        "skin: MediaPipe multiclass selfie segmenter" if not _STATE["skin"] else
++        "skin: face-colour model (%s)" % _STATE["skin"],
++        "person: MediaPipe MagicTouch" if not _STATE["person"] else
++        "person: way from each face only (%s)" % _STATE["person"]])
++
++
++# ---- people --------------------------------------------------------------------------------------------------------------
++def _person(rec):
++    """kps (5 points: eyes, nose, mouth corners) + bbox -> centre, up vector, face size, the face box."""
++    k = np.asarray(rec["kps"], np.float32).reshape(-1, 2)[:5]
++    b = np.asarray(rec["bbox"], np.float32).reshape(4)
++    bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
++    eye, mouth = (k[0] + k[1]) / 2.0, (k[3] + k[4]) / 2.0
++    up = eye - mouth
++    n = float(np.linalg.norm(up))
++    up = np.array([0.0, -1.0], np.float32) if n < 1e-3 else (up / n).astype(np.float32)
++    c = np.array([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0], np.float32)
++    return dict(c=c, up=up, s=max(bw, bh, 1.0), bw=max(bw, 1.0), bh=max(bh, 1.0), kps=k)
++
++
++def _capsule_box(p, W, H):
++    c, up, s = p["c"], p["up"], p["s"]
++    a, b = c + up * 0.9 * s, c - up * 7.0 * s
++    return (max(0.0, min(a[0], b[0]) - 3.4 * s), max(0.0, min(a[1], b[1]) - 1.2 * s),
++            min(float(W), max(a[0], b[0]) + 3.4 * s), min(float(H), max(a[1], b[1]) + 1.2 * s))
++
++
++def _face_e(p, xs, ys):
++    """Distance in face-ellipse units (1 = the ellipse around the face box) along the face's own axes."""
++    c, up = p["c"], p["up"]
++    fx, fy = xs - c[0], ys - c[1]
++    u = fx * (-up[1]) + fy * up[0]
++    v = fx * up[0] + fy * up[1]
++    return np.sqrt((u / (0.62 * p["bw"])) ** 2 + (v / (0.72 * p["bh"])) ** 2)
++
++
++def _face_claim(p, xs, ys):
++    """1 on the face, feathered at its edge, 0 beyond it."""
++    F = np.clip((1.25 - _face_e(p, xs, ys)) / 0.35, 0.0, 1.0)
++    return (F * F * (3.0 - 2.0 * F)).astype(np.float32)
++
++
++def _body_prior(p, xs, ys):
++    """Soft capsule from the top of the head to the knees, shoulder-and-arm wide."""
++    c, up, s = p["c"], p["up"], p["s"]
++    a, d, L = c + up * 0.9 * s, -up, 7.9 * s
++    rx, ry = xs - a[0], ys - a[1]
++    t = np.clip((rx * d[0] + ry * d[1]) / L, 0.0, 1.0)
++    qx, qy = rx - t * L * d[0], ry - t * L * d[1]
++    w = np.clip((t * L - 0.7 * s) / (1.4 * s), 0.0, 1.0)
++    w = w * w * (3 - 2 * w)
++    sig = 0.95 * s + (2.4 * s - 0.95 * s) * w
++    return np.exp(-0.5 * (qx * qx + qy * qy) / (sig * sig)).astype(np.float32)
++
++
++def _ways(cost, seeds):
++    """The cheapest way from the seed pixels to every pixel over `cost` (skimage's MCP); None if not possible here."""
++    try:
++        from skimage.graph import MCP_Geometric
++    except Exception:
++        return None
++    pts = np.argwhere(seeds)
++    if len(pts) == 0:
++        return None
++    if len(pts) > 400:
++        pts = pts[:: int(np.ceil(len(pts) / 400.0))]
++    d, _ = MCP_Geometric(cost, fully_connected=True).find_costs([tuple(q) for q in pts])
++    return d.astype(np.float32)
++
++
++def _cheek_stats(frame, p):
++    """Mean and covariance of Cr, Cb on the cheeks (between the eyes and the mouth corners) of the ORIGINAL frame."""
++    k = p["kps"]
++    poly = np.array([k[0], k[1], k[4], k[3]], np.float32)
++    cen = poly.mean(0)
++    poly = (cen + (poly - cen) * 0.85).astype(np.int32)
++    H, W = frame.shape[:2]
++    x0, y0 = max(0, int(poly[:, 0].min())), max(0, int(poly[:, 1].min()))
++    x1, y1 = min(W, int(poly[:, 0].max()) + 1), min(H, int(poly[:, 1].max()) + 1)
++    if x1 - x0 < 3 or y1 - y0 < 3:
++        return None
++    m = np.zeros((y1 - y0, x1 - x0), np.uint8)
++    cv2.fillConvexPoly(m, poly - np.array([x0, y0], np.int32), 1)
++    v = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2YCrCb)[m > 0][:, 1:].astype(np.float32)
++    if len(v) < 12:
++        return None
++    return v.mean(0), np.cov(v.T) + np.eye(2, dtype=np.float32) * 25.0
++
++
++def _colour_like(crcb, stats, k=2.5, floor=0.15):
++    mu, cov = stats
++    inv = np.linalg.inv(cov).astype(np.float32)
++    dx = crcb - mu.astype(np.float32)
++    m2 = dx[..., 0] ** 2 * inv[0, 0] + 2 * dx[..., 0] * dx[..., 1] * inv[0, 1] + dx[..., 1] ** 2 * inv[1, 1]
++    return np.maximum(floor, np.exp(-0.5 * m2 / (k * k))).astype(np.float32)
++
++
++# ---- the tone curve ------------------------------------------------------------------------------------------------------
++_LUT_CACHE = {}
++
++
++def _luts(a):
++    key = round(float(a), 3)
++    if key in _LUT_CACHE:
++        return _LUT_CACHE[key]
++    a = float(np.clip(a, -1.0, 1.0))
++    x = np.arange(256, dtype=np.float32)
++    if a >= 0:
++        L = 255.0 * (x / 255.0) ** (1.0 / (1.0 + 0.65 * a))     # +1: L 128 -> 168, highlights kept
++        cs = 1.0 - 0.06 * a
++    else:
++        L = x * (1.0 - 0.40 * (-a))                              # -1: L 128 -> 77, shadows keep their detail
++        cs = 1.0 + 0.14 * (-a)                                   # a little deeper colour, as a tan
++    C = 128.0 + (x - 128.0) * cs
++    lut = (np.clip(L + 0.5, 0, 255).astype(np.uint8), np.clip(C + 0.5, 0, 255).astype(np.uint8))
++    if len(_LUT_CACHE) > 64:
++        _LUT_CACHE.clear()
++    _LUT_CACHE[key] = lut
++    return lut
++
++
++def toned(bgr, a):
++    """The whole region with the tone change applied (no mask)."""
++    lL, lC = _luts(a)
++    l_, a_, b_ = cv2.split(cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB))
++    return cv2.cvtColor(cv2.merge([cv2.LUT(l_, lL), cv2.LUT(a_, lC), cv2.LUT(b_, lC)]), cv2.COLOR_LAB2BGR)
++
++
++def _refine(guide_bgr, m, factor):
++    """Up-sampled mask -> the picture's own edges."""
++    r = int(max(3, round(2.2 * factor)))
++    try:
++        out = cv2.ximgproc.guidedFilter(cv2.cvtColor(guide_bgr, cv2.COLOR_BGR2GRAY), m, r, (REFINE_EPS * 255) ** 2)
++    except Exception:
++        out = cv2.GaussianBlur(m, (0, 0), max(1.0, factor * 0.8))
++    return np.clip(out, 0.0, 1.0)
++
++
++def _blend(frame, ms, box, amounts):
++    x0, y0, x1, y1 = box
++    base = frame[y0:y1, x0:x1]
++    region = base.astype(np.float32)
++    for s, m in ms.items():
++        region += m[:, :, None] * (toned(base, amounts[s]).astype(np.float32) - region)
++    out = frame.copy()
++    out[y0:y1, x0:x1] = np.clip(region + 0.5, 0, 255).astype(np.uint8)
++    return out
++
++
++# ---- the per-video state -------------------------------------------------------------------------------------------------
++class SkinTone:
++    def __init__(self, amounts, temporal=True):
++        self.amounts = {int(k): float(v) for k, v in (amounts or {}).items() if abs(float(v)) >= 0.005}
++        self.temporal = bool(temporal)
++        self.prev = {}            # slot -> smoothed mask on the grid
++        self.held = {}            # slot -> (person, age)
++        self.cstats = {}          # slot -> (mu, cov), EMA
++        self.stats = dict(frames=0, ms=0.0, seg_ms=0.0, person_ms=0.0, way_ms=0.0, ways=0, skipped=0, area={})
++        self.debug = None         # a dict to fill with the working maps (tests only)
++
++    @property
++    def active(self):
++        return bool(self.amounts)
++
++    def reset(self):
++        self.prev.clear()
++        self.held.clear()
++        self.cstats.clear()
++
++    def masks(self, out, orig, records):
++        """{slot: full-res float32 mask} for the chosen people, and the region it covers (x0, y0, x1, y1)."""
++        H, W = out.shape[:2]
++        people = {}
++        for slot, rec in (records or {}).items():
++            try:
++                if rec is not None and rec.get("kps") is not None and rec.get("bbox") is not None:
++                    people[int(slot)] = _person(rec)
++            except Exception:
++                continue
++        fade = {}
++        for slot in self.amounts:
++            if slot in people:
++                self.held[slot] = (people[slot], 0)
++                fade[slot] = 1.0
++            elif slot in self.held and self.held[slot][1] < HOLD_FRAMES:
++                p, age = self.held[slot]
++                self.held[slot] = (p, age + 1)
++                people[slot] = p
++                fade[slot] = 1.0 - (age + 1) / float(HOLD_FRAMES + 1)
++            else:
++                self.held.pop(slot, None)
++                self.prev.pop(slot, None)
++        chosen = [s for s in self.amounts if s in people]
++        if not chosen:
++            return {}, None
++        # the region: every chosen person's body capsule
++        bx = [_capsule_box(people[s], W, H) for s in chosen]
++        x0, y0 = int(min(b[0] for b in bx)), int(min(b[1] for b in bx))
++        x1, y1 = int(np.ceil(max(b[2] for b in bx))), int(np.ceil(max(b[3] for b in bx)))
++        if x1 - x0 < 8 or y1 - y0 < 8:
++            return {}, None
++        # the square around it (padded where it leaves the frame) for the models
++        side = max(x1 - x0, y1 - y0)
++        sx0, sy0 = (x0 + x1) // 2 - side // 2, (y0 + y1) // 2 - side // 2
++        pad = [max(0, -sy0), max(0, sy0 + side - H), max(0, -sx0), max(0, sx0 + side - W)]
++        sq = out[max(0, sy0):min(H, sy0 + side), max(0, sx0):min(W, sx0 + side)]
++        if any(pad):
++            sq = cv2.copyMakeBorder(sq, pad[0], pad[1], pad[2], pad[3], cv2.BORDER_CONSTANT, value=(0, 0, 0))
++        t0 = time.perf_counter()
++        P256 = B256 = None
++        try:
++            r_ = _skin_prob(cv2.cvtColor(cv2.resize(sq, (SEG_SIDE, SEG_SIDE), interpolation=cv2.INTER_AREA),
++                                         cv2.COLOR_BGR2RGB))
++            if r_ is not None:
++                P256, B256 = r_
++        except Exception as e:
++            logging.warning("skin_tone: skin segmenter failed on a frame: %s", e)
++        self.stats["seg_ms"] += (time.perf_counter() - t0) * 1000.0
++        # the grid over the region
++        g = min(1.0, GRID_LONG / float(max(W, H)))
++        GW, GH = max(1, int(round(W * g))), max(1, int(round(H * g)))
++        gx0, gy0 = int(np.floor(x0 * g)), int(np.floor(y0 * g))
++        gx1, gy1 = min(GW, int(np.ceil(x1 * g))), min(GH, int(np.ceil(y1 * g)))
++        if gx1 - gx0 < 2 or gy1 - gy0 < 2:
++            return {}, None
++        ys, xs = np.mgrid[gy0:gy1, gx0:gx1].astype(np.float32)
++        xs, ys = (xs + 0.5) / g, (ys + 0.5) / g
++
++        def _to_grid(a, n, border):
++            u = ((xs - sx0) * (n / float(side)) - 0.5).astype(np.float32)
++            v = ((ys - sy0) * (n / float(side)) - 0.5).astype(np.float32)
++            return cv2.remap(a, u, v, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=border)
++        P = _to_grid(P256, SEG_SIDE, 0) if P256 is not None else None
++        Bg = _to_grid(B256, SEG_SIDE, 1) if B256 is not None else None
++        small = cv2.resize(out, (GW, GH), interpolation=cv2.INTER_AREA)[gy0:gy1, gx0:gx1]
++        crcb = cv2.cvtColor(small, cv2.COLOR_BGR2YCrCb)[:, :, 1:].astype(np.float32)
++        for s, p in people.items():
++            st = _cheek_stats(orig if orig is not None else out, p)
++            if st is not None:
++                if s in self.cstats and self.temporal:
++                    m0, c0 = self.cstats[s]
++                    st = (0.8 * m0 + 0.2 * st[0], 0.8 * c0 + 0.2 * st[1])
++                self.cstats[s] = st
++        if P is None:
++            # no skin model: skin = looks like one of the people's own face skin
++            P = np.zeros(xs.shape, np.float32)
++            for s in people:
++                if self.cstats.get(s) is not None:
++                    P = np.maximum(P, _colour_like(crcb, self.cstats[s], k=1.6, floor=0.0))
++            P = np.clip((P - 0.15) / 0.5, 0.0, 1.0)       # faint likeness (a red shirt is 4 % like skin) is not skin
++        # whose body: the person model, from a point on each face in the square
++        t1 = time.perf_counter()
++        inside = [s for s, p in people.items() if sx0 <= p["c"][0] < sx0 + side and sy0 <= p["c"][1] < sy0 + side]
++        I = {}
++        if set(chosen) <= set(inside):
++            n = min(PERSON_SIDE, side)
++            rgb = cv2.cvtColor(cv2.resize(sq, (n, n), interpolation=cv2.INTER_AREA) if n != side else sq,
++                               cv2.COLOR_BGR2RGB)
++            for s in inside:
++                try:
++                    a = _person_prob(rgb, ((people[s]["c"][0] - sx0) * n / side, (people[s]["c"][1] - sy0) * n / side))
++                except Exception as e:
++                    logging.warning("skin_tone: person segmenter failed on a frame: %s", e)
++                    a = None
++                if a is None:
++                    I = {}
++                    break
++                I[s] = _to_grid(a, n, 0)
++        self.stats["person_ms"] += (time.perf_counter() - t1) * 1000.0
++        F = {s: _face_claim(p, xs, ys) for s, p in people.items()}
++        # where two people's objects overlap (or without the person model): the way from each face decides
++        ovl = {}
++        if len(I) > 1:
++            for s in chosen:
++                ovl[s] = I[s] * np.clip(sum(I[j] for j in I if j != s), 0.0, 1.0)
++        need_ways = (not I) or any(float(o.max()) > OVERLAP for o in ovl.values())
++        G = {}
++        if need_ways and I and OVERLAP_MODE != "ways":
++            if OVERLAP_MODE == "share":
++                tot = sum(I.values()) + 1e-6
++                G = {s: I[s] / tot for s in I}
++            else:
++                pr = {s: _body_prior(p, xs, ys) for s, p in people.items()}
++                tot = sum(pr.values()) + EPS_BG
++                G = {s: pr[s] / tot for s in people}
++        elif need_ways:
++            t2 = time.perf_counter()
++            fs = float(np.median([p["s"] for p in people.values()])) * g
++            gy_, gx_ = np.gradient(cv2.GaussianBlur(P, (0, 0), 0.8))
++            cost = 1.0 + SKIN_STEP * fs * np.sqrt(gx_ * gx_ + gy_ * gy_)
++            ey_, ex_ = np.gradient(cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32), (0, 0), 0.8))
++            cost += fs * np.sqrt(ex_ * ex_ + ey_ * ey_) / EDGE_DIV
++            if Bg is not None:
++                cost += BG_COST * Bg
++            cost = cost.astype(np.float64)
++            claim = {}
++            for s, p in people.items():
++                prior = _body_prior(p, xs, ys)
++                d = _ways(cost, _face_e(p, xs, ys) < 0.45)
++                way = np.exp(-d / (TAU * p["s"] * g)).astype(np.float32) if d is not None else prior
++                C = _colour_like(crcb, self.cstats[s]) if self.cstats.get(s) is not None else 1.0
++                claim[s] = way * (0.25 + 0.75 * prior) * C
++            tot = sum(claim.values()) + EPS_BG
++            G = {s: claim[s] / tot for s in people}
++            self.stats["way_ms"] += (time.perf_counter() - t2) * 1000.0
++            self.stats["ways"] += 1
++        res = {}
++        for s in chosen:
++            if I:
++                ov = ovl.get(s, 0.0)
++                w = I[s] * (1.0 - ov) + (ov * G[s] if G else 0.0)
++            else:
++                w = G[s]
++            # faces: their own person's only
++            fo = np.max([F[j] for j in F if j != s], axis=0) if len(F) > 1 else 0.0
++            w = np.maximum(w * (1.0 - fo), F[s] * F[s] / (F[s] + fo + 1e-6))
++            # inside the person's own object a pixel cannot be background: skin among the rest (shaded arms the skin model
++            # took for background)
++            Ps = P / np.maximum(1.0 - Bg * I[s], 0.3) if (I and Bg is not None) else P
++            m = np.clip(Ps * w * fade.get(s, 1.0), 0.0, 1.0).astype(np.float32)
++            if self.temporal:
++                full = np.zeros((GH, GW), np.float32)
++                full[gy0:gy1, gx0:gx1] = m
++                pm = self.prev.get(s)
++                if pm is not None and pm.shape == full.shape:
++                    still = np.abs(full - pm) < 0.35
++                    full = np.where(still, 0.55 * full + 0.45 * pm, full).astype(np.float32)
++                self.prev[s] = full
++                m = full[gy0:gy1, gx0:gx1]
++            res[s] = m
++        if self.debug is not None:
++            self.debug.update(g=g, box=(gx0, gy0, gx1, gy1), P=P, Bg=Bg, I=I, G=G, F=F, res=res)
++        # back to full resolution on the region, refined to the picture's edges
++        fx0, fy0 = int(gx0 / g), int(gy0 / g)
++        fx1, fy1 = min(W, int(np.ceil(gx1 / g))), min(H, int(np.ceil(gy1 / g)))
++        guide = out[fy0:fy1, fx0:fx1]
++        full = {}
++        for s, m in res.items():
++            if float(m.max()) < 0.02:
++                continue
++            up = cv2.resize(m, (fx1 - fx0, fy1 - fy0), interpolation=cv2.INTER_LINEAR)
++            full[s] = _refine(guide, up, 1.0 / g)
++        return full, (fx0, fy0, fx1, fy1)
++
++    def apply(self, out, orig=None, records=None, cut=False):
++        """The finished frame with the chosen people's skin toned. Never raises; on a problem the frame is returned as is."""
++        if not self.amounts:
++            return out
++        t0 = time.perf_counter()
++        try:
++            if cut:
++                self.reset()
++            ms, box = self.masks(out, orig, records)
++            if not ms:
++                self.stats["skipped"] += 1
++                return out
++            x0, y0, x1, y1 = box
++            for s, m in ms.items():
++                a = self.stats["area"]
++                a[s] = a.get(s, 0.0) + float(m.mean()) * (y1 - y0) * (x1 - x0) / float(out.shape[0] * out.shape[1])
++            return _blend(out, ms, box, self.amounts)
++        except Exception:
++            logging.exception("skin_tone: frame left as it was")
++            return out
++        finally:
++            self.stats["frames"] += 1
++            self.stats["ms"] += (time.perf_counter() - t0) * 1000.0
++
++    def summary(self):
++        st = self.stats
++        n = max(1, st["frames"])
++        return ("SKIN-TONE: %s; %d frames, %.0f ms a frame (skin %.0f, person %.0f; ways %.0f ms on %d frames), "
++                "%d frames with none of the chosen people; skin changed (share of the picture): %s" % (
++                    backend(), st["frames"], st["ms"] / n, st["seg_ms"] / n, st["person_ms"] / n,
++                    st["way_ms"] / max(1, st["ways"]), st["ways"], st["skipped"],
++                    ", ".join("#%d %+.0f%%: %.1f%%" % (s + 1, 100 * self.amounts[s], 100 * a / n)
++                              for s, a in sorted(st["area"].items())) or "-"))
++
++
++def preview(frame_bgr, people, amounts):
++    """One picture: people = {slot: {"kps", "bbox"}}. Returns (toned frame, {slot: full-frame mask}, info)."""
++    t0 = time.perf_counter()
++    st = SkinTone(amounts, temporal=False)
++    ms, box = st.masks(frame_bgr, frame_bgr, people)
++    out = _blend(frame_bgr, ms, box, st.amounts) if ms else frame_bgr
++    full = {}
++    for s, m in ms.items():
++        fm = np.zeros(frame_bgr.shape[:2], np.float32)
++        fm[box[1]:box[3], box[0]:box[2]] = m
++        full[s] = fm
++    info = dict(ms=int((time.perf_counter() - t0) * 1000), backend=backend(),
++                skin_share={str(s + 1): round(float(m.mean()), 4) for s, m in full.items()})
++    return out, full, info
+diff -ruN -x '*.zip' -x __pycache__ v11.2.204_ContactKeys/swap_engine.py v11.2.205_SkinTone/swap_engine.py
+--- v11.2.204_ContactKeys/swap_engine.py	2026-11-10 08:06:38.892571511 +0000
++++ v11.2.205_SkinTone/swap_engine.py	2026-11-11 09:05:28.716746145 +0000
+@@ -61,7 +61,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.204-contactkeys"
++ENGINE_VERSION = "aequus-1.2.205-skintone"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 

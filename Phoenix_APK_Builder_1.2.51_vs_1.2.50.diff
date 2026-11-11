@@ -1,0 +1,589 @@
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/README.md Phoenix_APK_Builder_1.2.51_SkinTone/README.md
+--- Phoenix_APK_Builder_1.2.50_Fix/README.md	2026-11-09 02:42:51.767453251 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/README.md	2026-11-11 09:00:18.869475620 +0000
+@@ -8,17 +8,15 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.50 (fix)
++# Phoenix APK Builder 1.2.51 (Skin tone)
+ 
+-**Fix (install error "App not installed as package appears to be invalid"):**
+-- `source.zip` in the 1.2.50 pack was an old copy (app 1.2.46, versionCode 166) - the Space builds only from `source.zip`, so
+-  it built 1.2.46, and a phone with 1.2.49 (versionCode 169) refuses an older version with exactly that message. `source.zip`
+-  is now the 1.2.50 sources, with versionCode **170** (above 1.2.49).
+-- The page never offers an APK of another version again ("Wrong version built").
+-- The direct download link now really exists: after a build, tap **Download PhoenixMobile-1.2.50-debug.apk** (or open
+-  `https://<your-space>.hf.space/phoenix-apk`). Chrome can resume it; a cut-off file is never offered.
+-- Upload **every** file of this pack, including `source.zip`, `app.py` and `Dockerfile`, then wait for the Space to rebuild.
+-  The page title must read "Phoenix Mobile 1.2.50 Builder".
++**New in 1.2.51 (needs Space v11.2.205):** a **Skin tone** step (step 04, after Replacement faces).
++- One slider per replacement face: that person's whole body - face, neck, arms, legs - darker or brighter, in steps of 5 %.
++  Everyone else stays as filmed. Tap the value chip to go back to Natural.
++- **Preview at N %** tones the frame picked in step 01 on the Space, exactly as the video will be. Drag the line (or tap)
++  to compare Before | After; each toned person is tagged at their face.
++- The setting is sent with the job (`skin_tone`); an older Space ignores it. versionCode **171**, above 1.2.50 (170).
++- The page title must read "Phoenix Mobile 1.2.51 Builder".
+ 
+ Upload every file in this pack, including `source.zip`, replacing the old ones.
+ Then open the Space and press Build APK.
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/app.py Phoenix_APK_Builder_1.2.51_SkinTone/app.py
+--- Phoenix_APK_Builder_1.2.50_Fix/app.py	2026-11-09 02:41:14.387627354 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/app.py	2026-11-11 09:00:18.867921571 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.50"
++VER = "1.2.51"
+ APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.50 build ===",
++        "=== Phoenix Mobile 1.2.51 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -280,14 +280,14 @@
+         yield "\n".join(lines)
+         time.sleep(0.4)
+     lines.append("")
+-    lines.append("Done. Give each Space a minute, then open it. The log must say v11.2.179 before you start a job.")
++    lines.append("Done. Give each Space a minute, then open it. The log must say v11.2.205 before you start a job.")
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.50 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.51 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.50</h1>"
+-        "<p>Builds Phoenix Mobile 1.2.50. Tap outlines a dark patch. Paint still works. "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.51</h1>"
++        "<p>Builds Phoenix Mobile 1.2.51. New: Skin tone step (brighten or darken a chosen person, with Before / After). "
+         "If a download says failed, delete it. Do not install it. After a build, use the direct download link.</p></div>"
+     )
+ 
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/build.sh Phoenix_APK_Builder_1.2.51_SkinTone/build.sh
+--- Phoenix_APK_Builder_1.2.50_Fix/build.sh	2026-11-09 02:41:14.345420992 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/build.sh	2026-11-11 09:00:18.868577786 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.50}"
++VER="${VER:-1.2.51}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.51_SkinTone/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.50_Fix/src/app/build.gradle.kts	2026-11-09 02:41:14.342219009 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/src/app/build.gradle.kts	2026-11-11 09:00:18.868970420 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 170
+-        versionName = "1.2.50"
++        versionCode = 171
++        versionName = "1.2.51"
+     }
+ 
+ 
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/HfSettings.kt Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/HfSettings.kt
+--- Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/HfSettings.kt	2026-11-09 02:41:14.340213936 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/HfSettings.kt	2026-11-11 08:53:03.508514888 +0000
+@@ -30,6 +30,8 @@
+     val bellyShift: Float = 0f,
+     // 1.2.42: the eight corners, in body coordinates, after Preview belly. The job uses this shape.
+     val bellyNorm: String = "",
++    // 1.2.51: skin tone per replacement slot (Space v11.2.205+): -1 darker .. 0 natural .. +1 brighter, whole body of that person
++    val skinTone: List<Float> = listOf(0f, 0f, 0f, 0f),
+     val trimStart: Int = 0,
+     val trimEnd: Int = 100,
+     val password: String = "",
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt
+--- Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt	2026-11-09 02:41:14.340297298 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt	2026-11-11 08:55:05.705306157 +0000
+@@ -670,8 +670,20 @@
+     }
+ 
+     @Composable
++    fun SkinCard() {
++        StepCard("04", "Skin tone", "Brighten or darken the chosen people, whole body.", compact = landscape) {
++            SkinToneContent(
++                vm,
++                previewButton = { text, enabled, busy, onClick -> ActionButton(text = text, enabled = enabled, busy = busy, onClick = onClick) },
++                resetButton = { text, onClick -> GhostButton(text) { onClick() } },
++                empty = { EmptyNote(it) }
++            )
++        }
++    }
++
++    @Composable
+     fun QualityCard() {
+-        StepCard("04", "Output & quality", "Presets cover most cases; open advanced controls for fine tuning.", compact = landscape) {
++        StepCard("05", "Output & quality", "Presets cover most cases; open advanced controls for fine tuning.", compact = landscape) {
+         PresetButtons(vm)
+         Spacer(Modifier.height(4.dp))
+         Dropdown("Download quality", listOf("640p (Fast)", "680p", "720p (HD)", "900p (HD+)", "1080p (Full HD)"), vm.options.resolution) { v ->
+@@ -863,6 +875,7 @@
+             ) {
+                 DetectCard()
+                 FacesCard()
++                SkinCard()
+                 QualityCard()
+             }
+         }
+@@ -870,6 +883,7 @@
+         TargetCard()
+         DetectCard()
+         FacesCard()
++        SkinCard()
+         QualityCard()
+     }
+ }
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt
+--- Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-09 02:41:14.340354992 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-11 09:13:31.841497229 +0000
+@@ -372,6 +372,130 @@
+     var framePercent by mutableStateOf(0); private set
+     var detectedFrameUri by mutableStateOf<Uri?>(null); private set
+ 
++    // ---- Skin tone (1.2.51; Space v11.2.205) -------------------------------------------------------------------
++    /** A person the Space toned on the preview frame: slot 1-4, face box (0-1 of the frame), amount -1..1, skin share. */
++    data class SkinPerson(val slot: Int, val box: List<Float>, val amount: Float, val skin: Float)
++    var skinBusy by mutableStateOf(false); private set
++    var skinMessage by mutableStateOf<String?>(null); private set
++    var skinBefore by mutableStateOf<File?>(null); private set
++    var skinAfter by mutableStateOf<File?>(null); private set
++    var skinPeople by mutableStateOf<List<SkinPerson>>(emptyList()); private set
++    var skinPreviewPct by mutableStateOf(-1); private set
++
++    fun skinToneAt(slot: Int): Float = options.skinTone.getOrNull(slot - 1) ?: 0f
++    val skinToneOn: Boolean get() = options.skinTone.any { kotlin.math.abs(it) >= 0.005f }
++    /** The person's own face from Detect (who is toned) when captured, else the replacement face. */
++    fun skinThumb(slot: Int): Uri? = targetRefs.getOrNull(slot - 1)
++
++    fun setSkinTone(slot: Int, value: Float) {
++        if (slot !in 1..4) return
++        val v = Math.round(value.coerceIn(-1f, 1f) * 20f) / 20f          // steps of 5 %
++        updateOptions { o ->
++            val l = o.skinTone.toMutableList()
++            while (l.size < 4) l.add(0f)
++            l[slot - 1] = v
++            o.copy(skinTone = l.toList())
++        }
++    }
++
++    fun resetSkinTone() {
++        updateOptions { it.copy(skinTone = listOf(0f, 0f, 0f, 0f)) }
++        skinMessage = null
++    }
++
++    private fun clearSkinPreview() {
++        skinAfter?.let { runCatching { it.delete() } }
++        skinBefore?.let { runCatching { it.delete() } }
++        skinAfter = null; skinBefore = null; skinPeople = emptyList(); skinPreviewPct = -1; skinMessage = null
++    }
++
++    /** Tone the frame picked in step 01 on the Space, exactly as the video job will (phoenix_skin_preview). */
++    fun previewSkin() {
++        val uri = selectedVideo ?: run { skinMessage = "Select a target video first"; return }
++        if (skinBusy) return
++        if (!skinToneOn) { skinMessage = "Move a slider first: everyone is at Natural."; return }
++        skinBusy = true
++        val pct = framePercent
++        val tone = options.skinTone.toList()
++        skinMessage = "Toning the frame at $pct % on $spaceLabel… (the first time also loads the skin models, about 20 s)"
++        viewModelScope.launch(guard + Dispatchers.IO) {
++            try {
++                val st = settings()
++                hf.wakeSpace(st) { msg -> skinMessage = "$spaceLabel · $msg" }
++                val videoPath = uploadVideoOnce(st, uri).path
++                val resolver = getApplication<Application>().contentResolver
++                val refs = JSONArray()
++                for (i in 0 until 4) {
++                    val r = targetRefs[i]
++                    val path = r?.let { ref ->
++                        runCatching { hf.uploadUri(st, resolver, ref, "phoenix_skinref_${i + 1}.jpg", resolver.getType(ref) ?: "image/jpeg") }.getOrNull()
++                    }
++                    if (path == null) refs.put(JSONObject.NULL) else refs.put(path)
++                }
++                // the replacement faces too: the Space then matches people to slots exactly as the job does (their gender)
++                val faceList = listOf(face1, face2, face3, face4)
++                val faces = JSONArray()
++                for (i in 0 until 4) {
++                    val f = faceList[i]
++                    val path = f?.let { fu ->
++                        runCatching { hf.uploadUri(st, resolver, fu, "phoenix_skinface_${i + 1}.jpg", resolver.getType(fu) ?: "image/jpeg") }.getOrNull()
++                    }
++                    if (path == null) faces.put(JSONObject.NULL) else faces.put(path)
++                }
++                val slots = JSONArray()
++                faceList.forEachIndexed { i, f -> if (f != null) slots.put(i + 1) }
++                val js = JSONObject().put("position_pct", pct)
++                    .put("skin_tone", JSONArray(tone.map { it.toDouble() }))
++                    .put("target_refs", refs)
++                    .put("faces", faces)
++                if (slots.length() > 0) js.put("slots", slots)
++                val res = hf.skinPreview(st, videoPath, js.toString())
++                val info = res.info
++                if (info != null && !info.optBoolean("ok", false)) {
++                    throw IllegalStateException(info.optString("error").ifBlank { "the Space could not tone it" })
++                }
++                val afterPath = res.after ?: throw IllegalStateException("the Space returned no picture")
++                val after = downloadToCache(st, afterPath, "skin_after")
++                val before = res.before?.let { runCatching { downloadToCache(st, it, "skin_before") }.getOrNull() }
++                val people = mutableListOf<SkinPerson>()
++                info?.optJSONArray("people")?.let { arr ->
++                    for (k in 0 until arr.length()) {
++                        val o = arr.optJSONObject(k) ?: continue
++                        val b = o.optJSONArray("box")
++                        people.add(SkinPerson(o.optInt("slot"),
++                            if (b != null) (0 until b.length()).map { b.optDouble(it).toFloat() } else emptyList(),
++                            o.optDouble("amount", 0.0).toFloat(), o.optDouble("skin", 0.0).toFloat()))
++                    }
++                }
++                withContext(Dispatchers.Main) {
++                    skinAfter?.let { runCatching { it.delete() } }
++                    skinBefore?.let { runCatching { it.delete() } }
++                    skinAfter = after; skinBefore = before; skinPeople = people; skinPreviewPct = pct
++                }
++                val missing = info?.optJSONArray("not_found")
++                skinMessage = buildString {
++                    append("Preview ready")
++                    info?.optInt("ms", -1)?.takeIf { it >= 0 }?.let { append(" (%.1f s)".format(it / 1000.0)) }
++                    append(". Drag the line to compare Before and After.")
++                    if (missing != null && missing.length() > 0) {
++                        append(" Not on this frame: " + (0 until missing.length()).joinToString { "#" + missing.optInt(it) } + ". Pick another frame.")
++                    }
++                    if (info != null && info.optString("by") != "Detect references") {
++                        append(" People were matched by " + info.optString("by") + "; capture each person in Detect (step 02) " +
++                            "so the video matches them the same way for sure.")
++                    }
++                }
++            } catch (e: Throwable) {
++                val d = e.message ?: e.javaClass.simpleName
++                skinMessage = if (d.contains("phoenix_skin_preview") || d.contains("404") || d.contains("fn_index"))
++                    "This Space has no Skin tone yet (it needs Phoenix v11.2.205 or later). Update the Space, then Preview again."
++                else "Preview failed: $d"
++            } finally {
++                skinBusy = false
++            }
++        }
++    }
++
+     // ---- Patch Removal (1.2.25 / 1.2.26; Space v11.2.96 / v11.2.97) -------------------------------------------
+     var patches by mutableStateOf<List<PatchSpec>>(emptyList()); private set
+     var patchBusy by mutableStateOf(false); private set
+@@ -1001,7 +1125,7 @@
+ 
+     fun selectVideo(uri: Uri?) {
+         clearDisplayedDetectionFiles()
+-        if (uri != selectedVideo) clearPatches()
++        if (uri != selectedVideo) { clearPatches(); clearSkinPreview() }
+         selectedVideo = uri; resultUri = null; detectedFrameUri = null; detectedFaces = List(4) { null }
+         progress = 0f; eta = "ETA —"; status = if (uri == null) "No video selected" else "Video selected"
+         // A new video invalidates any previously-uploaded copy sitting on a
+@@ -1326,6 +1450,7 @@
+         "phoenix_job_status" to "1 in (job id)",
+         "phoenix_download" to "1 in (job id)",
+         "phoenix_patch_preview" to "2 in (frame FileData, mask FileData)",
++        "phoenix_skin_preview" to "2 in (video FileData, settings JSON)",
+         "phoenix_clean_belly_preview" to "2 in (frame FileData, settings JSON)"
+     )
+     var diagnosing by mutableStateOf(false); private set
+@@ -2408,6 +2533,10 @@
+         val refs = JSONArray()
+         targetRefPaths.forEach { p -> if (p.isNullOrBlank()) refs.put(JSONObject.NULL) else refs.put(p) }
+         put("target_refs", refs)
++        // 1.2.51: skin tone per replacement slot (Space v11.2.205+; an older Space ignores it)
++        if (options.skinTone.any { kotlin.math.abs(it) >= 0.005f }) {
++            put("skin_tone", JSONArray(options.skinTone.map { it.toDouble() }))
++        }
+     }
+ 
+     private fun fileData(path: String) = JSONObject().put("path", path).put("meta", JSONObject().put("_type", "gradio.FileData"))
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt
+--- Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt	1970-01-01 00:00:00.000000000 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt	2026-11-11 08:54:33.711783080 +0000
+@@ -0,0 +1,254 @@
++package com.swamitech.phoenix
++
++// 1.2.51: the Skin tone step (Space v11.2.205+). One slider per replacement slot - that person's whole body (face, neck,
++// arms, legs) a little darker or brighter; everyone else stays as filmed. Preview tones the frame picked in step 01 on the
++// Space, exactly as the video job will, and shows Before | After with a line to drag.
++
++import android.graphics.BitmapFactory
++import android.net.Uri
++import androidx.compose.foundation.Canvas
++import androidx.compose.foundation.Image
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.gestures.detectHorizontalDragGestures
++import androidx.compose.foundation.gestures.detectTapGestures
++import androidx.compose.foundation.layout.*
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.Slider
++import androidx.compose.material3.SliderDefaults
++import androidx.compose.material3.Text
++import androidx.compose.runtime.*
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.draw.drawWithContent
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.ImageBitmap
++import androidx.compose.ui.graphics.asImageBitmap
++import androidx.compose.ui.graphics.drawscope.clipRect
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.swamitech.phoenix.ui.rememberThumb
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.io.File
++import kotlin.math.abs
++import kotlin.math.roundToInt
++
++private val StInk = Color(0xFF0F172A)
++private val StMuted = Color(0xFF64748B)
++private val StLine = Color(0xFFE6EAF2)
++private val StBurgundy = Color(0xFF9B1B4A)
++private val StSoft = Color(0xFFFDF2F6)
++// the slider's track: deep to light skin, so the direction reads at a glance
++private val SkinDeep = Color(0xFF5B3A26)
++private val SkinMid = Color(0xFFB98260)
++private val SkinLight = Color(0xFFF6DCC6)
++
++/** "Natural", "+25 % brighter", "15 % darker". */
++fun skinToneLabel(v: Float): String {
++    val p = (abs(v) * 100f).roundToInt()
++    return when {
++        p == 0 -> "Natural"
++        v > 0 -> "+$p % brighter"
++        else -> "$p % darker"
++    }
++}
++
++@Composable
++fun SkinToneContent(
++    vm: PhoenixViewModel,
++    previewButton: @Composable (text: String, enabled: Boolean, busy: Boolean, onClick: () -> Unit) -> Unit,
++    resetButton: @Composable (text: String, onClick: () -> Unit) -> Unit,
++    empty: @Composable (text: String) -> Unit
++) {
++    Text(
++        "Brighten or darken a person's skin — face, neck, arms and legs. Only the people you move a slider for " +
++            "change; everyone else stays as filmed.",
++        color = StMuted, fontSize = 12.sp, lineHeight = 16.sp
++    )
++    val faces = listOf(vm.face1, vm.face2, vm.face3, vm.face4)
++    val slots = (1..4).filter { faces[it - 1] != null }
++    if (slots.isEmpty()) {
++        empty("Add the replacement faces in step 03 first. Each person then gets their own skin tone.")
++        return
++    }
++    slots.forEach { slot -> SkinToneRow(slot, vm.skinThumb(slot) ?: faces[slot - 1], vm.skinToneAt(slot)) { vm.setSkinTone(slot, it) } }
++    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
++        Box(Modifier.weight(1f)) {
++            previewButton(
++                if (vm.skinBusy) "Toning…" else "Preview at ${vm.framePercent} %",
++                vm.selectedVideo != null && vm.skinToneOn && !vm.skinBusy,
++                vm.skinBusy
++            ) { vm.previewSkin() }
++        }
++        if (vm.skinToneOn) {
++            Box(Modifier.width(118.dp)) { resetButton("All natural") { vm.resetSkinTone() } }
++        }
++    }
++    vm.skinMessage?.let { Text(it, color = StMuted, fontSize = 11.5.sp, lineHeight = 15.sp) }
++    val after = vm.skinAfter
++    if (after != null) {
++        SkinCompare(vm.skinBefore, after, vm.skinPeople)
++        if (vm.skinPreviewPct >= 0 && vm.skinPreviewPct != vm.framePercent) {
++            Text("This preview is of the frame at ${vm.skinPreviewPct} %. Preview again to see the frame now picked.",
++                color = StMuted, fontSize = 11.sp)
++        }
++    }
++    if (vm.skinToneOn) {
++        Text("The video uses these settings on every frame of the chosen people.", color = StMuted, fontSize = 11.sp)
++    }
++}
++
++@Composable
++private fun SkinToneRow(slot: Int, face: Uri?, value: Float, onChange: (Float) -> Unit) {
++    val thumb by rememberThumb(face, isVideo = false, maxPx = 160)
++    val on = abs(value) >= 0.005f
++    Row(
++        Modifier
++            .fillMaxWidth()
++            .clip(RoundedCornerShape(16.dp))
++            .background(if (on) StSoft else Color(0xFFF8FAFC))
++            .border(1.dp, if (on) StBurgundy.copy(alpha = 0.28f) else StLine, RoundedCornerShape(16.dp))
++            .padding(horizontal = 12.dp, vertical = 10.dp),
++        verticalAlignment = Alignment.CenterVertically
++    ) {
++        Box(
++            Modifier.size(46.dp).clip(CircleShape).background(Color(0xFFE2E8F0))
++                .border(2.dp, if (on) StBurgundy else Color.White, CircleShape),
++            contentAlignment = Alignment.Center
++        ) {
++            val bmp = thumb.bitmap
++            if (bmp != null) Image(bmp, "Person #$slot", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
++            else Text("#$slot", color = StMuted, fontWeight = FontWeight.Bold, fontSize = 13.sp)
++        }
++        Spacer(Modifier.width(12.dp))
++        Column(Modifier.weight(1f)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Text("Person #$slot", color = StInk, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
++                Spacer(Modifier.weight(1f))
++                Box(
++                    Modifier
++                        .clip(RoundedCornerShape(10.dp))
++                        .background(if (on) StBurgundy else Color(0xFFEFF2F7))
++                        .clickable(enabled = on) { onChange(0f) }
++                        .padding(horizontal = 9.dp, vertical = 3.dp)
++                ) {
++                    Text(skinToneLabel(value), color = if (on) Color.White else StMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
++                }
++            }
++            Box(Modifier.fillMaxWidth().height(34.dp), contentAlignment = Alignment.Center) {
++                // the track: deep -> light skin, with a mark at Natural
++                Box(
++                    Modifier.fillMaxWidth().padding(horizontal = 10.dp).height(8.dp).clip(RoundedCornerShape(4.dp))
++                        .background(Brush.horizontalGradient(listOf(SkinDeep, SkinMid, SkinLight)))
++                )
++                Box(Modifier.width(2.dp).height(16.dp).background(Color.White.copy(alpha = 0.9f)))
++                Slider(
++                    value = value,
++                    onValueChange = { onChange(it) },
++                    valueRange = -1f..1f,
++                    steps = 39,
++                    modifier = Modifier.fillMaxWidth(),
++                    colors = SliderDefaults.colors(
++                        thumbColor = Color.White,
++                        activeTrackColor = Color.Transparent,
++                        inactiveTrackColor = Color.Transparent,
++                        activeTickColor = Color.Transparent,
++                        inactiveTickColor = Color.Transparent
++                    )
++                )
++            }
++            Row {
++                Text("Darker", color = StMuted, fontSize = 10.5.sp)
++                Spacer(Modifier.weight(1f))
++                Text("Brighter", color = StMuted, fontSize = 10.5.sp)
++            }
++        }
++    }
++}
++
++private fun decodeScaled(f: File, maxPx: Int = 1400): ImageBitmap? = runCatching {
++    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
++    BitmapFactory.decodeFile(f.absolutePath, o)
++    var s = 1
++    while (maxOf(o.outWidth, o.outHeight) / s > maxPx) s *= 2
++    BitmapFactory.decodeFile(f.absolutePath, BitmapFactory.Options().apply { inSampleSize = s })?.asImageBitmap()
++}.getOrNull()
++
++/** Before | After of the same frame, split by a line to drag (or tap). Each toned person is tagged at their face. */
++@Composable
++private fun SkinCompare(beforeFile: File?, afterFile: File, people: List<PhoenixViewModel.SkinPerson>) {
++    val before by produceState<ImageBitmap?>(null, beforeFile) { value = withContext(Dispatchers.IO) { beforeFile?.let { decodeScaled(it) } } }
++    val after by produceState<ImageBitmap?>(null, afterFile) { value = withContext(Dispatchers.IO) { decodeScaled(afterFile) } }
++    var split by remember(afterFile) { mutableFloatStateOf(0.5f) }
++    val a = after
++    if (a == null) {
++        Box(Modifier.fillMaxWidth().height(160.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFFF1F5F9)), contentAlignment = Alignment.Center) {
++            CircularProgressIndicator(Modifier.size(22.dp), color = StBurgundy, strokeWidth = 2.dp)
++        }
++        return
++    }
++    val shape = RoundedCornerShape(14.dp)
++    BoxWithConstraints(
++        Modifier
++            .fillMaxWidth()
++            .aspectRatio(a.width.toFloat() / a.height.toFloat())
++            .clip(shape)
++            .border(1.dp, StLine, shape)
++            .pointerInput(afterFile) { detectTapGestures { p -> split = (p.x / size.width).coerceIn(0f, 1f) } }
++            .pointerInput(afterFile) {
++                detectHorizontalDragGestures { change, _ -> split = (change.position.x / size.width).coerceIn(0f, 1f) }
++            }
++    ) {
++        Image(a, "After", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
++        before?.let { b ->
++            Image(
++                b, "Before",
++                Modifier.fillMaxSize().drawWithContent { clipRect(right = size.width * split) { this@drawWithContent.drawContent() } },
++                contentScale = ContentScale.FillBounds
++            )
++        }
++        Canvas(Modifier.fillMaxSize()) {
++            val x = size.width * split
++            drawLine(Color.White, Offset(x, 0f), Offset(x, size.height), strokeWidth = 2.dp.toPx())
++            val c = Offset(x, size.height / 2f)
++            drawCircle(Color.White, 13.dp.toPx(), c)
++            drawCircle(StBurgundy, 13.dp.toPx(), c, style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
++            val h = 4.dp.toPx()
++            drawLine(StBurgundy, Offset(c.x - 3.dp.toPx(), c.y), Offset(c.x - 3.dp.toPx() - h, c.y), strokeWidth = 2.dp.toPx())
++            drawLine(StBurgundy, Offset(c.x + 3.dp.toPx(), c.y), Offset(c.x + 3.dp.toPx() + h, c.y), strokeWidth = 2.dp.toPx())
++        }
++        val w = maxWidth
++        val hh = maxHeight
++        people.filter { it.box.size == 4 && abs(it.amount) >= 0.005f }.forEach { p ->
++            Box(
++                Modifier
++                    .offset(x = w * p.box[0], y = (hh * p.box[1] - 22.dp).coerceAtLeast(0.dp))
++                    .clip(RoundedCornerShape(8.dp))
++                    .background(Color(0xCC9B1B4A))
++                    .padding(horizontal = 6.dp, vertical = 2.dp)
++            ) {
++                Text("#${p.slot} ${skinToneLabel(p.amount)}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
++            }
++        }
++        SkinTag("Before", Modifier.align(Alignment.BottomStart))
++        SkinTag("After", Modifier.align(Alignment.BottomEnd))
++    }
++}
++
++@Composable
++private fun SkinTag(text: String, modifier: Modifier) {
++    Box(
++        modifier.padding(8.dp).clip(RoundedCornerShape(8.dp)).background(Color(0x99000000))
++            .padding(horizontal = 8.dp, vertical = 3.dp)
++    ) { Text(text, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
++}
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt
+--- Phoenix_APK_Builder_1.2.50_Fix/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt	2026-11-09 02:41:14.340538198 +0000
++++ Phoenix_APK_Builder_1.2.51_SkinTone/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt	2026-11-11 08:53:03.508988218 +0000
+@@ -780,6 +780,17 @@
+         return PatchPreview(path, info)
+     }
+ 
++    /** phoenix_skin_preview (Space v11.2.205): [0] the frame with the skin toned, [1] the same frame untouched, [2] JSON info. */
++    data class SkinPreview(val after: String?, val before: String?, val info: JSONObject?)
++
++    fun skinPreview(settings: HfSettings, videoServerPath: String, settingsJson: String): SkinPreview {
++        val result = callAndWait(settings, "phoenix_skin_preview", JSONArray().put(fileData(videoServerPath)).put(settingsJson), 300_000L)
++        val after = if (result.length() > 0) extractPath(result.opt(0)) else null
++        val before = if (result.length() > 1) extractPath(result.opt(1)) else null
++        val info = if (result.length() > 2) runCatching { JSONObject(result.optString(2)) }.getOrNull() else null
++        return SkinPreview(after, before, info)
++    }
++
+     /** phoenix_belly_preview (Space v11.2.111): [0] the frame cleaned, [1] the same with the band outlined, [2] JSON info. */
+     data class BellyPreview(val clean: String?, val outlined: String?, val info: JSONObject?)
+ 
