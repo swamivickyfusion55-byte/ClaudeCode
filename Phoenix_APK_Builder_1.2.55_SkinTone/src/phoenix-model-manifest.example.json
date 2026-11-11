@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "name": "Phoenix licensed mobile model pack",
+  "files": [
+    {"name": "detector.onnx", "sha256": "PUT_SHA256_HERE"},
+    {"name": "recognizer.onnx", "sha256": "PUT_SHA256_HERE"},
+    {"name": "landmarks.onnx", "sha256": "PUT_SHA256_HERE"},
+    {"name": "swapper.onnx", "sha256": "PUT_SHA256_HERE"}
+  ]
+}
