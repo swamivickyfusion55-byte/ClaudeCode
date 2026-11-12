@@ -1,0 +1,365 @@
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.56_SkinTone/README.md Phoenix_APK_Builder_1.2.57_RedoPart/README.md
+--- Phoenix_APK_Builder_1.2.56_SkinTone/README.md	2026-11-11 12:06:36.765793143 +0000
++++ Phoenix_APK_Builder_1.2.57_RedoPart/README.md	2026-11-12 13:22:38.494368143 +0000
+@@ -8,11 +8,20 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.56 (Skin tone, small download)
++# Phoenix APK Builder 1.2.57 (Redo part)
+ 
+ Upload every file in this pack, including `source.zip`.
+-The page title must say Phoenix Mobile 1.2.56.
+-versionCode is **176** (above 1.2.54's 174).
++The page title must say Phoenix Mobile 1.2.57.
++versionCode is **177**.
++
++**1.2.57 - Redo part works again:**
++- A part the Space lost (the Space restarted and kept nothing) no longer says "not visible now - still checking" for ever:
++  after about 3 minutes the card shows **LOST** and "Tap Redo part".
++- **Redo part** did nothing because the part's clip was deleted right after its upload. The clip is now kept until the part
++  is done. When it is gone (cards made by 1.2.56 or older), Redo part cuts the part again: from the original video the card
++  remembers, or for older cards from the video selected in step 01 with the same trim as the split. Its messages now show on
++  the card, not only in the status line.
++- Put the same replacement faces in the slots first (Redo part says so on the card if they are missing).
+ 
+ **1.2.56 - "package appears to be invalid" fixed:** the 1.2.55 APK built fine, but the phone fetched it through Gradio's
+ file link, which broke off again and again (the Space log shows one 200 and then six 206 partial answers); the phone then
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.56_SkinTone/app.py Phoenix_APK_Builder_1.2.57_RedoPart/app.py
+--- Phoenix_APK_Builder_1.2.56_SkinTone/app.py	2026-11-11 12:05:38.469139552 +0000
++++ Phoenix_APK_Builder_1.2.57_RedoPart/app.py	2026-11-12 13:22:38.493821592 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.56"
++VER = "1.2.57"
+ APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.56 build ===",
++        "=== Phoenix Mobile 1.2.57 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhoenixMobile-1.2.56-debug.apk was not produced.** "
++            "**Build reported success but PhoenixMobile-1.2.57-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -185,10 +185,10 @@
+             info = fh.read().strip()
+     except OSError:
+         pass
+-    if info and ("1.2.56" not in info or "versionCode 176" not in info):
++    if info and ("1.2.57" not in info or "versionCode 177" not in info):
+         yield (
+             log,
+-            "**Not offering this file.** It is not versionCode 176 (1.2.56). "
++            "**Not offering this file.** It is not versionCode 177 (1.2.57). "
+             "Installing an older build over the copy on the phone is what the phone calls an invalid package.\n\n```\n"
+             + info + "\n```",
+             None,
+@@ -297,12 +297,12 @@
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.56 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.57 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.56</h1>"
+-        "<p>versionCode 176. New: Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.57</h1>"
++        "<p>versionCode 177. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.56-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.57-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -320,7 +320,7 @@
+     )
+ 
+     with gr.Row():
+-        # 1.2.56: the APK is offered ONLY through the direct, resumable /phoenix-apk link. Gradio's own file link
++        # 1.2.57: the APK is offered ONLY through the direct, resumable /phoenix-apk link. Gradio's own file link
+         # (/gradio_api/file=...) broke off again and again on the phone (206, 206, 206 ...) and left a cut-off file.
+         apk = gr.HTML(_apk_button(os.path.getsize(APK)) if os.path.isfile(APK) and _zip_complete(APK) else "")
+         sha = gr.File(label="SHA-256 checksum", interactive=False)
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.56-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.57-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.56_SkinTone/build.sh Phoenix_APK_Builder_1.2.57_RedoPart/build.sh
+--- Phoenix_APK_Builder_1.2.56_SkinTone/build.sh	2026-11-11 12:05:38.409607405 +0000
++++ Phoenix_APK_Builder_1.2.57_RedoPart/build.sh	2026-11-12 13:22:38.478268819 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.56}"
++VER="${VER:-1.2.57}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.56_SkinTone/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.57_RedoPart/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.56_SkinTone/src/app/build.gradle.kts	2026-11-11 12:05:38.467612945 +0000
++++ Phoenix_APK_Builder_1.2.57_RedoPart/src/app/build.gradle.kts	2026-11-12 13:22:38.480326607 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 176
+-        versionName = "1.2.56"
++        versionCode = 177
++        versionName = "1.2.57"
+         // 1.2.56: 64-bit ARM phones only. The APK carried four copies of ONNX Runtime and the native lib (arm64, armv7,
+         // x86, x86_64); three were never used on a phone, and the 92 MB download kept breaking off half way - a cut-off
+         // APK is what the phone calls "package appears to be invalid".
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.56_SkinTone/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt
+--- Phoenix_APK_Builder_1.2.56_SkinTone/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-11 12:05:38.400255651 +0000
++++ Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-12 13:22:38.470671154 +0000
+@@ -95,7 +95,11 @@
+         val partIndex: Int = 0,
+         val partCount: Int = 1,
+         val sourcePath: String? = null,
+-        val detail: String = ""
++        val detail: String = "",
++        // 1.2.57: a split part remembers its original video and its range there, so Redo part can cut it again
++        val origUri: String? = null,
++        val origStartPct: Int = -1,
++        val origEndPct: Int = -1
+     )
+ 
+     private val secure = SecureStore(app)
+@@ -1893,7 +1897,10 @@
+                     groupId = groupId,
+                     partIndex = i,
+                     partCount = parts,
+-                    durationSec = partSecs
++                    durationSec = partSecs,
++                    origUri = uri.toString(),
++                    origStartPct = startPct,
++                    origEndPct = endPct
+                 )
+                 reservedUrls.remove(normUrl(slot.url))           // this part is now a live job: its Space counts as busy by itself
+             }
+@@ -1969,7 +1976,10 @@
+         groupId: String? = null,
+         partIndex: Int = 0,
+         partCount: Int = 1,
+-        durationSec: Int = options.durationSec
++        durationSec: Int = options.durationSec,
++        origUri: String? = null,
++        origStartPct: Int = -1,
++        origEndPct: Int = -1
+     ) {
+         val targetSpace = space
+         if (targetSpace.spaceUrl.isBlank()) { status = "Configure the selected Phoenix Space first"; return }
+@@ -1981,7 +1991,8 @@
+         latestJobLocalId = localId
+         val partTag = if (partCount > 1) " · part ${partIndex + 1}/$partCount ${trimStart}-${trimEnd}%" else ""
+         val sourcePath = if (uri.scheme == "file") uri.path else null
+-        addHistory(HistoryItem(localId, "Video", "Phoenix job — $label$partTag", null, "Starting", created, label, targetSpace.spaceUrl, null, 0f, "ETA —", groupId, partIndex, partCount, sourcePath))
++        addHistory(HistoryItem(localId, "Video", "Phoenix job — $label$partTag", null, "Starting", created, label, targetSpace.spaceUrl, null, 0f, "ETA —", groupId, partIndex, partCount, sourcePath,
++            origUri = origUri, origStartPct = origStartPct, origEndPct = origEndPct))
+         val controlJob = Job()
+         parallelJobs[localId] = controlJob
+         val job = viewModelScope.launch(guard + controlJob + Dispatchers.IO) {
+@@ -2019,10 +2030,8 @@
+                     }
+                     }
+                 }
+-                if (uri.scheme == "file") {
+-                    val local = uri.path?.let { java.io.File(it) }
+-                    if (local != null && local.name.startsWith("phoenix_part_")) runCatching { local.delete() }
+-                }
++                // 1.2.57: the part clip is KEPT until this part is done (updateHistory deletes it then). It used to be
++                // deleted right after the upload, so a part the Space lost later could not be redone.
+                 updateHistory(localId, status = "Uploading faces", progress = .04f, eta = "Uploading…")
+                 // Face uploads are independent. Upload up to three at once; the
+                 // per-Space semaphore prevents this from overwhelming a Space.
+@@ -2147,6 +2156,7 @@
+     private suspend fun pollPhoenixJob(s: HfSettings, jobId: String, localId: String) {
+         var lastProgress = .08f
+         var consecutiveFailures = 0
++        var notFound = 0
+         var backoffMs = 2500L
+         // A poll checking on an already-running job is not the job itself - the
+         // remote job keeps processing regardless of whether THIS check-in
+@@ -2178,15 +2188,31 @@
+                 val code = r.optJSONObject("error")?.optString("code").orEmpty()
+                 val why = r.optJSONObject("error")?.optString("message").orEmpty()
+                 if (code == "not_found") {
++                    notFound++
++                    // 1.2.57: the Space answers, but has no such job - after a restart that kept nothing. Waiting
++                    // forever helped nobody: after about 3 minutes the card says so and points at Redo part.
++                    if (notFound >= 12) {
++                        val part = history.find { it.id == localId }?.let { it.partCount > 1 } == true
++                        updateHistory(
++                            localId,
++                            status = "Lost",
++                            eta = if (part) "The Space restarted and lost job $jobId. Tap Redo part."
++                            else "The Space restarted and lost job $jobId. Send the video again."
++                        )
++                        status = "Job $jobId is no longer on the Space (it restarted). " +
++                            if (part) "Tap Redo part on its card." else "Send the video again."
++                        return
++                    }
+                     updateHistory(
+                         localId,
+                         status = "On server",
+-                        eta = "Job $jobId not visible now — still checking"
++                        eta = "Job $jobId not visible now — still checking ($notFound of 12)"
+                     )
+                     status = "Job $jobId was not returned. Still checking. It is not failed."
+                     delay(15_000L)
+                     continue
+                 }
++                notFound = 0
+                 consecutiveFailures++
+                 backoffMs = minOf(60_000L, 2500L * (1L shl minOf(consecutiveFailures, 5)))
+                 updateHistory(
+@@ -2352,6 +2378,9 @@
+     ) {
+         synchronized(historyLock) {
+             val current = history.find { it.id == id } ?: return
++            if (status == "Done") {
++                current.sourcePath?.let { File(it) }?.takeIf { it.name.startsWith("phoenix_part_") }?.let { runCatching { it.delete() } }
++            }
+             val finalName = if (errorName != null) "${current.name} · $errorName" else name ?: current.name
+             history = history.map { if (it.id == id) it.copy(
+                 name = finalName,
+@@ -2781,14 +2810,33 @@
+         }
+         if (listOf(face1, face2, face3, face4).all { it == null }) {
+             status = "Put the same replacement faces in the slots, then tap Redo part."
++            updateHistory(localId, eta = "Put the same replacement faces in the slots, then tap Redo part")
+             return
+         }
+         val file = resolvePartFile(item)
+-        if (file == null) {
+-            status = "That part clip was cleared when the app closed. Run the split again from the original video."
++        // 1.2.57: no clip left (older versions deleted it after the upload): cut this part again - from the original
++        // video it remembers, or else from the video now selected in step 01 with the trim it had for the split
++        val orig = item.origUri?.takeIf { item.origStartPct >= 0 && item.origEndPct > item.origStartPct }
++        val from: Triple<Uri, Int, Int>? = when {
++            file != null -> null
++            orig != null -> Triple(Uri.parse(orig), item.origStartPct, item.origEndPct)
++            selectedVideo != null -> {
++                val winStart = options.trimStart.coerceIn(0, 99)
++                val winEnd = options.trimEnd.coerceIn(winStart + 1, 100)
++                val span = winEnd - winStart
++                val a = winStart + span * item.partIndex / item.partCount
++                val b = if (item.partIndex == item.partCount - 1) winEnd else winStart + span * (item.partIndex + 1) / item.partCount
++                Triple(selectedVideo!!, a, b)
++            }
++            else -> null
++        }
++        if (file == null && from == null) {
++            status = "Select the original video in step 01 (same trim as the split), then tap Redo part."
++            updateHistory(localId, eta = "Select the original video in step 01, then tap Redo part")
+             return
+         }
+-        parallelJobs[localId]?.cancel()
++        parallelJobs.remove(localId)?.cancel()
++        syncRunning()
+         updateHistory(localId, status = "Replaced", eta = "Running this part again")
+         val space = HfSettings(
+             item.spaceUrl.trim().trimEnd('/'),
+@@ -2796,18 +2844,48 @@
+             modelRepo,
+             modelRevision
+         )
+-        startRemote(
+-            Uri.fromFile(file),
+-            space = space,
+-            label = item.spaceLabel,
+-            trimStart = 0,
+-            trimEnd = 100,
+-            groupId = item.groupId,
+-            partIndex = item.partIndex,
+-            partCount = item.partCount,
+-            durationSec = 360
+-        )
+-        status = "Part ${item.partIndex + 1} of ${item.partCount} started again. Parts that already finished are kept."
++        val n = item.partIndex + 1
++        status = if (file != null) "Part $n of ${item.partCount} starting again."
++        else "Cutting part $n of ${item.partCount} again (${from!!.second}-${from.third} % of the video)…"
++        viewModelScope.launch(guard + Dispatchers.IO) {
++            var clip = file
++            var secs = 360
++            var skipPct = 0
++            if (clip == null && from != null) {
++                val app = getApplication<Application>()
++                val totalUs = VideoTrimmer.durationUs(app, from.first) ?: 0L
++                if (totalUs > 0L) {
++                    val dest = File(app.cacheDir, "phoenix_part_${item.groupId}_${item.partIndex}.mp4")
++                    val cut = VideoTrimmer.trim(app, from.first, totalUs * from.second / 100L, totalUs * from.third / 100L, dest)
++                    if (cut != null && cut.file.exists() && cut.durationUs > 0L) {
++                        clip = cut.file
++                        secs = ((cut.durationUs / 1_000_000L).toInt() + 3).coerceIn(10, 360)
++                        // as the split does it: skip the frames before the cut point (the clip starts on a key frame)
++                        skipPct = ((cut.residualStartUs * 100.0) / cut.durationUs).toInt().coerceIn(0, 5)
++                    }
++                }
++            }
++            if (clip == null) {
++                updateHistory(localId, status = "Lost", eta = "Could not cut the part again. Select the original video in step 01, then tap Redo part")
++                status = "Could not cut part $n again from the video. Select the original video in step 01, then tap Redo part."
++                return@launch
++            }
++            startRemote(
++                Uri.fromFile(clip),
++                space = space,
++                label = item.spaceLabel,
++                trimStart = skipPct,
++                trimEnd = 100,
++                groupId = item.groupId,
++                partIndex = item.partIndex,
++                partCount = item.partCount,
++                durationSec = secs,
++                origUri = from?.first?.toString() ?: item.origUri,
++                origStartPct = from?.second ?: item.origStartPct,
++                origEndPct = from?.third ?: item.origEndPct
++            )
++            status = "Part $n of ${item.partCount} started again. Parts that already finished are kept."
++        }
+     }
+ 
+     private fun resolvePartFile(item: HistoryItem): File? {
+@@ -2870,7 +2948,8 @@
+     }
+ 
+     private fun persistHistory(commit: Boolean = false) {
+-        val arr = JSONArray(); history.forEach { h -> arr.put(JSONObject().put("id", h.id).put("kind", h.kind).put("name", h.name).put("uri", h.uri ?: JSONObject.NULL).put("status", h.status).put("createdAt", h.createdAt).put("spaceLabel", h.spaceLabel).put("spaceUrl", h.spaceUrl).put("remoteJobId", h.remoteJobId ?: JSONObject.NULL).put("progress", h.progress).put("eta", h.eta).put("groupId", h.groupId ?: JSONObject.NULL).put("partIndex", h.partIndex).put("partCount", h.partCount).put("sourcePath", h.sourcePath ?: JSONObject.NULL).put("detail", h.detail)) }
++        val arr = JSONArray(); history.forEach { h -> arr.put(JSONObject().put("id", h.id).put("kind", h.kind).put("name", h.name).put("uri", h.uri ?: JSONObject.NULL).put("status", h.status).put("createdAt", h.createdAt).put("spaceLabel", h.spaceLabel).put("spaceUrl", h.spaceUrl).put("remoteJobId", h.remoteJobId ?: JSONObject.NULL).put("progress", h.progress).put("eta", h.eta).put("groupId", h.groupId ?: JSONObject.NULL).put("partIndex", h.partIndex).put("partCount", h.partCount).put("sourcePath", h.sourcePath ?: JSONObject.NULL).put("detail", h.detail)
++            .put("origUri", h.origUri ?: JSONObject.NULL).put("origStartPct", h.origStartPct).put("origEndPct", h.origEndPct)) }
+         val ed = prefs.edit().putString(HISTORY_KEY, arr.toString())
+         if (commit) ed.commit() else ed.apply()
+     }
+@@ -2889,7 +2968,10 @@
+         o.optString("remoteJobId").takeIf { it.isNotBlank() && it != "null" }, o.optDouble("progress", 0.0).toFloat(), o.optString("eta", "ETA —"),
+         o.optString("groupId").takeIf { it.isNotBlank() && it != "null" }, o.optInt("partIndex", 0), o.optInt("partCount", 1),
+         o.optString("sourcePath").takeIf { it.isNotBlank() && it != "null" },
+-        o.optString("detail", "")
++        o.optString("detail", ""),
++        o.optString("origUri").takeIf { it.isNotBlank() && it != "null" },
++        o.optInt("origStartPct", -1),
++        o.optInt("origEndPct", -1)
+     )
+     private fun cleanupHistoryMetadata() { synchronized(historyLock) { history = history.filter { it.uri == null || runCatching { getApplication<Application>().contentResolver.openAssetFileDescriptor(Uri.parse(it.uri), "r") != null }.getOrDefault(false) }; persistHistory() } }
+ 
