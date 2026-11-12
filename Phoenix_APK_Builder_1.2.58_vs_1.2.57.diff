@@ -1,0 +1,576 @@
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.57_RedoPart/README.md Phoenix_APK_Builder_1.2.58_Azure/README.md
+--- Phoenix_APK_Builder_1.2.57_RedoPart/README.md	2026-11-12 13:22:38.494368143 +0000
++++ Phoenix_APK_Builder_1.2.58_Azure/README.md	2026-11-12 15:36:41.164656507 +0000
+@@ -8,7 +8,17 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.57 (Redo part)
++# Phoenix APK Builder 1.2.58 (Azure: new look)
++
++Upload every file in this pack, including `source.zip`. The page title must say Phoenix Mobile 1.2.58. versionCode is **178**.
++
++**1.2.58 - new look ("Azure"):** a calm, professional light theme. Dark text on light surfaces everywhere: near-black body text
++(16 : 1 contrast on white) and dark-grey secondary text (7.6 : 1) instead of the lighter grey; one azure-blue accent (#0F6CBD)
++instead of burgundy and orange. The dark header, the black selected tabs, the dark "Video ready" tiles and the dark Patch
++Removal / Belly editor are now light with dark text; white text remains only on the solid blue buttons (5.2 : 1). Nothing else
++changed (Redo part, Skin tone and the small download as in 1.2.57).
++
++## 1.2.57 (Redo part)
+ 
+ Upload every file in this pack, including `source.zip`.
+ The page title must say Phoenix Mobile 1.2.57.
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.57_RedoPart/app.py Phoenix_APK_Builder_1.2.58_Azure/app.py
+--- Phoenix_APK_Builder_1.2.57_RedoPart/app.py	2026-11-12 13:22:38.493821592 +0000
++++ Phoenix_APK_Builder_1.2.58_Azure/app.py	2026-11-12 15:36:41.163605536 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.57"
++VER = "1.2.58"
+ APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.57 build ===",
++        "=== Phoenix Mobile 1.2.58 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhoenixMobile-1.2.57-debug.apk was not produced.** "
++            "**Build reported success but PhoenixMobile-1.2.58-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -185,10 +185,10 @@
+             info = fh.read().strip()
+     except OSError:
+         pass
+-    if info and ("1.2.57" not in info or "versionCode 177" not in info):
++    if info and ("1.2.58" not in info or "versionCode 178" not in info):
+         yield (
+             log,
+-            "**Not offering this file.** It is not versionCode 177 (1.2.57). "
++            "**Not offering this file.** It is not versionCode 178 (1.2.58). "
+             "Installing an older build over the copy on the phone is what the phone calls an invalid package.\n\n```\n"
+             + info + "\n```",
+             None,
+@@ -297,12 +297,12 @@
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.57 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.58 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.57</h1>"
+-        "<p>versionCode 177. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.58</h1>"
++        "<p>versionCode 178. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.57-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.58-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -320,7 +320,7 @@
+     )
+ 
+     with gr.Row():
+-        # 1.2.57: the APK is offered ONLY through the direct, resumable /phoenix-apk link. Gradio's own file link
++        # 1.2.58: the APK is offered ONLY through the direct, resumable /phoenix-apk link. Gradio's own file link
+         # (/gradio_api/file=...) broke off again and again on the phone (206, 206, 206 ...) and left a cut-off file.
+         apk = gr.HTML(_apk_button(os.path.getsize(APK)) if os.path.isfile(APK) and _zip_complete(APK) else "")
+         sha = gr.File(label="SHA-256 checksum", interactive=False)
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.57-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.58-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.57_RedoPart/build.sh Phoenix_APK_Builder_1.2.58_Azure/build.sh
+--- Phoenix_APK_Builder_1.2.57_RedoPart/build.sh	2026-11-12 13:22:38.478268819 +0000
++++ Phoenix_APK_Builder_1.2.58_Azure/build.sh	2026-11-12 15:36:41.129460434 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.57}"
++VER="${VER:-1.2.58}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.57_RedoPart/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.58_Azure/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.57_RedoPart/src/app/build.gradle.kts	2026-11-12 13:22:38.480326607 +0000
++++ Phoenix_APK_Builder_1.2.58_Azure/src/app/build.gradle.kts	2026-11-12 15:36:41.137453155 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 177
+-        versionName = "1.2.57"
++        versionCode = 178
++        versionName = "1.2.58"
+         // 1.2.56: 64-bit ARM phones only. The APK carried four copies of ONNX Runtime and the native lib (arm64, armv7,
+         // x86, x86_64); three were never used on a phone, and the 92 MB download kept breaking off half way - a cut-off
+         // APK is what the phone calls "package appears to be invalid".
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt
+--- Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt	2026-11-12 13:21:43.517537770 +0000
++++ Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt	2026-11-12 15:36:27.448094130 +0000
+@@ -54,28 +54,32 @@
+ /* Modern brand palette — soft, high-contrast, 2026-trendy                  */
+ /* ----------------------------------------------------------------------- */
+ 
+-private val Navy = Color(0xFF0B1220)
+-private val NavyMid = Color(0xFF162033)
+-private val Burgundy = Color(0xFF9B1B4A)          // brand primary
+-private val BurgundyLite = Color(0xFFC0265C)
+-private val BurgundySoft = Color(0xFFFDF2F6)      // very light tint surfaces
+-private val BurgundyLine = Color(0xFFF3C6D8)      // border of a selected / tinted surface
+-private val Ember = Color(0xFFEA580C)             // the warm end of the brand gradient (primary buttons, badges)
+-private val Gold = Color(0xFFD4A017)
+-private val Blue = Color(0xFF2563EB)
+-private val Teal = Color(0xFF0F766E)              // "found" / success accents
+-private val Page = Color(0xFFF5F6FB)              // cool, calm canvas
+-private val Ink = Color(0xFF0F172A)
+-private val Muted = Color(0xFF64748B)
+-private val Line = Color(0xFFE6EAF2)              // hairline borders
+-private val Mist = Color(0xFFF4F6FB)              // quiet field / track background
+-private val SoftBlue = Color(0xFFEFF6FF)
+-private val SoftGold = Color(0xFFFFFBEB)
+-private val SoftGreen = Color(0xFFECFDF5)
+-private val SoftRed = Color(0xFFFEF2F2)
+-private val Slate = Color(0xFF1E293B)
+-private val CardShadow = Color(0x0A0F172A)
+-private val Lift = Color(0x2A1E2A55)              // soft shadow colour for raised cards
++// 1.2.58 "Azure": a calm, professional light theme - dark text on light surfaces everywhere, one blue accent.
++// (The names are kept so every screen picks the new colours up; "Burgundy" is now the brand blue.)
++private val Navy = Color(0xFFFFFFFF)
++private val NavyMid = Color(0xFFF3F5F8)
++private val Burgundy = Color(0xFF0F6CBD)          // brand primary: azure blue (white text on it: 5.2 : 1)
++private val BurgundyLite = Color(0xFF2886DE)      // the lighter end of the button gradient
++private val BurgundySoft = Color(0xFFEBF3FC)      // very light blue tint surfaces
++private val BurgundyLine = Color(0xFFB4D6FA)      // border of a selected / tinted surface
++private val Ember = Color(0xFF2886DE)             // the light end of the badge gradient
++private val Gold = Color(0xFF9A6700)              // amber for "selected" (readable on white: 4.9 : 1)
++private val Blue = Color(0xFF1F5FAD)
++private val Teal = Color(0xFF0B7A75)              // "found" / success accents
++private val Page = Color(0xFFF3F5F8)              // light grey canvas
++private val Ink = Color(0xFF1B1F24)               // body text: near black (16 : 1 on white)
++private val Muted = Color(0xFF4A5361)             // secondary text: dark grey (7.6 : 1 on white)
++private val Line = Color(0xFFDCE1E8)              // hairline borders
++private val Mist = Color(0xFFF1F4F8)              // quiet field / track background
++private val SoftBlue = Color(0xFFEBF3FC)
++private val SoftGold = Color(0xFFFFF6E0)
++private val SoftGreen = Color(0xFFE9F6EE)
++private val SoftRed = Color(0xFFFDECEE)
++private val Slate = Color(0xFF263040)             // strong dark text
++private val CardShadow = Color(0x0A1B1F24)
++private val Lift = Color(0x1F1B2A40)              // soft shadow colour for raised cards
++private val GoodGreen = Color(0xFF0B6B3A)         // "live" / "secure" text on light green
++private val GoodDot = Color(0xFF1E9E5A)
+ 
+ private val PhoenixColors = lightColorScheme(
+     primary = Burgundy,
+@@ -438,11 +442,7 @@
+     Column(
+         Modifier
+             .fillMaxWidth()
+-            .background(
+-                Brush.linearGradient(
+-                    listOf(Color(0xFF08111F), Color(0xFF15152A), Color(0xFF251326))
+-                )
+-            )
++            .background(Color.White)
+             .statusBarsPadding()
+             .padding(horizontal = 18.dp, vertical = if (isLandscape) 4.dp else 9.dp)
+     ) {
+@@ -452,28 +452,28 @@
+                     .size(38.dp)
+                     .shadow(9.dp, RoundedCornerShape(12.dp), clip = false)
+                     .clip(RoundedCornerShape(12.dp))
+-                    .background(Brush.linearGradient(listOf(BurgundyLite, Color(0xFFE64B7A)))),
++                    .background(Brush.linearGradient(listOf(BurgundyLite, Burgundy))),
+                 contentAlignment = Alignment.Center
+             ) {
+                 Text("✦", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Black)
+             }
+             Spacer(Modifier.width(12.dp))
+             Column(Modifier.weight(1f)) {
+-                Text("PHOENIX", color = Color.White, fontWeight = FontWeight.Black, fontSize = 17.sp, letterSpacing = 1.1.sp)
+-                Text("AI face studio", color = Color(0xFF9BA8BA), fontSize = 9.5.sp, fontWeight = FontWeight.Medium)
++                Text("PHOENIX", color = Ink, fontWeight = FontWeight.Black, fontSize = 17.sp, letterSpacing = 1.1.sp)
++                Text("AI face studio", color = Muted, fontSize = 9.5.sp, fontWeight = FontWeight.Medium)
+             }
+ 
+             Box(
+                 Modifier
+                     .clip(RoundedCornerShape(50.dp))
+-                    .background(if (live) Color(0x1A34D399) else Color(0x14FFFFFF))
+-                    .border(1.dp, if (live) Color(0x3834D399) else Color(0x20FFFFFF), RoundedCornerShape(50.dp))
++                    .background(if (live) SoftGreen else Mist)
++                    .border(1.dp, if (live) Color(0xFF9FD6B4) else Line, RoundedCornerShape(50.dp))
+                     .padding(horizontal = 10.dp, vertical = 7.dp)
+             ) {
+                 Row(verticalAlignment = Alignment.CenterVertically) {
+-                    Box(Modifier.size(7.dp).clip(CircleShape).background(if (live) Color(0xFF34D399) else Color(0xFF94A3B8)))
++                    Box(Modifier.size(7.dp).clip(CircleShape).background(if (live) GoodDot else Color(0xFF8A94A3)))
+                     Spacer(Modifier.width(6.dp))
+-                    Text(if (live) "${vm.activeJobCount} LIVE" else "READY", color = if (live) Color(0xFF6EE7B7) else Color(0xFFCBD5E1), fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = .5.sp)
++                    Text(if (live) "${vm.activeJobCount} LIVE" else "READY", color = if (live) GoodGreen else Muted, fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = .5.sp)
+                 }
+             }
+         }
+@@ -488,24 +488,24 @@
+                 Modifier
+                     .fillMaxWidth()
+                     .clip(RoundedCornerShape(15.dp))
+-                    .background(Color(0x12FFFFFF))
+-                    .border(1.dp, Color(0x18FFFFFF), RoundedCornerShape(15.dp))
++                    .background(Mist)
++                    .border(1.dp, Line, RoundedCornerShape(15.dp))
+                     .padding(horizontal = 12.dp, vertical = 8.dp)
+             ) {
+                 Row(verticalAlignment = Alignment.CenterVertically) {
+-                    Box(Modifier.size(8.dp).clip(CircleShape).background(if (vm.hfTokenSet) Color(0xFF34D399) else Gold))
++                    Box(Modifier.size(8.dp).clip(CircleShape).background(if (vm.hfTokenSet) GoodDot else Gold))
+                     Spacer(Modifier.width(9.dp))
+                     Column(Modifier.weight(1f)) {
+                         Text(
+                             vm.farmPhase.ifBlank { vm.spaceLabel },
+-                            color = Color(0xFFF6A8C5), fontSize = 10.5.sp, fontWeight = FontWeight.Bold,
++                            color = Burgundy, fontSize = 10.5.sp, fontWeight = FontWeight.Bold,
+                             maxLines = 1, overflow = TextOverflow.Ellipsis
+                         )
+-                        Text(vm.status, color = Color(0xFFD8E0EA), fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
++                        Text(vm.status, color = Ink, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                     }
+                     Text(
+                         if (vm.farmPercent > 0) "${vm.farmPercent}%" else if (vm.hfTokenSet) "SECURE" else "SETUP",
+-                        color = if (vm.farmPercent > 0) Gold else if (vm.hfTokenSet) Color(0xFF6EE7B7) else Color(0xFFFCD34D),
++                        color = if (vm.farmPercent > 0) Burgundy else if (vm.hfTokenSet) GoodGreen else Gold,
+                         fontSize = 12.sp, fontWeight = FontWeight.Black
+                     )
+                 }
+@@ -514,8 +514,8 @@
+                     LinearProgressIndicator(
+                         progress = { (vm.farmPercent / 100f).coerceIn(0f, 1f) },
+                         modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape),
+-                        color = Gold,
+-                        trackColor = Color(0x20FFFFFF)
++                        color = Burgundy,
++                        trackColor = Line
+                     )
+                 }
+             }
+@@ -557,16 +557,16 @@
+                 Modifier
+                     .fillMaxWidth()
+                     .clip(RoundedCornerShape(10.dp))
+-                    .background(Color(0x0EFFFFFF))
++                    .background(Mist)
+                     .padding(horizontal = 9.dp, vertical = 4.dp),
+                 verticalAlignment = Alignment.CenterVertically
+             ) {
+-                Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF34D399)))
++                Box(Modifier.size(6.dp).clip(CircleShape).background(GoodDot))
+                 Spacer(Modifier.width(7.dp))
+-                Text(item.spaceLabel, color = Color(0xFFE8B4C8), fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(.85f))
+-                LinearProgressIndicator(progress = { item.progress.coerceIn(0f,1f) }, modifier = Modifier.weight(1.5f).height(4.dp).clip(CircleShape), color = Gold, trackColor = Color(0x20FFFFFF))
++                Text(item.spaceLabel, color = Burgundy, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(.85f))
++                LinearProgressIndicator(progress = { item.progress.coerceIn(0f,1f) }, modifier = Modifier.weight(1.5f).height(4.dp).clip(CircleShape), color = Burgundy, trackColor = Line)
+                 Spacer(Modifier.width(8.dp))
+-                Text("${(item.progress * 100).toInt()}%", color = Color(0xFFCBD5E1), fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
++                Text("${(item.progress * 100).toInt()}%", color = Muted, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
+             }
+         }
+     }
+@@ -580,20 +580,20 @@
+     ) {
+         listOf("Image" to "▣", "Video" to "▶", "History" to "◷").forEach { (tab, icon) ->
+             val selected = vm.activeTab == tab
+-            val bg by animateColorAsState(if (selected) Ink else Color.White, animationSpec = tween(180), label = "tabBg")
+-            val fg by animateColorAsState(if (selected) Color.White else Muted, animationSpec = tween(180), label = "tabFg")
++            val bg by animateColorAsState(if (selected) BurgundySoft else Color.White, animationSpec = tween(180), label = "tabBg")
++            val fg by animateColorAsState(if (selected) Burgundy else Muted, animationSpec = tween(180), label = "tabFg")
+             Row(
+                 Modifier
+                     .weight(1f)
+                     .height(45.dp)
+                     .clip(RoundedCornerShape(15.dp))
+                     .background(bg)
+-                    .border(1.dp, if (selected) Color.Transparent else Line, RoundedCornerShape(15.dp))
++                    .border(1.dp, if (selected) BurgundyLine else Line, RoundedCornerShape(15.dp))
+                     .clickable { vm.setTab(tab) },
+                 horizontalArrangement = Arrangement.Center,
+                 verticalAlignment = Alignment.CenterVertically
+             ) {
+-                Text(icon, color = if (selected) Color(0xFFFFB6CE) else Muted, fontSize = 14.sp, fontWeight = FontWeight.Bold)
++                Text(icon, color = if (selected) Burgundy else Muted, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                 Spacer(Modifier.width(7.dp))
+                 Text(tab, color = fg, fontSize = 12.5.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold)
+             }
+@@ -729,11 +729,12 @@
+                     Box(
+                         Modifier
+                             .clip(RoundedCornerShape(20.dp))
+-                            .background(if (on) Color(0xFF15152A) else Color(0xFFF3F5F8))
++                            .background(if (on) BurgundySoft else Color(0xFFF3F5F8))
++                            .border(1.dp, if (on) BurgundyLine else Line, RoundedCornerShape(20.dp))
+                             .clickable { vm.updateOptions { it.copy(splitSharedSettings = shared) } }
+                             .padding(horizontal = 12.dp, vertical = 7.dp)
+                     ) {
+-                        Text(label, color = if (on) Color.White else Slate, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
++                        Text(label, color = if (on) Burgundy else Slate, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+                     }
+                 }
+             }
+@@ -950,7 +951,7 @@
+                 .background(BurgundySoft, zone)
+                 .drawBehind {
+                     drawRoundRect(
+-                        color = Color(0xFFE3A9C0),
++                        color = BurgundyLine,
+                         cornerRadius = CornerRadius(18.dp.toPx(), 18.dp.toPx()),
+                         style = Stroke(width = 1.5.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f))
+                     )
+@@ -1001,7 +1002,7 @@
+                 if (isVideo && thumb.hasImage) {
+                     Text(
+                         "FRAME ${framePercent}%",
+-                        color = Gold,
++                        color = Color.White,
+                         fontSize = 8.sp,
+                         fontWeight = FontWeight.Black,
+                         modifier = Modifier
+@@ -1026,7 +1027,7 @@
+                     overflow = TextOverflow.Ellipsis
+                 )
+                 listOfNotNull(thumb.durationLabel(), thumb.dimensionLabel(), thumb.sizeLabel()).forEach { chip ->
+-                    Text(chip, color = Color(0xFF7A6412), fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
++                    Text(chip, color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                 }
+                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                     Text(
+@@ -1299,12 +1300,12 @@
+     val thumb by rememberThumb(uri, isVideo = false, maxPx = 320)
+     val filled = uri != null
+ 
+-    val accent = if (slot % 2 == 0) Color(0xFFEA580C) else Color(0xFF0F766E)
++    val accent = if (slot % 2 == 0) Burgundy else Teal
+     Column(
+         modifier
+             .shadow(4.dp, RoundedCornerShape(14.dp), ambientColor = Lift, spotColor = Lift)
+             .clip(RoundedCornerShape(14.dp))
+-            .background(if (filled) Color.White else Color(0xFFF4FBFA))
++            .background(if (filled) Color.White else Mist)
+             .border(1.dp, if (filled) accent else accent.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+     ) {
+         Box(
+@@ -1527,8 +1528,8 @@
+         Modifier
+             .fillMaxWidth()
+             .clip(RoundedCornerShape(13.dp))
+-            .background(Color(0xFFFBF0F3))
+-            .border(1.dp, Burgundy.copy(alpha = 0.3f), RoundedCornerShape(13.dp))
++            .background(SoftRed)
++            .border(1.dp, Color(0xFFF1B8BE), RoundedCornerShape(13.dp))
+             .padding(13.dp),
+         verticalArrangement = Arrangement.spacedBy(8.dp)
+     ) {
+@@ -1661,10 +1662,11 @@
+             .fillMaxWidth()
+             .height(72.dp)
+             .clip(RoundedCornerShape(11.dp))
+-            .background(Slate),
++            .background(BurgundySoft)
++            .border(1.dp, BurgundyLine, RoundedCornerShape(11.dp)),
+         contentAlignment = Alignment.Center
+     ) {
+-        Text("Video ready · tap Download", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
++        Text("Video ready · tap Download", color = Burgundy, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+     }
+ }
+ 
+@@ -1694,8 +1696,8 @@
+                 shape = RoundedCornerShape(14.dp),
+                 colors = CardDefaults.cardColors(
+                     containerColor = when {
+-                        failed -> Color(0xFFFBF0F3)
+-                        onServer -> Color(0xFFFFF6E8)
++                        failed -> SoftRed
++                        onServer -> SoftGold
+                         done -> Color.White
+                         else -> SoftBlue
+                     }
+@@ -1729,8 +1731,8 @@
+                                 .clip(RoundedCornerShape(7.dp))
+                                 .background(
+                                     when {
+-                                        failed -> Color(0xFFF3D9E1)
+-                                        onServer -> Color(0xFFF8E7C9)
++                                        failed -> Color(0xFFF8D7DB)
++                                        onServer -> Color(0xFFFBE7C0)
+                                         done -> Color(0xFFDCF3E4)
+                                         else -> Color(0xFFD9E8F7)
+                                     }
+@@ -2096,7 +2098,7 @@
+                         .widthIn(min = 156.dp)
+                         .height(50.dp)
+                         .clip(RoundedCornerShape(16.dp))
+-                        .background(if (enabled) Brush.horizontalGradient(listOf(Color(0xFFE34B7B), Burgundy, Color(0xFF7B1739))) else Brush.horizontalGradient(listOf(Color(0xFFE4E9EF), Color(0xFFD5DCE5))))
++                        .background(if (enabled) Brush.horizontalGradient(listOf(BurgundyLite, Burgundy, Color(0xFF0F548C))) else Brush.horizontalGradient(listOf(Color(0xFFE4E9EF), Color(0xFFD5DCE5))))
+                         .clickable(enabled = enabled) { vm.startProcessing() },
+                     contentAlignment = Alignment.Center
+                 ) {
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/PatchRemoval.kt Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/PatchRemoval.kt
+--- Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/PatchRemoval.kt	2026-11-12 13:21:43.517400391 +0000
++++ Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/PatchRemoval.kt	2026-11-12 15:36:27.452759153 +0000
+@@ -268,13 +268,15 @@
+     }
+ }
+ 
+-private val PrInk = Color(0xFF0B1220)
+-private val PrPanel = Color(0xFF162033)
+-private val PrAccent = Color(0xFFC0265C)
+-private val PrBlue = Color(0xFF2563EB)
+-private val PrMuted = Color(0xFF94A3B8)
+-private val PrSlate = Color(0xFF1E293B)
+-private val PrSub = Color(0xFF64748B)
++// 1.2.58 "Azure": the editor is light too - dark text on light panels; white text only on the blue buttons
++private val PrInk = Color(0xFFF3F5F8)              // the editor's background
++private val PrPanel = Color(0xFFE3E9F1)            // panels, the picture frame and chips
++private val PrAccent = Color(0xFF0F6CBD)
++private val PrBlue = Color(0xFF1F5FAD)
++private val PrMuted = Color(0xFF4A5361)            // labels and hints (dark grey)
++private val PrSlate = Color(0xFF263040)
++private val PrSub = Color(0xFF4A5361)
++private val PrText = Color(0xFF1B1F24)             // text on the light panels
+ 
+ /**
+  * 1.2.37: the one-tap switch for the automatic lower-belly clean, on the main screen under the target video. It is the same setting
+@@ -287,8 +289,8 @@
+         Modifier
+             .fillMaxWidth()
+             .clip(shape)
+-            .background(if (on) Color(0xFFFDF2F6) else Color(0xFFF4F6FB))
+-            .border(1.dp, if (on) Color(0xFFF3C6D8) else Color(0xFFE6EAF2), shape)
++            .background(if (on) Color(0xFFEBF3FC) else Color(0xFFF3F5F8))
++            .border(1.dp, if (on) Color(0xFFB4D6FA) else Color(0xFFDCE1E8), shape)
+             .clickable(enabled = enabled) { onToggle(!on) }
+             .padding(horizontal = 14.dp, vertical = 11.dp),
+         verticalAlignment = Alignment.CenterVertically
+@@ -425,7 +427,7 @@
+                     onStroke = { s.preview = null; s.previewView = null; s.showPreview = false },
+                     onBand = { coverPolygon(s) })
+             }
+-            if (s.loading) CircularProgressIndicator(color = Color.White)
++            if (s.loading) CircularProgressIndicator(color = PrAccent)
+             if (s.zoom > 1.01f) {
+                 Text("${"%.1f".format(s.zoom)}×", color = Color.White, fontSize = 11.sp,
+                     modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).clip(RoundedCornerShape(6.dp))
+@@ -468,7 +470,7 @@
+                 if (s.positions.isEmpty()) "Position 1 of this mark" else
+                     "Position ${s.positions.size + 1} of this mark — added: " +
+                         s.positions.joinToString("  ") { PatchFrames.clock(it.timeMs) },
+-                color = Color.White, fontSize = 11.sp, lineHeight = 14.sp
++                color = PrText, fontSize = 11.sp, lineHeight = 14.sp
+             )
+             if (s.positions.isNotEmpty()) {
+                 ChipRow { SmallChip("Remove the last added position", !vm.patchBusy) { vm.removeLastPosition() } }
+@@ -479,7 +481,7 @@
+                     Box(
+                         Modifier.size(30.dp).clip(CircleShape).background(if (s.brush == i) PrAccent else PrPanel).clickable { s.brush = i },
+                         contentAlignment = Alignment.Center
+-                    ) { Text(l, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp) }
++                    ) { Text(l, color = if (s.brush == i) Color.White else PrText, fontWeight = FontWeight.Bold, fontSize = 12.sp) }
+                 }
+                 SmallChip(if (s.tapMode) "Tap on" else "Tap", true) { s.tapMode = !s.tapMode }
+                 SmallChip("Undo", s.strokes.isNotEmpty() && !vm.patchBusy) {
+@@ -572,7 +574,7 @@
+ @Composable
+ private fun Header(vm: PhoenixViewModel) {
+     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+-        Text("Patch Removal", color = Color.White, fontWeight = FontWeight.Black, fontSize = 15.sp, modifier = Modifier.weight(1f))
++        Text("Patch Removal", color = PrText, fontWeight = FontWeight.Black, fontSize = 15.sp, modifier = Modifier.weight(1f))
+         TextButton(onClick = { vm.closePatchEditor() }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+             Text("Close", color = PrMuted, fontSize = 12.sp)
+         }
+@@ -590,11 +592,11 @@
+ private fun SmallChip(text: String, enabled: Boolean, onClick: () -> Unit) {
+     Box(
+         Modifier.height(30.dp).clip(RoundedCornerShape(8.dp))
+-            .background(if (enabled) PrPanel else Color(0xFF0F1828))
++            .background(if (enabled) PrPanel else Color(0xFFEEF1F5))
+             .clickable(enabled = enabled) { onClick() }
+             .padding(horizontal = 8.dp),
+         contentAlignment = Alignment.Center
+-    ) { Text(text, color = if (enabled) Color.White else Color(0xFF475569), fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
++    ) { Text(text, color = if (enabled) PrText else Color(0xFF9AA4B2), fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+ }
+ 
+ /** The frame with the painted strokes; one finger paints (a magnifier shows what is under it), two fingers zoom and pan. */
+@@ -1032,7 +1034,7 @@
+     Box(
+         Modifier.clip(RoundedCornerShape(14.dp)).background(if (selected) PrAccent else PrPanel)
+             .clickable(enabled = enabled) { onClick() }.padding(horizontal = 12.dp, vertical = 6.dp)
+-    ) { Text(text, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
++    ) { Text(text, color = if (selected) Color.White else PrText, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+ }
+ 
+ /** 1.2.31 Belly clean in the frame screen: on / off for the video, the band's length and breadth, before / after, outline. */
+@@ -1041,7 +1043,7 @@
+     val o = vm.options
+     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+         Column(Modifier.weight(1f)) {
+-            Text("Belly mark for this video", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
++            Text("Belly mark for this video", color = PrText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+             Text("A tattoo, mark or mole. A shade is left alone.", color = PrMuted, fontSize = 10.5.sp, lineHeight = 13.sp)
+             Text("• Near the centre, below the navel and above the bikini line.", color = PrMuted, fontSize = 10.5.sp, lineHeight = 13.sp)
+             Text("• Only a dark patch larger than 1 square inch. Pigment and shade are ignored.", color = PrMuted, fontSize = 10.5.sp, lineHeight = 13.sp)
+@@ -1097,5 +1099,5 @@
+     Box(
+         Modifier.clip(RoundedCornerShape(10.dp)).background(if (enabled) PrPanel else PrPanel.copy(alpha = 0.4f))
+             .clickable(enabled = enabled) { onClick() }.padding(horizontal = 10.dp, vertical = 5.dp)
+-    ) { Text(text, color = if (enabled) Color.White else PrMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
++    ) { Text(text, color = if (enabled) PrText else Color(0xFF9AA4B2), fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+ }
+diff -ruN -x source.zip Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt
+--- Phoenix_APK_Builder_1.2.57_RedoPart/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt	2026-11-12 13:21:43.518255537 +0000
++++ Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/SkinToneStep.kt	2026-11-12 15:36:05.723332816 +0000
+@@ -43,11 +43,11 @@
+ import kotlin.math.abs
+ import kotlin.math.roundToInt
+ 
+-private val StInk = Color(0xFF0F172A)
+-private val StMuted = Color(0xFF64748B)
+-private val StLine = Color(0xFFE6EAF2)
+-private val StBurgundy = Color(0xFF9B1B4A)
+-private val StSoft = Color(0xFFFDF2F6)
++private val StInk = Color(0xFF1B1F24)
++private val StMuted = Color(0xFF4A5361)
++private val StLine = Color(0xFFDCE1E8)
++private val StBurgundy = Color(0xFF0F6CBD)               // 1.2.58: the brand blue
++private val StSoft = Color(0xFFEBF3FC)
+ // the slider's track: deep to light skin, so the direction reads at a glance
+ private val SkinDeep = Color(0xFF5B3A26)
+ private val SkinMid = Color(0xFFB98260)
+@@ -234,7 +234,7 @@
+                 Modifier
+                     .offset(x = w * p.box[0], y = (hh * p.box[1] - 22.dp).coerceAtLeast(0.dp))
+                     .clip(RoundedCornerShape(8.dp))
+-                    .background(Color(0xCC9B1B4A))
++                    .background(Color(0xCC0F6CBD))
+                     .padding(horizontal = 6.dp, vertical = 2.dp)
+             ) {
+                 Text("#${p.slot} ${skinToneLabel(p.amount)}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
