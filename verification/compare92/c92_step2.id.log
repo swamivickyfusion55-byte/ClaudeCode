@@ -1,0 +1,8 @@
+OUT=/tmp/claude-0/bench_work/c92_step2/out/BENCHC92A4822E/final.mp4
+A (left at start): own replacement = photo B | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 91 % paint over the face): REVERT 0 [], weak 0 [] | own sim median 0.77 (min 0.68), other's -0.02 | flicker x1.01
+B (right at start, in front): own replacement = photo A | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 90 % paint over the face): REVERT 0 [], weak 0 [] | own sim median 0.75 (min 0.75), other's 0.02 | flicker x0.98
+same replacement on both people: False
+2026-11-12 15:46:02,336 [INFO] Done in 706.7s — frames=120; FACE PAINTED ON 120/120 FRAMES (100%); detector_calls=84 (empty=0); swap_calls=240; detector_avg=284.6ms; swap_avg=4670.6ms; encode=0.4s; reused=0; kps_rejected=0; det_faces_avg=2.00 max=2; det_passes=84 raw_faces=168 embeds=168 (1.00 embeds per raw face); shot_cuts=0; REVERTS=0 blind=0 faint=0 vis_rejected_calls=0 occ_cut=0/240; geom_errors=0; PER-PERSON painted={0: 120, 1: 120} recorded={0: 120, 1: 120} picker_calls=0 picker_dropped_ref=0; weak_kept=0 weak_dropped=0; ID-GATE {0: {'id_reject': 83, 'rel_rescued': 0, 'rel_waiting': 0, 'rel_no_margin': 0, 'rel_below_floor': 83}, 1: {'id_reject': 89, 'rel_rescued': 0, 'rel_waiting': 0, 'rel_no_margin': 0, 'rel_below_floor': 89}}
+A: off mean 4.1 px, 90th 5.1 px, worst 50.2 px | jump 41.1 px | unpainted 0 frames
+B: off mean 1.5 px, 90th 2.5 px, worst 2.7 px | jump 0.3 px | unpainted 0 frames
+finished
