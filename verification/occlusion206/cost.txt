@@ -1,0 +1,2 @@
+face crop 256 px: mask step 199.7 ms (v11.2.205) -> 206.3 ms (v11.2.206), +6.6 ms per face and frame
+face crop 512 px: mask step 290.5 ms (v11.2.205) -> 309.7 ms (v11.2.206), +19.2 ms per face and frame

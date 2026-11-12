@@ -1,0 +1,426 @@
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-206*' v11.2.205_SkinTone/config.py v11.2.206_OcclusionFlow/config.py
+--- v11.2.205_SkinTone/config.py	2026-11-11 09:05:28.709502722 +0000
++++ v11.2.206_OcclusionFlow/config.py	2026-11-12 18:24:41.721912858 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.205"
+-BUILD = "SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.206"
++BUILD = "OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-206*' v11.2.205_SkinTone/core_pipeline.py v11.2.206_OcclusionFlow/core_pipeline.py
+--- v11.2.205_SkinTone/core_pipeline.py	2026-11-11 08:50:24.285755564 +0000
++++ v11.2.206_OcclusionFlow/core_pipeline.py	2026-11-12 18:26:50.093401939 +0000
+@@ -1117,7 +1117,7 @@
+     except NameError:
+         pass
+     try:
+-        _E.OCCNET_STATS.update({"frames": 0, "cut_frames": 0, "cut_area_sum": 0.0, "ms": 0.0})
++        _E.OCCNET_STATS.update({"frames": 0, "cut_frames": 0, "cut_area_sum": 0.0, "ms": 0.0, "wide": 0, "held": 0})
+     except Exception:
+         pass
+     try:
+@@ -8101,9 +8101,11 @@
+                              float(stats["face_luma_sum"]) / max(1, int(stats["face_luma_n"])))
+             _on = _E.OCCNET_STATS
+             if _E._OCCNET.get("sess") is not None and float(_E._P.get("occ_net", 0.0) or 0.0) > 0.0:
+-                logging.info("OCCLUSION-NET: something in front of the mouth/chin was cut on %d of %d face-frames (mean %.1f%% of the face crop); %.0f ms per face-frame",
++                logging.info("OCCLUSION-NET: something in front of the face was cut on %d of %d face-frames (mean %.1f%% of the face crop; "
++                             "away from the mouth: %d pieces, %d held while leaving); %.0f ms per face-frame",
+                              int(_on["cut_frames"]), int(_on["frames"]),
+                              100.0 * float(_on["cut_area_sum"]) / max(1, int(_on["cut_frames"])),
++                             int(_on.get("wide", 0)), int(_on.get("held", 0)),
+                              float(_on["ms"]) / max(1, int(_on["frames"])))
+             elif float(_E._P.get("occ_net", 0.0) or 0.0) > 0.0:
+                 logging.info("OCCLUSION-NET: not available on this run (%s)", _E._OCCNET.get("error") or "model not loaded")
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-206*' v11.2.205_SkinTone/swap_engine.py v11.2.206_OcclusionFlow/swap_engine.py
+--- v11.2.205_SkinTone/swap_engine.py	2026-11-11 09:05:28.716746145 +0000
++++ v11.2.206_OcclusionFlow/swap_engine.py	2026-11-12 20:31:42.161778599 +0000
+@@ -42,6 +42,7 @@
+ 
+ import logging
+ import os
++import threading
+ import math
+ from itertools import permutations
+ 
+@@ -61,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.205-skintone"
++ENGINE_VERSION = "aequus-1.2.206-occlusionflow"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -185,6 +186,22 @@
+     "occ_net_core_y": 0.58,         # a cut piece must reach the mouth/chin zone: below this row...
+     "occ_net_core_x": 0.17,         # ...and within this distance of the centre line (fraction of the crop)...
+     "occ_net_core_min": 0.002,
++    # v11.2.206 (SDOS-206) occlusion smoothness. Each 0 restores v11.2.205 exactly.
++    "occ_flow": 1.0,                # last frame's cut moves with the object (optical flow inside the face crop) before smoothing
++    "occ_instant": 1.0,             # a cut opens at once where the colour test AND the occlusion model both see the object
++    "occ_snap": 1.0,                # the cut's edge follows the picture's own edges (guided filter in the face crop)
++    "occ_snap_eps": 0.03,           # ...its smoothness (grey levels 0-1)
++    "occ_net_wide": 1.0,            # the model's cut away from the mouth too (a hand over an eye or a cheek), for big pieces...
++    "occ_net_wide_min": 0.010,      # ...of at least this share of the face crop...
++    "occ_net_wide_inner": 0.25,     # ...with at least this share over the inner face (hair along the face's edge is not cut)
++    "occ_net_wide_erode": 0.10,     # the inner face: the outline taken this far in (fraction of the crop)
++    "occ_net_wide_hold": 0.30,      # a piece that overlaps last frame's cut this much stays cut while the object leaves
++    "occ_net_wide_edge": 0.04,      # (the first frames of a face, before it has a memory: the outline plus this much)
++    "occ_net_wide_zone_erode": 0.03,  # big pieces are looked for this close to the face's outline (the mouth rule: 0.08)
++    "occ_net_wide_lips": 0.04,      # the lips and this margin stay under the mouth rule (a smile is not an object)
++    "occ_net_wide_face": 0.4,
++    "occ_net_back": 0.9,
++    "occ_net_wide_yaw": 0.34,       # not on a face turned more than ~35 deg (the side-view offset), nor two faces in contact            # where the model is this sure it sees face, a cut gives the face back at once       # an accepted piece is followed only where the model saw face on the last frames
+     # v11.2.92 (SDOS-092) extreme side views: there the 5-point alignment puts the fixed oval half in front of the
+     # face (air, background) and leaves the back cheek out. From profile_lo to profile_hi (nose offset from the eye
+     # midpoint, in eye distances: 0.25 at 18 deg of yaw, 0.45 at 45 deg, 0.76+ from 55 deg on the AFLW2000 photos)
+@@ -955,7 +972,10 @@
+                  "confirm_hits", "_confirm_ease", "ab_bbox", "ab_kps",
+                  "skin_ref", "skin_hits", "kps_scale", "skin_miss",
+                  "pose_ok", "occ_keep", "grain_ema", "mblur_ema",
+-                 "occ_ref", "occ_nref", "occn_keep", "prof_w", "eat_w")
++                 "occ_ref", "occ_nref", "occn_keep", "prof_w", "eat_w",
++                 "occ_prev_g",                  # v11.2.206: last frame's face crop (grey, 128 px) for the cut's motion
++                 "occ_face_ref",                # v11.2.206: how often the occlusion model saw face at each pixel lately
++                 "occn_core")                   # v11.2.206: the mouth rule's cut alone, smoothed as in 11.2.205 (eating rule)
+ 
+     def __init__(self, slot=0):
+         self.slot = slot
+@@ -1011,6 +1031,9 @@
+         self.occn_keep = None
+         self.prof_w = None
+         self.eat_w = 0.0
++        self.occ_prev_g = None          # v11.2.206
++        self.occ_face_ref = None
++        self.occn_core = None
+         # Slowly-smoothed SIZE of this identity's landmark constellation.
+         # Position and size do not deserve the same filter; sharing one is
+         # what makes a pasted face pulse. See the rescale site below.
+@@ -1656,6 +1679,9 @@
+         self.last_hit_bbox = None
+         self.last_hit_kps = None
+         self.occn_keep = None
++        self.occ_prev_g = None          # v11.2.206
++        self.occ_face_ref = None
++        self.occn_core = None
+         self.prof_w = None
+         self.eat_w = 0.0
+         self.vel_bbox = np.zeros(4, np.float32)
+@@ -1887,6 +1913,22 @@
+     return m
+ 
+ 
++def _yaw_offset(kps):
++    """The nose's sideways offset from the eye midpoint, roll-corrected, in eye distances (as profile_weight): frontal
++    0.0-0.25, 36-45 deg 0.34-0.51, 55-71 deg 0.76-1.48. None without points."""
++    try:
++        k = np.asarray(kps, np.float32).reshape(-1, 2)
++        le, re, nose = k[0], k[1], k[2]
++        ev = re - le
++        ed = float(np.linalg.norm(ev)) + 1e-6
++        roll = float(np.arctan2(ev[1], ev[0]))
++        c, s = math.cos(-roll), math.sin(-roll)
++        rel = nose - (le + re) * 0.5
++        return abs(float(rel[0] * c - rel[1] * s)) / ed
++    except Exception:
++        return None
++
++
+ def profile_weight(kps):
+     """0 for any pose up to about 45 deg of yaw, rising to 1 at about 55-60 deg (calibrated on AFLW2000's true yaw).
+ 
+@@ -1992,7 +2034,131 @@
+         return mask
+ 
+ 
+-def occ_net_keep(aligned_bgr, pts_aligned, size, M=None, frame_wh=None):
++_OCC_TL = threading.local()
++_OCC_GRID = {}
++
++
++def _occ_flow(track, aligned_bgr):
++    """v11.2.206: where each pixel of this face crop was in the previous one (DIS optical flow at 128 px, footage only).
++    None on the first frame of a track, after a size change, or if OpenCV has no DIS."""
++    try:
++        g = cv2.cvtColor(cv2.resize(aligned_bgr, (128, 128), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
++    except Exception:
++        return None
++    prev = getattr(track, "occ_prev_g", None)
++    track.occ_prev_g = g
++    if prev is None or getattr(prev, "shape", None) != g.shape:
++        return None
++    if float(np.mean(cv2.absdiff(g, prev))) > 40.0:
++        return None                      # a different picture (a shot cut): nothing to carry over
++    try:
++        dis = getattr(_OCC_TL, "dis", None)
++        if dis is None:
++            dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST)
++            _OCC_TL.dis = dis
++        return dis.calc(g, prev, None)
++    except Exception:
++        return None
++
++
++def _occ_warp(keep_prev, flow, size):
++    """Move last frame's cut (keep < 1) along the flow into this frame's crop. Areas outside stay uncut."""
++    if flow is None or keep_prev is None:
++        return keep_prev
++    try:
++        grid = _OCC_GRID.get(size)
++        if grid is None:
++            gx, gy = np.meshgrid(np.arange(size, dtype=np.float32), np.arange(size, dtype=np.float32))
++            grid = _OCC_GRID[size] = (gx, gy)
++        f = cv2.resize(flow, (size, size), interpolation=cv2.INTER_LINEAR) * (size / 128.0)
++        cut = cv2.remap(1.0 - keep_prev, grid[0] + f[..., 0], grid[1] + f[..., 1], cv2.INTER_LINEAR,
++                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
++        return np.clip(1.0 - cut, 0.0, 1.0).astype(np.float32)
++    except Exception:
++        return keep_prev
++
++
++def _occ_snap(K, aligned_bgr, size):
++    """v11.2.206: fit the edge of the cut (0 < K < 1) to the picture's own edges; the inside and the rest are not touched."""
++    try:
++        band = (K > 0.02) & (K < 0.98)
++        if not bool(band.any()):
++            return K
++        r = max(2, int(round(size / 64.0)))
++        band = cv2.dilate(band.astype(np.uint8), np.ones((2 * r + 1, 2 * r + 1), np.uint8)).astype(bool)
++        gray = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2GRAY)
++        eps = (float(_P.get("occ_snap_eps", 0.03)) * 255.0) ** 2
++        try:
++            g = cv2.ximgproc.guidedFilter(gray, K.astype(np.float32), r, eps)
++        except Exception:
++            return K
++        out = K.copy()
++        out[band] = np.clip(g[band], 0.0, 1.0)
++        return out.astype(np.float32)
++    except Exception:
++        return K
++
++
++def _occ_net_wide(keep, m, occ, hull, hull0, pts, outside, prev_cut, region, need, W):
++    """v11.2.206 (SDOS-206): the occlusion model's cut away from the mouth. A big piece over the inner face (a hand over an eye
++    or a cheek, a cup, a phone) is cut, and followed out to the face's edge where the model saw face on the last frames. The
++    lips (with a margin) are left out and stay under 11.2.205's mouth rule: a smile's teeth are not an object. Hair falling
++    along the face's edge is a thin piece at the outline and is not cut; the background, hair and the swap's own soft border
++    around the face are never joined in. In place on keep (256 px)."""
++    ei = int(round(float(_P.get("occ_net_wide_erode", 0.10)) * W)) | 1
++    inner = cv2.erode(hull.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ei, ei))).astype(bool)
++    wmin = float(_P.get("occ_net_wide_min", 0.010)) * W * W
++    winner = float(_P.get("occ_net_wide_inner", 0.25))
++    lipz = np.zeros((W, W), np.uint8)
++    try:
++        lp = np.asarray(pts, np.float32)[_LIPS]
++        cv2.fillConvexPoly(lipz, cv2.convexHull(np.round(lp).astype(np.int32)), 1)
++        lm = int(round(float(_P.get("occ_net_wide_lips", 0.04)) * W)) | 1
++        lipz = cv2.dilate(lipz, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (lm, lm)))
++    except Exception:
++        pass
++    lipz = lipz.astype(bool)
++    ez = int(round(float(_P.get("occ_net_wide_zone_erode", 0.03)) * W)) | 1
++    zone = cv2.erode(hull0.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ez, ez))).astype(bool) | hull
++    cand = (m < 0.5) & zone & ~lipz & (keep >= 0.999)    # nearer the face's edge than the mouth rule's zone
++    if not bool(cand.any()):
++        return
++    if region is not None and getattr(region, "shape", None) == (W, W):
++        face = region | hull
++    else:
++        ed = int(round(float(_P.get("occ_net_wide_edge", 0.04)) * W)) | 1
++        face = cv2.dilate(hull0.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ed, ed))).astype(bool)
++    face &= ~lipz
++    if outside is not None:
++        face &= ~outside
++    full_lab = None
++    hold = float(_P.get("occ_net_wide_hold", 0.30))
++    n, lab = cv2.connectedComponents(cand.astype(np.uint8), connectivity=8)
++    for c in range(1, n):
++        comp = lab == c
++        if outside is not None and bool((comp & outside).any()):
++            continue
++        area = float(comp.sum())
++        if area >= wmin and float((comp & inner).sum()) >= winner * area:
++            OCCNET_STATS["wide"] = OCCNET_STATS.get("wide", 0) + 1
++        elif (prev_cut is not None and area >= need and float((comp & prev_cut).sum()) >= hold * area
++              and (region is None or float((comp & (region | inner)).sum()) >= 0.5 * area)):
++            # the object cut on the last frame (moved with the footage) stays cut while it leaves, even when what is left
++            # of it over the face is small
++            OCCNET_STATS["held"] = OCCNET_STATS.get("held", 0) + 1
++        else:
++            continue
++        keep[comp] = np.minimum(keep[comp], m[comp])
++        if full_lab is None:
++            full_lab = cv2.connectedComponents(((m < 0.5) & face).astype(np.uint8), connectivity=8)[1]
++        for fl in np.unique(full_lab[comp]):
++            if fl:
++                ext = full_lab == fl
++                keep[ext] = np.minimum(keep[ext], m[ext])
++
++
++def occ_net_keep(aligned_bgr, pts_aligned, size, M=None, frame_wh=None, raw_out=None, prev_cut=None, region=None,
++                 wide=None):
+     """1 = paint the swap, <1 = something is in front of the mouth/chin here. None when the net is unavailable or there is no outline."""
+     sess = _OCCNET.get("sess")
+     if sess is None or aligned_bgr is None or pts_aligned is None:
+@@ -2008,9 +2174,14 @@
+         pts = np.asarray(pts_aligned, np.float32) * (W / float(size))
+         cv2.fillConvexPoly(hull, cv2.convexHull(np.round(pts).astype(np.int32)), 1)
+         e = int(round(float(_P.get("occ_net_hull_erode", 0.08)) * W)) | 1
++        hull0 = hull
+         hull = cv2.erode(hull, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (e, e))).astype(bool)
+         keep = np.ones((W, W), np.float32)
+         occ = (m < 0.5) & hull
++        if raw_out is not None:              # v11.2.206: where the model sees something in front, anywhere on the face
++            raw_out.append(cv2.resize(occ.astype(np.uint8), (size, size), interpolation=cv2.INTER_NEAREST).astype(bool)
++                           if size != W else occ.copy())
++            raw_out.append(m)                # ...and its face map (256 px), for the caller's memory of where the face is
+         # Where the crop runs off the picture it is filled with stretched edge pixels, which the model reads as an
+         # occluder. Nothing that touches that part may be cut (a face at the frame edge stays as it was).
+         outside = None
+@@ -2041,6 +2212,13 @@
+                     continue
+                 if float((comp & core).sum()) >= need:
+                     keep[comp] = m[comp]
++            core_keep = keep.copy()
++            if (float(_P.get("occ_net_wide", 0.0) or 0.0) > 0.0) if wide is None else bool(wide):
++                _occ_net_wide(keep, m, occ, hull, hull0, pts, outside, prev_cut, region, need, W)
++        else:
++            core_keep = keep
++        if raw_out is not None:              # ...and the mouth rule's own cut (11.2.205's), for the eating rule
++            raw_out.append(cv2.resize(core_keep, (size, size), interpolation=cv2.INTER_LINEAR) if size != W else core_keep.copy())
+         if size != W:
+             keep = cv2.resize(keep, (size, size), interpolation=cv2.INTER_LINEAR)
+         OCCNET_STATS["ms"] += (time.perf_counter() - t0) * 1000.0
+@@ -2495,6 +2673,51 @@
+         mask = np.clip(mask, 0.0, 1.0).astype(np.float32)
+         if track is not None:
+             mask = track.smooth_mask(mask)
++        # v11.2.206: the occlusion model runs first, so its view (anywhere on the face) can confirm the colour test, and
++        # the flow of the footage inside the crop moves last frame's cuts with the object.
++        _raw = []
++        _nk_early = None
++        _wide_now = False
++        _flow = _occ_flow(track, aligned_target) if (track is not None and aligned_target is not None
++                                                     and float(_P.get("occ_flow", 0.0) or 0.0) > 0.0) else None
++        if aligned_target is not None and pts is not None and float(_P.get("occ_net", 0.0) or 0.0) > 0.0:
++            _pc = None
++            _wide = float(_P.get("occ_net_wide", 0.0) or 0.0) > 0.0
++            # v11.2.206: the wide cut stands aside where 11.2.205's own rules decide - two faces in contact (the rival cut
++            # decides front and behind) and a turned face (over ~35 deg the outline reaches past the face, where the model
++            # rightly sees no face)
++            _yo = _yaw_offset(getattr(face, "kps", None))
++            _wide_now = _wide and not rivals and _yo is not None and _yo < float(_P.get("occ_net_wide_yaw", 0.34))
++            if track is not None and _wide_now:
++                _pv = getattr(track, "occn_keep", None)
++                if _pv is not None and getattr(_pv, "shape", None) == (size, size) and float(_pv.min()) < 0.5:
++                    if _flow is not None:
++                        _pv = _occ_warp(_pv, _flow, size)
++                    _pc = cv2.resize(_pv, (256, 256), interpolation=cv2.INTER_LINEAR) < 0.5
++            _rg = None
++            if _wide_now and track is not None:
++                _fr = getattr(track, "occ_face_ref", None)
++                if _fr is not None and getattr(_fr, "shape", None) == (256, 256):
++                    # (not moved with the flow: the crop is aligned to the face, so the face stays where it is in it)
++                    _rg = _fr > float(_P.get("occ_net_wide_face", 0.4))   # the model saw face here on recent frames
++            _nk_early = occ_net_keep(aligned_target, pts, size, M=M, frame_wh=frame_wh,
++                                     raw_out=_raw if (_wide or float(_P.get("occ_instant", 0.0) or 0.0) > 0.0) else None,
++                                     prev_cut=_pc, region=_rg, wide=_wide_now)
++            if _wide and track is not None and len(_raw) >= 2 and _raw[1] is not None:
++                # remember where the face is: learnt where nothing is cut now, so an object never teaches itself as face
++                _fm = (_raw[1] >= 0.5).astype(np.float32)
++                _fr = getattr(track, "occ_face_ref", None)
++                if _fr is None or getattr(_fr, "shape", None) != _fm.shape:
++                    track.occ_face_ref = _fm
++                else:
++                    _cutnow = (cv2.resize(_nk_early, (256, 256), interpolation=cv2.INTER_LINEAR) < 0.5
++                               if _nk_early is not None else np.zeros_like(_fm, bool))
++                    _r0 = _raw[0] if _raw[0].shape == (256, 256) else cv2.resize(
++                        _raw[0].astype(np.uint8), (256, 256), interpolation=cv2.INTER_NEAREST).astype(bool)
++                    _cutnow |= _r0                                  # inside the outline "not face" is always something in front
++                    upd = 0.85 * _fr + 0.15 * _fm
++                    track.occ_face_ref = np.where(_cutnow, _fr, upd).astype(np.float32)
++        _K = None
+         # After the temporal mask, so a cone or scoop is removed on the
+         # frame it appears instead of being smoothed back in.
+         if aligned_target is not None:
+@@ -2517,8 +2740,12 @@
+                     # stays slower, as cheap insurance against a blink.
+                     o = float(_P.get("occ_open", 0.45))
+                     c = float(_P.get("occ_close", 0.22))
+-                    a = np.where(keep < track.occ_keep, o, c).astype(np.float32)
+-                    track.occ_keep = (track.occ_keep * (1.0 - a)
++                    prev_k = _occ_warp(track.occ_keep, _flow, keep.shape[0]) if _flow is not None else track.occ_keep
++                    opening = keep < prev_k
++                    a = np.where(opening, o, c).astype(np.float32)
++                    if _raw and _raw[0].shape == keep.shape and float(_P.get("occ_instant", 0.0) or 0.0) > 0.0:
++                        a[opening & _raw[0]] = 1.0       # v11.2.206: both tests see the object - cut it on this frame
++                    track.occ_keep = (prev_k * (1.0 - a)
+                                       + keep * a).astype(np.float32)
+                 keep = track.occ_keep
+                 try:
+@@ -2533,15 +2760,26 @@
+                 # never taught the occluder it just rejected.
+                 track.occ_ref, track.occ_nref = update_face_ref(
+                     track.occ_ref, track.occ_nref, aligned_target, keep)
+-            mask = mask * keep
++            _K = keep
++        _nk_final = None
+         if aligned_target is not None and pts is not None and float(_P.get("occ_net", 0.0) or 0.0) > 0.0:
+-            nk = occ_net_keep(aligned_target, pts, size, M=M, frame_wh=frame_wh)
++            nk = _nk_early
+             if nk is not None:
+                 if track is not None:
+                     prev = getattr(track, "occn_keep", None)
++                    if prev is not None and _flow is not None and getattr(prev, "shape", None) == nk.shape:
++                        prev = _occ_warp(prev, _flow, nk.shape[0])      # v11.2.206: the give-back follows the object
+                     if prev is not None and getattr(prev, "shape", None) == nk.shape:
+                         # a cut follows at once; giving the face back takes a few frames, so one missed frame does not flash
+-                        nk = np.minimum(nk, 0.5 * prev + 0.5 * nk).astype(np.float32)
++                        _sm = np.minimum(nk, 0.5 * prev + 0.5 * nk).astype(np.float32)
++                        if (_wide_now and len(_raw) >= 3
++                                and getattr(_raw[2], "shape", None) == nk.shape):
++                            # v11.2.206: ...except where the model is sure it sees face again (away from the mouth rule's
++                            # cut): the face comes back on that frame, so a hand moving on leaves no ghost behind it
++                            _sure = cv2.resize(_raw[1], (nk.shape[1], nk.shape[0]), interpolation=cv2.INTER_LINEAR) > float(
++                                _P.get("occ_net_back", 0.9))
++                            _sm = np.where(_sure & (_raw[2] > 0.999), nk, _sm).astype(np.float32)
++                        nk = _sm
+                     track.occn_keep = nk
+                 try:
+                     OCCNET_STATS["frames"] += 1
+@@ -2551,9 +2789,26 @@
+                         OCCNET_STATS["cut_area_sum"] += _c
+                 except Exception:
+                     pass
+-                mask = mask * nk
+-                if float(_P.get("eat_mouth", 0.0) or 0.0) > 0.0:
+-                    mask = _eating_mouth(mask, nk, pts, size, track)
++                _K = nk if _K is None else _K * nk
++                _nk_final = nk
++        if _K is not None:
++            if float(_P.get("occ_snap", 0.0) or 0.0) > 0.0 and aligned_target is not None and float(_K.min()) < 0.98:
++                _K = _occ_snap(_K, aligned_target, size)          # v11.2.206: a clean edge where the object crosses the face
++            mask = mask * _K
++        if _nk_final is not None and len(_raw) >= 3 and getattr(_raw[2], "shape", None) == _nk_final.shape:
++            # the eating rule sees only the mouth rule's cut, smoothed exactly as in v11.2.205: a hand or cup on the cheek
++            # is not someone eating
++            _ec = _raw[2]
++            if track is not None:
++                _pe = getattr(track, "occn_core", None)
++                if _pe is not None and getattr(_pe, "shape", None) == _ec.shape:
++                    _ec = np.minimum(_ec, 0.5 * _pe + 0.5 * _ec).astype(np.float32)
++                track.occn_core = _ec
++            _nk_eat = _ec
++        else:
++            _nk_eat = _nk_final
++        if _nk_eat is not None and float(_P.get("eat_mouth", 0.0) or 0.0) > 0.0:
++            mask = _eating_mouth(mask, _nk_eat, pts, size, track)          # this frame's model answer, as in v11.2.205
+         if row is not None:
+             # Longer falloff under the chin only. The lip stays fully painted.
+             t = np.clip((row - 0.86) / 0.14, 0.0, 1.0)

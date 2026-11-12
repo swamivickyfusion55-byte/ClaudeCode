@@ -1,7 +1,7 @@
 """Objects passing in front of a face anywhere (not only the mouth): the centre face of insightface's sample photo (public,
 3x enlarged, face ~320 px), 80 frames: the object slides in over 4 frames, holds 34 frames with a small jitter, leaves over
 4 frames. Objects: 'hand' (skin-coloured, sampled from the face itself, with finger strips and shading - the hardest case),
-'cup' (white, shaded), 'phone' (dark rounded rectangle). Places: eye, forehead, cheek, nose. Ground truth: object alpha per
+'cup' (white, shaded), 'phone' (dark rounded rectangle). Places: eye, forehead, cheek, nose, sweep (v11.2.206: moving steadily across the face). Ground truth: object alpha per
 frame. NOT user footage.  usage: make_objects.py OBJ_PLACE...   -> obj_<OBJ>_<PLACE>.mp4 + _gt.npz"""
 import cv2, numpy as np, subprocess, os, sys
 from insightface.app import FaceAnalysis
@@ -32,12 +32,16 @@ def draw(obj, cx, cy, s, rng):
     tex = cv2.GaussianBlur(rng.standard_normal((720, 1280)).astype(np.float32), (0, 0), 1.5) * 6
     col = np.clip(col * shade[:, :, None] + tex[:, :, None], 0, 255)
     return col, a
+# v11.2.206: 'sweep' - the object moves steadily across the face at cheek / nose height (frames 20-58), for trails behind it
+PLACE["sweep"] = ((k[2] + k[4]) / 2, 0.55)
 def build(spec, n=80):
     obj, place = spec.split("_"); (cx0, cy0), sc = PLACE[place]; s = sc * ed * 1.6
     tmp = f"obj_{spec}.avi"; vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"MJPG"), 30, (1280, 720)); gt = []; nr = np.random.default_rng(5)
     for i in range(n):
         f = np.clip(BASE.astype(np.int16) + nr.integers(-1, 2, BASE.shape, dtype=np.int16), 0, 255).astype(np.uint8).astype(np.float32)
-        if i < 20 or i >= 62: p = None
+        if place == "sweep":
+            p = None if (i < 20 or i >= 58) else (cx0 - 1.6 * s + 3.2 * s * (i - 20) / 37.0, cy0)
+        elif i < 20 or i >= 62: p = None
         elif i < 24: u = (i - 19) / 4.0; p = (cx0 + 2.2 * s * (1 - u), cy0)
         elif i < 58: p = (cx0 + 0.03 * s * np.sin(i / 3.0), cy0 + 0.02 * s * np.cos(i / 4.0))
         else: u = (i - 57) / 4.0; p = (cx0 + 2.2 * s * u, cy0)

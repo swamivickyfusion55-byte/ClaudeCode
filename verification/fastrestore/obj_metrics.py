@@ -28,6 +28,18 @@ for arg in sys.argv[1:]:
     base = np.median([keep[t] for t in range(0, 20)])
     hold = [po[t] for t in range(24, 58) if t in po]
     drops = [t for t in range(20, 62) if keep[t] < 0.6 * base]
+    # v11.2.206: the trail - face the object has just left (inside its area 1-3 frames ago, not now): still showing the footage?
+    trail = []
+    for t in range(21, n):
+        was = np.zeros((720, 1280), bool)
+        for dt in (1, 2, 3):
+            was |= A[t - dt] > 127
+        vac = was & ~cv2.dilate((A[t] > 127).astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool) & face
+        if vac.sum() > 300:
+            d = cv2.GaussianBlur(np.abs(out[t].astype(np.float32) - inp[t].astype(np.float32)).mean(2), (0, 0), 1.0)
+            trail.append(float((d[vac] <= 12).mean() * 100))
+    if trail:
+        print(f"{run} {spec}: trail - face just left by the object still not swapped: mean {np.mean(trail):.1f}% worst {np.max(trail):.1f}% ({len(trail)} frames)")
     print(f"{run} {spec}: object painted over - entering (frames 20-23) {np.mean([po[t] for t in range(20, 24) if t in po]):.1f}%, "
           f"first full frame {po.get(24, float('nan')):.1f}%, holding mean {np.mean(hold):.1f}% worst {np.max(hold):.1f}%; "
           f"rest of the face swapped {base:.0f}% before, {np.mean([keep[t] for t in range(24, 58)]):.0f}% during; reverted frames {len(drops)}")

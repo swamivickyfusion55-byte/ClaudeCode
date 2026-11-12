@@ -1,0 +1,111 @@
+== hand_eye
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+frame  face paint over the object where it covers the face (all of the object): v11.2.205 -> v11.2.206 (0 = shown)
+  20   0.787 -> 0.787   (0.689 -> 0.689)
+  21   0.834 -> 0.834   (0.826 -> 0.826)
+  22   0.897 -> 0.005   (0.897 -> 0.005)
+  23   0.952 -> 0.013   (0.950 -> 0.087)
+  24   0.957 -> 0.016   (0.956 -> 0.078)
+  25   0.958 -> 0.015   (0.957 -> 0.079)
+  57   0.952 -> 0.018   (0.950 -> 0.090)
+  58   0.897 -> 0.005   (0.897 -> 0.005)
+  59   0.834 -> 0.056   (0.826 -> 0.058)
+  60   0.787 -> 0.035   (0.689 -> 0.201)
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.060 vs 0.937; the whole object 0.123 vs 0.930]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.06 %, worst frame 1.09 %]
+all checks passed
+== cup_cheek
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+frame  face paint over the object where it covers the face (all of the object): v11.2.205 -> v11.2.206 (0 = shown)
+  23   1.000 -> 0.061   (0.998 -> 0.311)
+  24   1.000 -> 0.071   (0.995 -> 0.339)
+  25   1.000 -> 0.080   (0.996 -> 0.347)
+  26   1.000 -> 0.083   (0.996 -> 0.343)
+  27   1.000 -> 0.084   (0.997 -> 0.336)
+  28   1.000 -> 0.075   (0.997 -> 0.324)
+  54   0.275 -> 0.077   (0.451 -> 0.286)
+  55   0.277 -> 0.075   (0.459 -> 0.290)
+  56   0.640 -> 0.075   (0.733 -> 0.299)
+  57   0.821 -> 0.075   (0.868 -> 0.306)
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.072 vs 0.673; the whole object 0.305 vs 0.750]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.57 %, worst frame 4.86 %]
+all checks passed
+== phone_nose
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+frame  face paint over the object where it covers the face (all of the object): v11.2.205 -> v11.2.206 (0 = shown)
+  21   1.000 -> 0.069   (1.000 -> 0.251)
+  22   0.005 -> 0.000   (0.005 -> 0.000)
+  23   0.000 -> 0.000   (0.000 -> 0.000)
+  24   0.000 -> 0.000   (0.000 -> 0.000)
+  25   0.000 -> 0.000   (0.000 -> 0.000)
+  26   0.000 -> 0.000   (0.000 -> 0.000)
+  56   0.000 -> 0.000   (0.000 -> 0.000)
+  57   0.000 -> 0.000   (0.000 -> 0.000)
+  58   0.005 -> 0.006   (0.005 -> 0.006)
+  59   0.956 -> 0.077   (0.965 -> 0.252)
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.004 vs 0.050; the whole object 0.013 vs 0.051]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.22 %, worst frame 3.39 %]
+all checks passed
+== hand_sweep
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+frame  face paint over the object where it covers the face (all of the object): v11.2.205 -> v11.2.206 (0 = shown)
+  20   1.000 -> 1.000   (0.730 -> 0.730)
+  21   1.000 -> 1.000   (0.800 -> 0.800)
+  22   0.537 -> 0.557   (0.760 -> 0.764)
+  23   0.539 -> 0.538   (0.753 -> 0.752)
+  24   0.397 -> 0.405   (0.695 -> 0.698)
+  25   0.286 -> 0.289   (0.631 -> 0.633)
+  52   0.972 -> 0.226   (0.697 -> 0.479)
+  53   0.985 -> 0.158   (0.616 -> 0.443)
+  54   0.993 -> 0.135   (0.534 -> 0.419)
+  55   0.999 -> 0.366   (0.489 -> 0.420)
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.196 vs 0.355; the whole object 0.321 vs 0.375]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.10 %, worst frame 0.46 %]
+all checks passed
+== hand_cheek
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+frame  face paint over the object where it covers the face (all of the object): v11.2.205 -> v11.2.206 (0 = shown)
+  22   1.000 -> 1.000   (0.597 -> 0.597)
+  23   0.255 -> 0.259   (0.458 -> 0.461)
+  24   0.275 -> 0.271   (0.489 -> 0.486)
+  25   0.273 -> 0.273   (0.487 -> 0.487)
+  26   0.266 -> 0.270   (0.480 -> 0.482)
+  27   0.260 -> 0.267   (0.471 -> 0.475)
+  55   0.242 -> 0.248   (0.443 -> 0.447)
+  56   0.251 -> 0.253   (0.452 -> 0.454)
+  57   0.260 -> 0.261   (0.462 -> 0.462)
+  58   0.803 -> 0.237   (0.564 -> 0.468)
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.254 vs 0.371; the whole object 0.446 vs 0.521]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.03 %, worst frame 0.69 %]
+all checks passed
+== hand_forehead
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+frame  face paint over the object where it covers the face (all of the object): v11.2.205 -> v11.2.206 (0 = shown)
+  21   0.301 -> 0.301   (0.161 -> 0.161)
+  22   0.380 -> 0.380   (0.278 -> 0.278)
+  23   0.494 -> 0.494   (0.385 -> 0.385)
+  24   0.501 -> 0.501   (0.394 -> 0.394)
+  25   0.504 -> 0.504   (0.396 -> 0.396)
+  26   0.505 -> 0.505   (0.398 -> 0.398)
+  56   0.497 -> 0.497   (0.388 -> 0.388)
+  57   0.491 -> 0.491   (0.383 -> 0.383)
+  58   0.380 -> 0.380   (0.278 -> 0.278)
+  59   0.301 -> 0.301   (0.161 -> 0.161)
+FAIL over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.481 vs 0.481; the whole object 0.371 vs 0.371]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.00 %, worst frame 0.00 %]
+1 check(s) failed
+== no false cuts
+  t1.jpg face 0 (107 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 1 (100 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 2 (103 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 3 (94 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 4 (108 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 5 (110 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+PASS 6 faces, nothing in front: v11.2.206 cuts no more of any face than v11.2.205 (at most 1 % of it, on its worst frame)  [worst 0.00% of a face]
+all checks passed
