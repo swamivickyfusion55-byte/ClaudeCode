@@ -1,0 +1,311 @@
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.60_LocalCopy/README.md Phoenix_APK_Builder_1.2.61_OneUpload/README.md
+--- Phoenix_APK_Builder_1.2.60_LocalCopy/README.md	2026-11-13 14:10:49.316359551 +0000
++++ Phoenix_APK_Builder_1.2.61_OneUpload/README.md	2026-11-13 17:26:31.080622075 +0000
+@@ -8,9 +8,24 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.60 (Local copy: Phoenix no longer closed with the storage provider)
++# Phoenix APK Builder 1.2.61 (One upload: Detect sends the frame, not the video)
+ 
+-Upload every file in this pack, including `source.zip`. The page title must say Phoenix Mobile 1.2.60. versionCode is **180**.
++Upload these six files: `Dockerfile`, `app.py`, `build.sh`, `gradle.properties`, `README.md`, `source.zip`. The page title must
++say Phoenix Mobile 1.2.61. versionCode is **181**.
++
++**1.2.61 - the video goes up once:**
++- **Detect** ("Show frame & detect faces") and the **skin-tone Preview** send only the picked frame, as a photo. They used to
++  upload the video (the selected range) first, so a split sent the video twice: once for Detect, then again in parts.
++  Detect now takes seconds. The frame is the one the app shows at "FRAME n %" (n % of the whole video). With a trim set, the
++  Space used to take n % of the trimmed range instead, a different frame from the one on screen.
++- **The progress bar only moves forward.** Upload 0-35 %, faces 35-40 % ("Video sent - sending faces"), the Space's work
++  40-96 %, download 96-100 %. It used to drop back to 4 % after the video upload, and again to the Space's own 8 %, which
++  looked like a second upload.
++- Works with every Phoenix Space version (the same Space routes). If the phone cannot decode the frame, the video is uploaded as
++  before.
++- Everything else as 1.2.60 (the copy of the picked video) and 1.2.59 (three uploads at once, stalls resume).
++
++## 1.2.60 (Local copy: Phoenix no longer closed with the storage provider)
+ 
+ **1.2.60 - "Phoenix was closed because a system part it needs stopped (depends on provider
+ com.android.externalstorage ... in dying proc)":**
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.60_LocalCopy/app.py Phoenix_APK_Builder_1.2.61_OneUpload/app.py
+--- Phoenix_APK_Builder_1.2.60_LocalCopy/app.py	2026-11-13 14:10:49.312360701 +0000
++++ Phoenix_APK_Builder_1.2.61_OneUpload/app.py	2026-11-13 17:26:31.080267236 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.60"
++VER = "1.2.61"
+ APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.60 build ===",
++        "=== Phoenix Mobile 1.2.61 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhoenixMobile-1.2.60-debug.apk was not produced.** "
++            "**Build reported success but PhoenixMobile-1.2.61-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -185,10 +185,10 @@
+             info = fh.read().strip()
+     except OSError:
+         pass
+-    if info and ("1.2.60" not in info or "versionCode 180" not in info):
++    if info and ("1.2.61" not in info or "versionCode 181" not in info):
+         yield (
+             log,
+-            "**Not offering this file.** It is not versionCode 180 (1.2.60). "
++            "**Not offering this file.** It is not versionCode 181 (1.2.61). "
+             "Installing an older build over the copy on the phone is what the phone calls an invalid package.\n\n```\n"
+             + info + "\n```",
+             None,
+@@ -297,12 +297,12 @@
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.60 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.61 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.60</h1>"
+-        "<p>versionCode 180. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.61</h1>"
++        "<p>versionCode 181. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.60-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.61-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.60-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.61-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.60_LocalCopy/build.sh Phoenix_APK_Builder_1.2.61_OneUpload/build.sh
+--- Phoenix_APK_Builder_1.2.60_LocalCopy/build.sh	2026-11-13 14:10:49.285772548 +0000
++++ Phoenix_APK_Builder_1.2.61_OneUpload/build.sh	2026-11-13 17:26:31.066976893 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.60}"
++VER="${VER:-1.2.61}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.60_LocalCopy/src/CHANGELOG.md Phoenix_APK_Builder_1.2.61_OneUpload/src/CHANGELOG.md
+--- Phoenix_APK_Builder_1.2.60_LocalCopy/src/CHANGELOG.md	2026-11-13 14:10:49.320361016 +0000
++++ Phoenix_APK_Builder_1.2.61_OneUpload/src/CHANGELOG.md	2026-11-13 17:26:31.080976753 +0000
+@@ -1,3 +1,22 @@
++# v1.2.61 - the video goes up once; the progress bar only moves forward
++
++- **Asked:** "Why does upload appear to happen 2 times"; then build both changes.
++- **Detect / skin-tone Preview:** `pickedFrameJpeg` takes the frame shown at "FRAME n %" (n % of the whole video, the same as the
++  thumbnail and the Patch editor; `PatchFrames.frameAt`, exact frame, at most 1920 px) and sends it as a JPEG. It goes to the same
++  routes as before (`phoenix_detect_video_frame`, `phoenix_skin_preview`, both take any file) at position 0: a photo is a
++  one-frame video for OpenCV on the Space. The Space's "Frame 0/1 - " is cut from the message. If the frame cannot be decoded,
++  the video is uploaded as before.
++- **Progress:** `PROGRESS_FACES` .35, `PROGRESS_SUBMIT` .40, `PROGRESS_DOWNLOAD` .96. The Space's 0-100 % maps to 40-96 % and
++  never goes back (`maxOf`).
++- **Checked here:**
++  - All sources compile with no new error except calls of Android types the sandbox has no definitions for.
++  - The real `pickedFrameJpeg` and progress code against stand-ins: 0 / 50 / 100 % pick 0 / 5000 / 9950 ms of a 10 s video;
++    an undecodable frame or no duration gives null (the old path); the message is cleaned; the bar never goes back.
++  - The Space's own code (`api_detect_video_frame`, `api_skin_preview` of v11.2.208) given the video at 40 % and given only
++    that frame as a JPEG at 0 %: the same 2 faces (crops 1-2 grey levels apart, the JPEG step), the same people and amounts
++    in the skin preview (0.9 grey levels apart).
++- **Not checked here:** a Gradle / Android build and the app on a phone.
++
+ # v1.2.60 - the picked video is copied into Phoenix first
+ 
+ - **Reported:** "Phoenix had a problem last time - Phoenix was closed because a system part it needs stopped (depends on provider
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.61_OneUpload/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/build.gradle.kts	2026-11-13 14:10:49.277801275 +0000
++++ Phoenix_APK_Builder_1.2.61_OneUpload/src/app/build.gradle.kts	2026-11-13 17:26:31.064462418 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 180
+-        versionName = "1.2.60"
++        versionCode = 181
++        versionName = "1.2.61"
+         // 1.2.56: 64-bit ARM phones only. The APK carried four copies of ONNX Runtime and the native lib (arm64, armv7,
+         // x86, x86_64); three were never used on a phone, and the 92 MB download kept breaking off half way - a cut-off
+         // APK is what the phone calls "package appears to be invalid".
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt
+--- Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-13 14:08:59.448563592 +0000
++++ Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-13 17:24:01.457814235 +0000
+@@ -60,6 +60,12 @@
+         const val VIDEO_STALL_MS = 3 * 60 * 1000L
+         /** 1.2.59: how many times a stalled upload is tried again before the part is marked Failed. */
+         const val VIDEO_STALL_TRIES = 5
++        /** 1.2.61: where each phase of a video job sits on its card's bar (the upload itself is 0 to PROGRESS_FACES). */
++        const val PROGRESS_FACES = .35f
++        const val PROGRESS_SUBMIT = .40f
++        const val PROGRESS_DOWNLOAD = .96f
++        /** 1.2.61: Detect and the skin-tone Preview send the picked frame at most this big (long side). */
++        const val DETECT_FRAME_PX = 1920
+         /** 1.2.60: the copy of the picked video is made only with this much room left over (else it is read as before). */
+         const val LOCAL_COPY_SPARE_BYTES = 400L * 1024 * 1024
+         /** A history entry in one of these states is not using its Space (1.2.29: Cancelled/Error/Downloading added). */
+@@ -286,6 +292,32 @@
+      * in dying proc)"). The copy takes seconds; after it nothing outside Phoenix is needed. null = use the picked video as
+      * before (it is a file already, there is too little space, or the copy failed). The caller deletes the copy.
+      */
++    /**
++     * 1.2.61: the frame picked in step 01 - the one shown at "FRAME n %", n % into the whole video - as a JPEG in the app's
++     * cache. Detect and the skin-tone Preview need only that frame; they used to upload the video first (the selected range
++     * of it), which for a split meant the video went up twice. null when the phone cannot decode the frame (the caller then
++     * uploads the video as before). The caller deletes the file.
++     */
++    private fun pickedFrameJpeg(uri: Uri, pct: Int, tag: String): File? {
++        val app = getApplication<Application>()
++        var bmp: android.graphics.Bitmap? = null
++        return try {
++            val dur = PatchFrames.durationMs(app, uri)
++            if (dur <= 0L) return null
++            val t = (dur * pct.coerceIn(0, 100) / 100L).coerceAtMost((dur - 50L).coerceAtLeast(0L))
++            bmp = PatchFrames.frameAt(app, uri, t, DETECT_FRAME_PX) ?: return null
++            val f = File(app.cacheDir, "phoenix_${tag}_${System.nanoTime()}.jpg")
++            f.outputStream().use { out -> bmp!!.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, out) }
++            if (f.length() > 0L) f else { safeDelete(f); null }
++        } catch (e: kotlinx.coroutines.CancellationException) {
++            throw e
++        } catch (e: Throwable) {
++            null
++        } finally {
++            runCatching { bmp?.recycle() }
++        }
++    }
++
+     private fun localVideoCopy(uri: Uri, onStatus: (String) -> Unit = {}): File? {
+         if (uri.scheme != "content") return null
+         val app = getApplication<Application>()
+@@ -508,7 +540,13 @@
+             try {
+                 val st = settings()
+                 hf.wakeSpace(st) { msg -> skinMessage = "$spaceLabel · $msg" }
+-                val videoPath = uploadVideoOnce(st, uri).path
++                // 1.2.61: only the picked frame goes to the Space, as for Detect (the video goes up once, with the job)
++                val frameFile = pickedFrameJpeg(uri, pct, "skin")
++                val videoPath = try {
++                    if (frameFile != null) hf.upload(st, frameFile, "image/jpeg") else uploadVideoOnce(st, uri).path
++                } finally {
++                    safeDelete(frameFile)
++                }
+                 val resolver = getApplication<Application>().contentResolver
+                 val refs = JSONArray()
+                 for (i in 0 until 4) {
+@@ -530,7 +568,7 @@
+                 }
+                 val slots = JSONArray()
+                 faceList.forEachIndexed { i, f -> if (f != null) slots.put(i + 1) }
+-                val js = JSONObject().put("position_pct", pct)
++                val js = JSONObject().put("position_pct", if (frameFile != null) 0 else pct)
+                     .put("skin_tone", JSONArray(tone.map { it.toDouble() }))
+                     .put("target_refs", refs)
+                     .put("faces", faces)
+@@ -1593,12 +1631,25 @@
+                 val settings = settings()
+                 status = "Waking $spaceLabel…"
+                 hf.wakeSpace(settings) { msg -> status = "$spaceLabel · $msg" }
+-                val alreadyCached = videoUploadCache.containsKey(
+-                    videoCacheKey(settings, uri, options.trimStart, options.trimEnd)
+-                )
+-                status = if (alreadyCached) "Detecting faces (video already on ${spaceLabel})…" else "Uploading video and detecting faces…"
+-                val videoPath = uploadVideoOnce(settings, uri).path
+-                val detection = hf.detectVideoFrameFaces(settings, videoPath, framePercent)
++                // 1.2.61: only the picked frame goes to the Space (a photo); the video goes up once, with the job
++                val frameFile = pickedFrameJpeg(uri, framePercent, "detect")
++                val detection = if (frameFile != null) {
++                    try {
++                        status = "Detecting faces at $framePercent % on $spaceLabel…"
++                        val framePath = hf.upload(settings, frameFile, "image/jpeg")
++                        val d = hf.detectVideoFrameFaces(settings, framePath, 0)      // the photo is a one-frame video there
++                        d.copy(message = d.message?.replace(Regex("""^Frame \d+/\d+ · """), ""))
++                    } finally {
++                        safeDelete(frameFile)
++                    }
++                } else {
++                    val alreadyCached = videoUploadCache.containsKey(
++                        videoCacheKey(settings, uri, options.trimStart, options.trimEnd)
++                    )
++                    status = if (alreadyCached) "Detecting faces (video already on ${spaceLabel})…" else "Uploading video and detecting faces…"
++                    val videoPath = uploadVideoOnce(settings, uri).path
++                    hf.detectVideoFrameFaces(settings, videoPath, framePercent)
++                }
+ 
+                 // Each crop is downloaded independently and kept at its own
+                 // index (2 detected faces on a 4-slot form stay in slots 1-2,
+@@ -2131,7 +2182,9 @@
+                 }
+                 // 1.2.57: the part clip is KEPT until this part is done (updateHistory deletes it then). It used to be
+                 // deleted right after the upload, so a part the Space lost later could not be redone.
+-                updateHistory(localId, status = "Uploading faces", progress = .04f, eta = "Uploading…")
++                // 1.2.61: the bar only moves forward - upload 0-35 %, faces 35-40 %, the Space 40-96 %, download 96-100 %
++                // (it went back to 4 % here, then to the Space's own 8 %, which looked like a second upload)
++                updateHistory(localId, status = "Uploading faces", progress = PROGRESS_FACES, eta = "Video sent · sending faces")
+                 // Face uploads are independent. Upload up to three at once; the
+                 // per-Space semaphore prevents this from overwhelming a Space.
+                 val uploaded = arrayOfNulls<String>(4)
+@@ -2164,7 +2217,7 @@
+                     }
+                 }
+                 refJobs.awaitAll()
+-                updateHistory(localId, status = "Uploading faces", progress = .10f, eta = "Ready to submit")
++                updateHistory(localId, status = "Uploading faces", progress = PROGRESS_SUBMIT, eta = "Ready to submit")
+                 // phoenix_submit_video's 6th input is a Textbox (confirmed via
+                 // Diagnose Space), not a JSON-object-typed input. Putting the
+                 // JSONObject in directly meant Gradio received an object where
+@@ -2178,13 +2231,13 @@
+                     .put(uploaded[3]?.let(::fileData) ?: JSONObject.NULL)
+                     .put(optionsJson(videoUpload.trimStartPct, videoUpload.trimEndPct, uploadedRefs, faceMode, durationSec, partIndex, partCount)
+                         .also { addPatches(it, videoUpload.offsetUs) }.toString())
+-                updateHistory(localId, status = "Submitting", progress = .08f, eta = "Queueing…")
++                updateHistory(localId, status = "Submitting", progress = PROGRESS_SUBMIT, eta = "Queueing…")
+                 val submitEndpoint = targetSpace.endpoint.ifBlank { DEFAULT_ENDPOINT }
+                 val submit = hf.callAndWait(targetSpace, submitEndpoint, data, 240_000L)
+                 val response = submit.optJSONObject(0) ?: throw IllegalStateException("Phoenix returned invalid submit response")
+                 if (!response.optBoolean("ok", false)) throw IllegalStateException(response.optJSONObject("error")?.optString("message") ?: "Phoenix rejected the job")
+                 val jobId = response.optString("job_id").takeIf { it.isNotBlank() } ?: throw IllegalStateException("Phoenix returned no job ID")
+-                updateHistory(localId, name = "Phoenix ${jobId}", status = "Queued", remoteJobId = jobId, progress = .08f, eta = "Queued")
++                updateHistory(localId, name = "Phoenix ${jobId}", status = "Queued", remoteJobId = jobId, progress = PROGRESS_SUBMIT, eta = "Queued")
+                 pollPhoenixJob(targetSpace, jobId, localId)
+                 break
+             } catch (e: kotlinx.coroutines.CancellationException) {
+@@ -2267,7 +2320,7 @@
+     }
+ 
+     private suspend fun pollPhoenixJob(s: HfSettings, jobId: String, localId: String) {
+-        var lastProgress = .08f
++        var lastProgress = PROGRESS_SUBMIT
+         var consecutiveFailures = 0
+         var notFound = 0
+         var backoffMs = 2500L
+@@ -2337,7 +2390,8 @@
+             }
+             val state = r.optString("status", "processing")
+             val p = r.optInt("progress", -1)
+-            if (p >= 0) lastProgress = (p.coerceIn(0, 100) / 100f).coerceAtLeast(.08f)
++            // 1.2.61: the Space's 0-100 % is shown as 40-96 % of the card (after the upload, before the download)
++            if (p >= 0) lastProgress = maxOf(lastProgress, PROGRESS_SUBMIT + (p.coerceIn(0, 100) / 100f) * (PROGRESS_DOWNLOAD - PROGRESS_SUBMIT))
+             val etaSeconds = r.optLong("eta_seconds", -1L)
+             val etaText = if (etaSeconds >= 0) "ETA ${etaSeconds}s" else "Server processing…"
+             val message = r.optString("message", state)
