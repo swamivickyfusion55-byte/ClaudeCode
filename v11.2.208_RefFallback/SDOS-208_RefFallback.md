@@ -28,7 +28,7 @@ a while`. Off: `trk_ref_stale_calls = 0` in `swap_engine.py` (that is 11.2.207).
 
 ## 2. Verification
 
-All runs are on this exact code (file checksums compared).
+The fallback runs below are on this exact code (file checksums compared).
 
 **The fallback** (harsh-step clip, two people, 120 frames, Ultra, both swapped; `bench_pipeline.py refs=...`). Per frame,
 `c` = clearly the right replacement, `u` = unclear (for person B on frames 0-45: not swapped yet):
@@ -65,7 +65,7 @@ from 1.8 px to 0.9 px.
 The side-view kiss and hide runs used the code from before the two tracker fixes above. Those fixes act only with Detect
 pictures, and these runs have none.
 
-**Unit checks on this pack:** `unit176` 12, `unit176_pipe` 14, `unit204` 7, all pass.
+**Unit checks on this exact code:** `unit176` 12, `unit176_pipe` 14, `unit203` 18, `unit204` 7, all pass.
 
 ## 3. Limits
 
