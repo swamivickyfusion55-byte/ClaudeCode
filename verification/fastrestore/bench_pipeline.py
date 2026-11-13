@@ -248,6 +248,16 @@ cfg = dict(max_seconds=int(KW.get("secs", 360)), fps=int(KW.get("fps", 30)), res
            enhancer=KW.get("enh", "Cinematic (clarity + smooth)"), enhance_scope=KW.get("scope", "all"), refs=[], swap_n=KW.get("swap_n", "1"),
            det_n=KW.get("det_n", "1"), det_int=int(KW.get("det_int", 4)), password="", trim_start=0.0, trim_end=100.0,
            face_mode=KW.get("face_mode", "2 faces"), device_mode="cpu", use_gpu=False, smooth_motion=KW.get("smooth", "Fast (blend)"))
+if KW.get("refs"):             # v11.2.207: Detect-frame pictures, one image path per slot ("-" = none), as the app sends them
+    _rf = []
+    for _p in KW["refs"].split(","):
+        _e = None
+        if _p and _p != "-":
+            _f = cp._cached_source_face(cv2.imread(_p))
+            _e = None if _f is None else getattr(_f, "normed_embedding", None)
+            print("bench ref", _p, "->", "embedding" if _e is not None else "NO FACE", flush=True)
+        _rf.append(_e)
+    cfg["refs"] = _rf
 if KW.get("patches"):          # Patch Removal (v11.2.96): make_patchclip.py ground truth -> the app's frame + mask
     _g = np.load(KW["patches"]); _pi, _pm = WORK + "/patch_frame.jpg", WORK + "/patch_mask.png"
     cv2.imwrite(_pi, _g["ref"], [cv2.IMWRITE_JPEG_QUALITY, 95]); cv2.imwrite(_pm, _g["refmask"])

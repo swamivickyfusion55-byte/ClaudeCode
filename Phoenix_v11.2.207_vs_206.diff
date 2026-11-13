@@ -1,0 +1,176 @@
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-207*' v11.2.206_OcclusionFlow/config.py v11.2.207_SteadyID/config.py
+--- v11.2.206_OcclusionFlow/config.py	2026-11-12 18:24:41.721912858 +0000
++++ v11.2.207_SteadyID/config.py	2026-11-13 14:22:05.713199566 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.206"
+-BUILD = "OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.207"
++BUILD = "SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-207*' v11.2.206_OcclusionFlow/core_pipeline.py v11.2.207_SteadyID/core_pipeline.py
+--- v11.2.206_OcclusionFlow/core_pipeline.py	2026-11-12 18:26:50.093401939 +0000
++++ v11.2.207_SteadyID/core_pipeline.py	2026-11-13 14:07:39.601693578 +0000
+@@ -4114,6 +4114,7 @@
+ 
+ _FRONT_MEM = {}      # v11.2.176: (slot_lo, slot_hi) -> [lo_in_front, frames_the_other_way, last_frame, last_identity_frame]
+ _FRONT_NOW = {}      # v11.2.176: the frame being painted: (slot_lo, slot_hi) -> lo is in front
++FRONT_TREND = True   # v11.2.207: a first near-tie front decision switches as soon as that face shrinks steadily (False = 206)
+ _FRONT_STATS = {"identity": 0, "seen": 0, "size": 0, "changes": 0}
+ 
+ 
+@@ -4188,7 +4189,16 @@
+                         r0 = max(1e-6, float(st[5]))
+                         losing = (r / r0 <= 0.92 and r < 1.0) if st[0] else (r / r0 >= 1.0 / 0.92 and r > 1.0)
+                         st[6] = st[6] + 1 if losing else 0
+-                        if st[6] >= 2:
++                        # v11.2.207: ...or at once when it has lost 5 % AND shrunk on each of the last two frames: a face
++                        # going behind shrinks steadily (the smooch: 1.04, 1.01, 0.93 - it stayed "in front" one frame too
++                        # long and was painted over the other face, the other person's face for a frame). Detector jitter
++                        # goes up and down and never shrinks twice in a row.
++                        p1, p2 = (st[7], st[8]) if len(st) >= 10 else (None, None)
++                        trend = (FRONT_TREND and p1 is not None and p2 is not None
++                                 and ((r < p1 < p2) if st[0] else (r > p1 > p2)))
++                        # with the steady shrink, 5 % lost is enough (the smooch's frame 34: 0.9201 of the first ratio)
++                        losing_soft = (r / r0 <= 0.95 and r < 1.0) if st[0] else (r / r0 >= 1.0 / 0.95 and r > 1.0)
++                        if st[6] >= 2 or (losing_soft and trend):
+                             st[0] = not st[0]
+                             st[4], st[6] = True, 0
+                             _FRONT_STATS["changes"] += 1
+@@ -4203,6 +4213,11 @@
+                     else:
+                         st[1] = 0
+                     st[2] = int(g)
++                if len(st) >= 7:                         # v11.2.207: the last two size ratios (one per frame), for the trend
++                    while len(st) < 10:
++                        st.append(None)
++                    if st[9] != int(g):
++                        st[8], st[7], st[9] = st[7], r, int(g)
+                 _FRONT_STATS["size"] += 1
+             _FRONT_MEM[key] = st
+             rel[key] = bool(st[0])
+@@ -8040,6 +8055,24 @@
+             logging.info("FRONT/BEHIND: decided by identity on %d face-pair frames, by sight on %d, by size (held) on %d; changes %d",
+                          _FRONT_STATS["identity"], _FRONT_STATS["seen"], _FRONT_STATS["size"], _FRONT_STATS["changes"])
+             logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
++            # v11.2.207 (SDOS-207): say it plainly when the identity check refused a person more often than it painted them
++            try:
++                _rfb = int(getattr(_tk, "ref_fallback_n", 0) or 0)
++                if _rfb:
++                    logging.info("IDENTITY: %d face(s) given to a person by elimination because their Detect picture matched "
++                                 "no face for a while", _rfb)
++                for _s, _d in sorted((getattr(_tk, "diag", None) or {}).items()):
++                    _rej = int(_d.get("id_reject", 0) or 0)
++                    _pt = int((stats.get("slot_painted") or {}).get(_s, 0) or 0)
++                    if _rej >= 60 and _rej > _pt:
++                        logging.warning(
++                            "IDENTITY: person %d was refused %d times (painted on %d frames): the faces found did not look "
++                            "like person %d's Detect picture or first sighting (similarity under 0.25). If those faces ARE "
++                            "person %d (another scene, light or angle), capture person %d in Detect from this part, or run "
++                            "it without Detect pictures. If they are other people, leaving them original is correct.",
++                            int(_s) + 1, _rej, _pt, int(_s) + 1, int(_s) + 1, int(_s) + 1)
++            except Exception as _ie:
++                logging.debug("identity summary skipped: %s", _ie)
+             for _s, _gs in sorted((stats.get("painted_g") or {}).items()):
+                 _miss = [x for x in range(_n_out) if x not in _gs]
+                 _runs, _a = [], None
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-207*' v11.2.206_OcclusionFlow/packages.txt v11.2.207_SteadyID/packages.txt
+--- v11.2.206_OcclusionFlow/packages.txt	2026-11-12 18:06:41.500262918 +0000
++++ v11.2.207_SteadyID/packages.txt	2026-11-13 13:46:38.608963015 +0000
+@@ -1,2 +1,4 @@
+ ffmpeg
+ libgl1
++libgles2
++libegl1
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-207*' v11.2.206_OcclusionFlow/swap_engine.py v11.2.207_SteadyID/swap_engine.py
+--- v11.2.206_OcclusionFlow/swap_engine.py	2026-11-12 20:31:42.161778599 +0000
++++ v11.2.207_SteadyID/swap_engine.py	2026-11-13 14:22:05.712617507 +0000
+@@ -62,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.206-occlusionflow"
++ENGINE_VERSION = "aequus-1.2.207-steadyid"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -187,6 +187,10 @@
+     "occ_net_core_x": 0.17,         # ...and within this distance of the centre line (fraction of the crop)...
+     "occ_net_core_min": 0.002,
+     # v11.2.206 (SDOS-206) occlusion smoothness. Each 0 restores v11.2.205 exactly.
++    # v11.2.207 (SDOS-207): a person whose Detect picture matches no face for this many detector calls in a row (while a face
++    # nobody else has is there) is found by elimination instead (0 = 11.2.206: the picture alone, for as long as it takes)
++    "trk_ref_stale_calls": 0,       # (45 = on; off in this pack until its job test is done - see SDOS-207)
++    "trk_ref_stale_other": 0.30,     # ...but never a face that another person's picture matches this well
+     "occ_flow": 1.0,                # last frame's cut moves with the object (optical flow inside the face crop) before smoothing
+     "occ_instant": 1.0,             # a cut opens at once where the colour test AND the occlusion model both see the object
+     "occ_snap": 1.0,                # the cut's edge follows the picture's own edges (guided filter in the face crop)
+@@ -3261,6 +3265,11 @@
+         # consistent detections, so a one-frame look-alike never binds.
+         self._rel_pend = {}
+         self._call_n = 0
++        # v11.2.207: per slot with a Detect picture, how many detector calls in a row it stayed empty while a face nobody
++        # else had was there; past trk_ref_stale_calls the picture no longer blocks finding that person by elimination
++        self._ref_stale = {}
++        self._ref_stale_logged = set()
++        self.ref_fallback_n = 0
+         # Why faces were NOT bound, per slot. Without this a job that binds
+         # nothing for minutes is indistinguishable from one with nobody there.
+         self.diag = {s: {"id_reject": 0, "rel_rescued": 0, "rel_waiting": 0,
+@@ -3910,6 +3919,32 @@
+                         continue
+                     if rs > best_rs:
+                         best_rs, pick_i = rs, i
++                # v11.2.207 (SDOS-207): a Detect picture that has matched no face for trk_ref_stale_calls calls in a row,
++                # while a face nobody else has was there, stops blocking: that slot is filled by elimination (gender
++                # first), as it would be without a picture. The picture may be of another moment of the video (a split
++                # part, another scene); with it the person stayed original until some frame happened to match it.
++                _stale_n = int(_P.get("trk_ref_stale_calls", 0) or 0)
++                stale_i = [i for i in empty_i if refs and refs.get(slots[i]) is not None
++                           and _stale_n > 0 and self._ref_stale.get(slots[i], 0) >= _stale_n]
++                # only with no more faces on screen than people to swap: with bystanders around, the picture must decide
++                if pick_i is None and any_ref and stale_i and m <= n:
++                    # not a face that one of the OTHER pictures claims, nor one a locked person looks like
++                    _claimed_by_ref = max((ref_sim[i2][j] for i2 in range(n)
++                                           if i2 not in stale_i and refs.get(slots[i2]) is not None), default=-1.0)
++                    if _claimed_by_ref < float(_P.get("trk_ref_stale_other", 0.30)) and mx < 0.30:
++                        got_g = _det_gender(faces[j])
++                        # gender first, as the no-picture path: a slot whose replacement matches the face's gender; when
++                        # none does, any of them (a wrong gender tag must not leave the person original)
++                        pool = [i for i in stale_i if got_g in (0, 1) and self.slot_gender.get(slots[i]) == got_g] or list(stale_i)
++                        if pool:
++                            pick_i = pool[0]
++                            self.ref_fallback_n += 1
++                            if slots[pick_i] not in self._ref_stale_logged:
++                                self._ref_stale_logged.add(slots[pick_i])
++                                logging.info("person %s: the Detect picture matched no face for %d detector calls - found "
++                                             "by elimination instead (ref_sim=%.2f)", slots[pick_i] + 1 if isinstance(
++                                                 slots[pick_i], int) else slots[pick_i], self._ref_stale.get(slots[pick_i], 0),
++                                             ref_sim[pick_i][j])
+                 if pick_i is None and not any_ref:
+                     got_g = _det_gender(faces[j])
+                     pool = list(empty_i)
+@@ -3940,6 +3975,19 @@
+                 logging.info("late-join slot %s ← face (ref_sim=%.2f locked=%.2f)",
+                              slots[pick_i], best_rs, mx)
+ 
++        # v11.2.207: staleness of the Detect pictures (see above)
++        if refs:
++            _claimed_now = set(pairing.values())
++            _free_face = any(j not in _claimed_now for j in range(m))
++            for i, s in enumerate(slots):
++                if refs.get(s) is None:
++                    continue
++                _locked = getattr(self.tracks[s], "id_lock", None) is not None or self.tracks[s].emb is not None
++                if pairing.get(i) is not None or _locked:
++                    self._ref_stale[s] = 0
++                elif _free_face:
++                    self._ref_stale[s] = self._ref_stale.get(s, 0) + 1
++
+         # Re-entry steal: if a detection is clearly a locked slot's person,
+         # give it back even if Hungarian/bootstrap parked it elsewhere.
+         for i, s in enumerate(slots):
