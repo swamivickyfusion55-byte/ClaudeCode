@@ -3619,6 +3619,10 @@ class MultiFaceTracker:
                 r2 = refs.get(s2) if refs else None
                 if r2 is not None:
                     other = max(other, _cos_emb(lock, r2))
+            # v11.2.208: a picture the fallback gave up on matches nobody, so "own" is noise around 0 and the lock was reset
+            # whenever the other picture read 0.04 higher - also noise. Then only a real likeness to the other picture counts.
+            if s in self._ref_stale_logged and other < float(_P.get("trk_ref_stale_other", 0.30)) + 0.05:
+                continue
             if other > own + 0.04:
                 trd = self.tracks[s]
                 trd.emb = None
@@ -3925,7 +3929,8 @@ class MultiFaceTracker:
                 # part, another scene); with it the person stayed original until some frame happened to match it.
                 _stale_n = int(_P.get("trk_ref_stale_calls", 0) or 0)
                 stale_i = [i for i in empty_i if refs and refs.get(slots[i]) is not None
-                           and _stale_n > 0 and self._ref_stale.get(slots[i], 0) >= _stale_n]
+                           and _stale_n > 0 and (self._ref_stale.get(slots[i], 0) >= _stale_n
+                                                 or slots[i] in self._ref_stale_logged)]   # given up once: at once
                 # only with no more faces on screen than people to swap: with bystanders around, the picture must decide
                 if pick_i is None and any_ref and stale_i and m <= n:
                     # not a face that one of the OTHER pictures claims, nor one a locked person looks like

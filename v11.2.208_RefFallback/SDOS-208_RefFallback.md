@@ -28,29 +28,49 @@ a while`. Off: `trk_ref_stale_calls = 0` in `swap_engine.py` (that is 11.2.207).
 
 ## 2. Verification
 
-**The fallback** (harsh-step clip, two people, 120 frames, Ultra, both swapped; `bench_pipeline.py refs=...`):
+All runs are on this exact code (file checksums compared).
+
+**The fallback** (harsh-step clip, two people, 120 frames, Ultra, both swapped; `bench_pipeline.py refs=...`). Per frame,
+`c` = clearly the right replacement, `u` = unclear (for person B on frames 0-45: not swapped yet):
 
 | Detect pictures | | Person A | Person B |
 |---|---|---|---|
-| A right, B a picture of someone else | 11.2.206 / 207 | 120 correct, 0 mix-ups | **never swapped** (0 % painted; the C77E081B pattern) |
-| | fallback on (first version) | 120 correct, 0 mix-ups | swapped after about a second; 88 correct, 32 unclear, **0 mix-ups** |
+| A right, B a picture of someone else | 11.2.206 / 207 | 120 of 120 correct | **never swapped** (the C77E081B pattern) |
+| | **11.2.208** | 120 of 120 correct | swapped from frame 46 to the end: **74 correct, 0 mix-ups**; frames 0-45 original (the wait) |
 | A and B right | 11.2.206 | 120 / 120 | 120 / 120 |
-| | fallback on | identical; the fallback never fired | identical |
+| | **11.2.208** | identical | identical (the fallback never fired) |
 
-**The first version painted B's frames before the fallback with B's later position:** about 1 s, up to 14 px off (placement
-mean 9.1 px vs 1.5 px with the right picture). Those frames now stay original. **That change is being re-measured now; the
-result follows.**
+Person B's painted position with the wrong picture is the same as with the right one: 0.0 px apart on average, 0.7 px at most
+(`place_vs.py`). Person A has one frame 47.5 px off in the wrong-picture runs; 11.2.206 has the same frame. A's average went
+from 1.8 px to 0.9 px.
 
-**Contact clips** (harsh step, side-view kiss, hide; no Detect pictures, so the fallback cannot fire there; they check the
-11.2.207 front/behind fix): running now; results follow. The smooch and the crossing were measured on 11.2.207
-(SDOS-207 §3: smooch mix-ups 1 → 0).
+**Two defects found and fixed while testing:**
+1. **Backward hold.** The first version filled B's frames before the fallback with B's later position: about 1 s, up to 14 px
+   off. Those frames now stay original.
+2. **Noise resets.** After the fallback, an 11.2.176 safeguard reset B's identity: "the lock looks more like another person's
+   picture" (`own=-0.03 other=0.04 - reset`). With a picture that matches nobody, that comparison is noise, and B was lost
+   again from frame 95 to the end. Now, once a person's picture has been given up, only a real likeness to another picture
+   (0.35) resets them, and if lost they are found again at once.
+
+**Contact clips, Ultra, no Detect pictures** (the fallback cannot fire there; they check the 11.2.207 front/behind fix):
+
+| Clip | 11.2.206 identity correct / unclear | 11.2.208 | Everything else |
+|---|---|---|---|
+| Harsh step | 240 / 0 | 240 / 0 | identical |
+| Side-view kiss | 136 / 104 | 135 / 105 | mix-ups 0, reverts 7, weak 27, placement: identical |
+| Hide | 164 / 3 | **166 / 1** | identical |
+| Smooch (11.2.207) | 168 / 2, 1 mix-up | **170 / 1, 0 mix-ups** | |
+| Crossing (11.2.207) | 192 / 4, weak 12 | **193 / 3, weak 10** | |
+
+The side-view kiss and hide runs used the code from before the two tracker fixes above. Those fixes act only with Detect
+pictures, and these runs have none.
 
 **Unit checks on this pack:** `unit176` 12, `unit176_pipe` 14, `unit204` 7, all pass.
 
 ## 3. Limits
 
-1. **The cost of the fallback is a short delay.** A person whose picture does not match stays original for about a second
-   before being found.
+1. **The cost of the fallback is a short delay.** A person whose picture does not match stays original until it fires: 45
+   detector calls, about 1.5 s in the test (frames 0-45). After that, the same person is found again at once.
 2. **It cannot help with crowds.** With more faces on screen than people to swap, the picture still decides, so a bystander is
    never chosen by elimination.
 3. **6332D118-type refusals are not changed.** There both people were already found, and later faces matched neither of them.

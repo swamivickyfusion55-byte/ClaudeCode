@@ -45,7 +45,7 @@ diff -ru '--exclude=__pycache__' '--exclude=SDOS-208*' v11.2.207_SteadyID/core_p
                          _tl = [(gg, rr) for (gg, rr) in _tl if _lo <= gg < _hi]
 diff -ru '--exclude=__pycache__' '--exclude=SDOS-208*' v11.2.207_SteadyID/swap_engine.py v11.2.208_RefFallback/swap_engine.py
 --- v11.2.207_SteadyID/swap_engine.py	2026-11-13 14:22:05.712617507 +0000
-+++ v11.2.208_RefFallback/swap_engine.py	2026-11-13 14:49:10.845740953 +0000
++++ v11.2.208_RefFallback/swap_engine.py	2026-11-13 15:23:41.694658122 +0000
 @@ -62,7 +62,7 @@
      "ENGINE_VERSION",
  ]
@@ -64,7 +64,28 @@ diff -ru '--exclude=__pycache__' '--exclude=SDOS-208*' v11.2.207_SteadyID/swap_e
      "trk_ref_stale_other": 0.30,     # ...but never a face that another person's picture matches this well
      "occ_flow": 1.0,                # last frame's cut moves with the object (optical flow inside the face crop) before smoothing
      "occ_instant": 1.0,             # a cut opens at once where the colour test AND the occlusion model both see the object
-@@ -3939,6 +3939,10 @@
+@@ -3619,6 +3619,10 @@
+                 r2 = refs.get(s2) if refs else None
+                 if r2 is not None:
+                     other = max(other, _cos_emb(lock, r2))
++            # v11.2.208: a picture the fallback gave up on matches nobody, so "own" is noise around 0 and the lock was reset
++            # whenever the other picture read 0.04 higher - also noise. Then only a real likeness to the other picture counts.
++            if s in self._ref_stale_logged and other < float(_P.get("trk_ref_stale_other", 0.30)) + 0.05:
++                continue
+             if other > own + 0.04:
+                 trd = self.tracks[s]
+                 trd.emb = None
+@@ -3925,7 +3929,8 @@
+                 # part, another scene); with it the person stayed original until some frame happened to match it.
+                 _stale_n = int(_P.get("trk_ref_stale_calls", 0) or 0)
+                 stale_i = [i for i in empty_i if refs and refs.get(slots[i]) is not None
+-                           and _stale_n > 0 and self._ref_stale.get(slots[i], 0) >= _stale_n]
++                           and _stale_n > 0 and (self._ref_stale.get(slots[i], 0) >= _stale_n
++                                                 or slots[i] in self._ref_stale_logged)]   # given up once: at once
+                 # only with no more faces on screen than people to swap: with bystanders around, the picture must decide
+                 if pick_i is None and any_ref and stale_i and m <= n:
+                     # not a face that one of the OTHER pictures claims, nor one a locked person looks like
+@@ -3939,6 +3944,10 @@
                          if pool:
                              pick_i = pool[0]
                              self.ref_fallback_n += 1
