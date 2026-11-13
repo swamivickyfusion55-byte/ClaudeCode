@@ -1,0 +1,256 @@
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.59_UploadQueue/README.md Phoenix_APK_Builder_1.2.60_LocalCopy/README.md
+--- Phoenix_APK_Builder_1.2.59_UploadQueue/README.md	2026-11-13 08:32:35.223901957 +0000
++++ Phoenix_APK_Builder_1.2.60_LocalCopy/README.md	2026-11-13 14:10:49.316359551 +0000
+@@ -8,9 +8,22 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.59 (Upload queue: no more parts stuck at "Uploading video 2 %")
++# Phoenix APK Builder 1.2.60 (Local copy: Phoenix no longer closed with the storage provider)
+ 
+-Upload every file in this pack, including `source.zip`. The page title must say Phoenix Mobile 1.2.59. versionCode is **179**.
++Upload every file in this pack, including `source.zip`. The page title must say Phoenix Mobile 1.2.60. versionCode is **180**.
++
++**1.2.60 - "Phoenix was closed because a system part it needs stopped (depends on provider
++com.android.externalstorage ... in dying proc)":**
++- A video picked from the gallery or Files is read through Android's storage provider. Phoenix kept that connection open
++  for the whole upload (a single video) or the whole cutting (a split). When Android stopped the provider's process, it
++  closed Phoenix with it - that is the message.
++- Now Phoenix first copies the video into its own storage (a few seconds; the status line says "Copying the video into
++  Phoenix (N MB)"), then cuts and uploads from the copy. The copy is deleted when the parts are cut, or when the upload ends.
++- When there is too little free space for the copy (the video's size plus 400 MB), or the copy fails, Phoenix reads the
++  picked video as before.
++- Everything else as 1.2.59 (three uploads at once, a stalled upload steps aside and resumes).
++
++## 1.2.59 (Upload queue: no more parts stuck at "Uploading video 2 %")
+ 
+ **1.2.59 - split parts no longer sit at "Uploading video 2 %":**
+ - **Why it happened:** the parts of a split went up one at a time, through a single upload slot, and every part waiting
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.59_UploadQueue/app.py Phoenix_APK_Builder_1.2.60_LocalCopy/app.py
+--- Phoenix_APK_Builder_1.2.59_UploadQueue/app.py	2026-11-13 08:32:35.180262352 +0000
++++ Phoenix_APK_Builder_1.2.60_LocalCopy/app.py	2026-11-13 14:10:49.312360701 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.59"
++VER = "1.2.60"
+ APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.59 build ===",
++        "=== Phoenix Mobile 1.2.60 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhoenixMobile-1.2.59-debug.apk was not produced.** "
++            "**Build reported success but PhoenixMobile-1.2.60-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -185,10 +185,10 @@
+             info = fh.read().strip()
+     except OSError:
+         pass
+-    if info and ("1.2.59" not in info or "versionCode 179" not in info):
++    if info and ("1.2.60" not in info or "versionCode 180" not in info):
+         yield (
+             log,
+-            "**Not offering this file.** It is not versionCode 179 (1.2.59). "
++            "**Not offering this file.** It is not versionCode 180 (1.2.60). "
+             "Installing an older build over the copy on the phone is what the phone calls an invalid package.\n\n```\n"
+             + info + "\n```",
+             None,
+@@ -297,12 +297,12 @@
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.59 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.60 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.59</h1>"
+-        "<p>versionCode 179. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.60</h1>"
++        "<p>versionCode 180. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.59-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.60-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.59-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.60-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.59_UploadQueue/build.sh Phoenix_APK_Builder_1.2.60_LocalCopy/build.sh
+--- Phoenix_APK_Builder_1.2.59_UploadQueue/build.sh	2026-11-13 08:32:17.639463689 +0000
++++ Phoenix_APK_Builder_1.2.60_LocalCopy/build.sh	2026-11-13 14:10:49.285772548 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.59}"
++VER="${VER:-1.2.60}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.59_UploadQueue/src/CHANGELOG.md Phoenix_APK_Builder_1.2.60_LocalCopy/src/CHANGELOG.md
+--- Phoenix_APK_Builder_1.2.59_UploadQueue/src/CHANGELOG.md	2026-11-13 08:32:35.224359193 +0000
++++ Phoenix_APK_Builder_1.2.60_LocalCopy/src/CHANGELOG.md	2026-11-13 14:10:49.320361016 +0000
+@@ -1,3 +1,19 @@
++# v1.2.60 - the picked video is copied into Phoenix first
++
++- **Reported:** "Phoenix had a problem last time - Phoenix was closed because a system part it needs stopped (depends on provider
++  com.android.externalstorage/.ExternalStorageProvider in dying proc com.android.externalstorage (adj -10000))".
++- **Cause:** the picked video (a content:// document of the external-storage provider) was read through the provider for the whole
++  upload of a single video (`sendVideo` holds a ParcelFileDescriptor) and for the whole cutting of a split (`VideoTrimmer.trim` per
++  part). An app holding an open file from a provider is killed by Android when the provider's process dies.
++- **Changed (PhoenixViewModel.kt):** `localVideoCopy` copies the video once into the app's cache (when the free space is at least the
++  video's size + 400 MB; the size Android reports must match the copy). A split cuts its parts from the copy and deletes it when
++  the parts are cut; a single video uploads from the copy, which is deleted when the upload ends, also when it fails (a retry makes
++  a new one). Otherwise the picked video is read as before.
++- **Checked here:** all sources compile with no new error except calls of Android types the sandbox has no definitions for; the real
++  `localVideoCopy` (its text lifted from the source) against stand-ins for those types: a byte-for-byte copy; a file:// part is
++  not copied; a copy that breaks off, a short copy and too little space each give null and leave no file behind.
++- **Not checked here:** a Gradle / Android build and the app on a phone.
++
+ # v1.2.59 - split parts no longer stuck at "Uploading video 2 %"
+ 
+ - **Reported:** many parts of a split sat at "UPLOADING VIDEO 2 %" for 30 minutes and more; Redo part did not help.
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/build.gradle.kts	2026-11-13 08:32:17.634846811 +0000
++++ Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/build.gradle.kts	2026-11-13 14:10:49.277801275 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 179
+-        versionName = "1.2.59"
++        versionCode = 180
++        versionName = "1.2.60"
+         // 1.2.56: 64-bit ARM phones only. The APK carried four copies of ONNX Runtime and the native lib (arm64, armv7,
+         // x86, x86_64); three were never used on a phone, and the 92 MB download kept breaking off half way - a cut-off
+         // APK is what the phone calls "package appears to be invalid".
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt
+--- Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-13 08:29:05.990835420 +0000
++++ Phoenix_APK_Builder_1.2.60_LocalCopy/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-13 14:08:59.448563592 +0000
+@@ -60,6 +60,8 @@
+         const val VIDEO_STALL_MS = 3 * 60 * 1000L
+         /** 1.2.59: how many times a stalled upload is tried again before the part is marked Failed. */
+         const val VIDEO_STALL_TRIES = 5
++        /** 1.2.60: the copy of the picked video is made only with this much room left over (else it is read as before). */
++        const val LOCAL_COPY_SPARE_BYTES = 400L * 1024 * 1024
+         /** A history entry in one of these states is not using its Space (1.2.29: Cancelled/Error/Downloading added). */
+         val TERMINAL_STATUSES = setOf(
+             "Done", "Failed", "Monitoring stopped", "Replaced", "Cancelled", "Canceled", "Error", "Stopped", "Expired",
+@@ -277,6 +279,44 @@
+         }
+     }
+ 
++    /**
++     * 1.2.60: the picked video, copied once into Phoenix's own storage. Reading it through Android's storage provider for the
++     * whole cut or upload made Phoenix depend on that provider's process: when Android stopped it, Android closed Phoenix as
++     * well ("Phoenix was closed because a system part it needs stopped (depends on provider com.android.externalstorage ...
++     * in dying proc)"). The copy takes seconds; after it nothing outside Phoenix is needed. null = use the picked video as
++     * before (it is a file already, there is too little space, or the copy failed). The caller deletes the copy.
++     */
++    private fun localVideoCopy(uri: Uri, onStatus: (String) -> Unit = {}): File? {
++        if (uri.scheme != "content") return null
++        val app = getApplication<Application>()
++        var tmp: File? = null
++        return try {
++            val size = runCatching {
++                app.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
++                    if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
++                }
++            }.getOrNull() ?: -1L
++            val dir = app.cacheDir
++            if (size <= 0L || dir.usableSpace < size + LOCAL_COPY_SPARE_BYTES) return null
++            val dest = File(dir, "phoenix_src_${System.nanoTime()}.mp4")
++            tmp = File(dir, dest.name + ".part")
++            onStatus("Copying the video into Phoenix (${size / 1_048_576} MB)…")
++            val input = app.contentResolver.openInputStream(uri) ?: return null
++            input.use { inp -> tmp!!.outputStream().use { out -> inp.copyTo(out, 1 shl 20) } }
++            if (tmp!!.length() != size || !tmp!!.renameTo(dest)) {
++                safeDelete(tmp)
++                return null
++            }
++            dest
++        } catch (e: kotlinx.coroutines.CancellationException) {
++            safeDelete(tmp)
++            throw e
++        } catch (e: Throwable) {
++            safeDelete(tmp)
++            null
++        }
++    }
++
+     private suspend fun uploadVideoOnce(
+         settings: HfSettings,
+         uri: Uri,
+@@ -335,6 +375,11 @@
+                     }
+                 }
+ 
++                // 1.2.60: the whole video goes up from Phoenix's own copy, not through the storage provider for the whole upload
++                if (trimmedFile == null) {
++                    localVideoCopy(uri) { msg -> status = msg }?.let { trimmedFile = it }
++                }
++
+                 var lastProgressPush = 0L
+                 val progress: (Long, Long) -> Unit = { written, total ->
+                     val now = System.currentTimeMillis()
+@@ -358,6 +403,8 @@
+                     }
+                 } finally {
+                     transferEnded()
++                    // 1.2.60: also when the upload fails - a retry makes a new copy, and the copies must not pile up
++                    trimmedFile?.let { safeDelete(it) }
+                 }
+                 trimmedFile?.let { safeDelete(it) }
+                 UploadedVideo(path, sendStart, sendEnd, offsetUs)
+@@ -1894,9 +1941,13 @@
+         val span = winEnd - winStart
+         setFarm("Split", 1)
+         viewModelScope.launch(guard + Dispatchers.IO) {
++          var localCopy: File? = null
+           try {
+             val app = getApplication<Application>()
+-            val totalUs = VideoTrimmer.durationUs(app, uri) ?: 0L
++            // 1.2.60: the parts are cut from Phoenix's own copy of the video (see localVideoCopy)
++            localCopy = localVideoCopy(uri) { msg -> status = msg; setFarm("Copy", 1) }
++            val src = localCopy?.let { Uri.fromFile(it) } ?: uri
++            val totalUs = VideoTrimmer.durationUs(app, src) ?: 0L
+             for (i in 0 until parts) {
+                 val startPct = winStart + span * i / parts
+                 val endPct = if (i == parts - 1) winEnd else winStart + span * (i + 1) / parts
+@@ -1911,7 +1962,7 @@
+                     partSecs = (((endUs - startUs) / 1_000_000L).toInt() + 3).coerceIn(10, 360)
+                     setFarm("Split ${i + 1}/$parts", ((i) * 18 / parts).coerceAtLeast(2))
+                     val dest = File(app.cacheDir, "phoenix_part_${groupId}_$i.mp4")
+-                    val cut = VideoTrimmer.trim(app, uri, startUs, endUs, dest)
++                    val cut = VideoTrimmer.trim(app, src, startUs, endUs, dest)
+                     if (cut != null && cut.file.exists() && cut.durationUs > 0L) {
+                         partUri = Uri.fromFile(cut.file)
+                         sendStart = ((cut.residualStartUs * 100.0) / cut.durationUs).toInt().coerceIn(0, 5)
+@@ -1945,6 +1996,7 @@
+             status = "Split stopped before upload: ${e.message ?: e.javaClass.simpleName}"
+           } finally {
+             free.forEach { reservedUrls.remove(normUrl(it.url)) }
++            safeDelete(localCopy)                // the parts are their own files now
+           }
+         }
+     }
