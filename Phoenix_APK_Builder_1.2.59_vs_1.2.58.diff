@@ -1,0 +1,337 @@
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.58_Azure/README.md Phoenix_APK_Builder_1.2.59_UploadQueue/README.md
+--- Phoenix_APK_Builder_1.2.58_Azure/README.md	2026-11-12 15:36:41.164656507 +0000
++++ Phoenix_APK_Builder_1.2.59_UploadQueue/README.md	2026-11-13 08:32:35.223901957 +0000
+@@ -8,9 +8,24 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.58 (Azure: new look)
++# Phoenix APK Builder 1.2.59 (Upload queue: no more parts stuck at "Uploading video 2 %")
+ 
+-Upload every file in this pack, including `source.zip`. The page title must say Phoenix Mobile 1.2.58. versionCode is **178**.
++Upload every file in this pack, including `source.zip`. The page title must say Phoenix Mobile 1.2.59. versionCode is **179**.
++
++**1.2.59 - split parts no longer sit at "Uploading video 2 %":**
++- **Why it happened:** the parts of a split went up one at a time, through a single upload slot, and every part waiting
++  for that slot already read "Uploading video 2 %". When one part's Space stopped taking the video (asleep, restarting,
++  overloaded), that part kept the slot for up to 15 minutes, then sent the whole file again in one request for up to
++  15 more: every other part waited behind it at 2 %. Redo part put the part back in the same queue.
++- **Now:** three parts upload at once (each to its own Space), so one Space that does not answer cannot hold up the rest.
++- A part whose Space accepts nothing for **3 minutes** steps out of the upload slot, waits 20 seconds and tries again,
++  resuming at the last byte the Space has (up to 5 times; then the card says Failed - check this Space, then tap Redo part).
++  It no longer falls back to sending the whole file in one request after a stall.
++- A part waiting for a slot says so: **WAITING TO UPLOAD**, "Queued - 2 parts ahead (3 upload at a time)".
++- After the app is closed or updated, cards whose video never reached the Space show **INTERRUPTED** - "tap Redo part"
++  (they used to stay at "Uploading video 2 %" for ever, with nothing sending them).
++
++## 1.2.58 (Azure: new look)
+ 
+ **1.2.58 - new look ("Azure"):** a calm, professional light theme. Dark text on light surfaces everywhere: near-black body text
+ (16 : 1 contrast on white) and dark-grey secondary text (7.6 : 1) instead of the lighter grey; one azure-blue accent (#0F6CBD)
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.58_Azure/app.py Phoenix_APK_Builder_1.2.59_UploadQueue/app.py
+--- Phoenix_APK_Builder_1.2.58_Azure/app.py	2026-11-12 15:36:41.163605536 +0000
++++ Phoenix_APK_Builder_1.2.59_UploadQueue/app.py	2026-11-13 08:32:35.180262352 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.58"
++VER = "1.2.59"
+ APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.58 build ===",
++        "=== Phoenix Mobile 1.2.59 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhoenixMobile-1.2.58-debug.apk was not produced.** "
++            "**Build reported success but PhoenixMobile-1.2.59-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -185,10 +185,10 @@
+             info = fh.read().strip()
+     except OSError:
+         pass
+-    if info and ("1.2.58" not in info or "versionCode 178" not in info):
++    if info and ("1.2.59" not in info or "versionCode 179" not in info):
+         yield (
+             log,
+-            "**Not offering this file.** It is not versionCode 178 (1.2.58). "
++            "**Not offering this file.** It is not versionCode 179 (1.2.59). "
+             "Installing an older build over the copy on the phone is what the phone calls an invalid package.\n\n```\n"
+             + info + "\n```",
+             None,
+@@ -297,12 +297,12 @@
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.58 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.59 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.58</h1>"
+-        "<p>versionCode 178. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.59</h1>"
++        "<p>versionCode 179. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.58-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.59-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.58-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.59-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.58_Azure/build.sh Phoenix_APK_Builder_1.2.59_UploadQueue/build.sh
+--- Phoenix_APK_Builder_1.2.58_Azure/build.sh	2026-11-12 15:36:41.129460434 +0000
++++ Phoenix_APK_Builder_1.2.59_UploadQueue/build.sh	2026-11-13 08:32:17.639463689 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.58}"
++VER="${VER:-1.2.59}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.58_Azure/src/CHANGELOG.md Phoenix_APK_Builder_1.2.59_UploadQueue/src/CHANGELOG.md
+--- Phoenix_APK_Builder_1.2.58_Azure/src/CHANGELOG.md	2026-11-12 15:36:05.641205350 +0000
++++ Phoenix_APK_Builder_1.2.59_UploadQueue/src/CHANGELOG.md	2026-11-13 08:32:35.224359193 +0000
+@@ -1,3 +1,24 @@
++# v1.2.59 - split parts no longer stuck at "Uploading video 2 %"
++
++- **Reported:** many parts of a split sat at "UPLOADING VIDEO 2 %" for 30 minutes and more; Redo part did not help.
++- **Cause:** one upload slot for all parts (`videoUploadSlots = Semaphore(1)`); a part whose Space stopped answering held it for up
++  to 15 minutes (the resumable upload's stall limit), then sent the whole file in one request (15-minute write timeout). The parts
++  behind it showed "Uploading video 2 %" while they waited. Redo part restarted the part at the back of the same queue.
++- **Changed (PhoenixViewModel.kt, net/HfApi.kt):**
++  - `VIDEO_UPLOADS_AT_ONCE = 3` video uploads at a time (each part to its own Space; the per-Space gate stays);
++  - the video's resumable upload gives up after `VIDEO_STALL_MS` = 3 minutes without a byte accepted, with a new
++    `UploadStalledException`; the job then leaves the slot, waits 20 s (or for the network) and tries again, resuming at the Space's
++    offset, up to `VIDEO_STALL_TRIES` = 5 times, then Failed ("check this Space, then tap Redo part"). No whole-file request after a
++    stall (still used when the Space has no resumable routes or the source cannot be read at an offset);
++  - a part waiting for a slot shows "Waiting to upload" and its place in the queue;
++  - at start, Video cards without a job id that are not finished are marked "Interrupted" (tap Redo part): nothing sends them after
++    the app run that started them has ended.
++- **Checked here:** all app sources compile with the Kotlin 2.0.21 / Compose compiler against the same API surface as 1.2.58 with no
++  new error (deliberate mistakes in the new code were caught, so the check is real). The real `HfApi.uploadResumable` against a
++  local fake Space: a working Space returns the path; a Space answering only 503, and one that stops after two chunks, both end
++  with `UploadStalledException` at the stall limit.
++- **Not checked here:** a Gradle / Android build (no Android SDK in the sandbox) and the app on a phone.
++
+ # v1.2.37 - the good parts of the 1.2.36 pack, and a calmer, more finished look
+ 
+ - **Asked:** check whether 1.2.32 has the features of the attached 1.2.36 ("AutoBelly Button") pack, take only the good ones, and give the
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.58_Azure/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.58_Azure/src/app/build.gradle.kts	2026-11-12 15:36:41.137453155 +0000
++++ Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/build.gradle.kts	2026-11-13 08:32:17.634846811 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 178
+-        versionName = "1.2.58"
++        versionCode = 179
++        versionName = "1.2.59"
+         // 1.2.56: 64-bit ARM phones only. The APK carried four copies of ONNX Runtime and the native lib (arm64, armv7,
+         // x86, x86_64); three were never used on a phone, and the 92 MB download kept breaking off half way - a cut-off
+         // APK is what the phone calls "package appears to be invalid".
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt
+--- Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-12 15:36:05.646573216 +0000
++++ Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-13 08:29:05.990835420 +0000
+@@ -27,6 +27,7 @@
+ import com.swamitech.phoenix.local.LocalRuntime
+ import com.swamitech.phoenix.local.ModelPackManager
+ import com.swamitech.phoenix.net.HfApi
++import com.swamitech.phoenix.net.UploadStalledException
+ import com.swamitech.phoenix.security.SecureStore
+ import kotlinx.coroutines.CoroutineExceptionHandler
+ import kotlinx.coroutines.Dispatchers
+@@ -53,6 +54,12 @@
+         const val DEFAULT_SPACE = "https://swamivicky-swamitechgradio2.hf.space"
+         const val DEFAULT_ENDPOINT = "phoenix_submit_video"
+         const val MAX_SPACES = 21
++        /** 1.2.59: video uploads running at the same time (each to its own Space). */
++        const val VIDEO_UPLOADS_AT_ONCE = 3
++        /** 1.2.59: a video upload that has had no byte accepted for this long steps aside and is tried again. */
++        const val VIDEO_STALL_MS = 3 * 60 * 1000L
++        /** 1.2.59: how many times a stalled upload is tried again before the part is marked Failed. */
++        const val VIDEO_STALL_TRIES = 5
+         /** A history entry in one of these states is not using its Space (1.2.29: Cancelled/Error/Downloading added). */
+         val TERMINAL_STATUSES = setOf(
+             "Done", "Failed", "Monitoring stopped", "Replaced", "Cancelled", "Canceled", "Error", "Stopped", "Expired",
+@@ -179,6 +186,9 @@
+                     val token = resumableToken(settings.spaceUrl.trim().trimEnd('/'), key, size)
+                     val path = hf.uploadResumable(
+                         settings, "phoenix_video_${token.take(12)}.mp4", size, token,
++                        // 1.2.59: 3 minutes without a byte accepted ends this try (it was 15, and a single request
++                        // of the whole file followed): the part steps aside, the others go on, and it resumes later
++                        maxStallMs = VIDEO_STALL_MS,
+                         readChunk = { off, n ->
+                             val buf = java.nio.ByteBuffer.allocateDirect(n)
+                             var pos = off
+@@ -200,6 +210,8 @@
+                     if (path != null) return path
+                 } catch (e: kotlinx.coroutines.CancellationException) {
+                     throw e
++                } catch (e: UploadStalledException) {
++                    throw e                         // 1.2.59: no whole-file request after a stall - try again later instead
+                 } catch (e: Throwable) {
+                     // 1.2.37 (from 1.2.34): a chunk that dies part way (a proxy page, a restart, a short read) must not end the
+                     // job. The whole file still goes up by the older single request.
+@@ -220,8 +232,31 @@
+     // foreground - never with startForegroundService() from the background, which is what made 1.2.19/1.2.20
+     // vanish (Android ends an app whose foreground-service start it refused, with no message).
+     private val activeTransfers = java.util.concurrent.atomic.AtomicInteger(0)
+-    /** One video is read at a time. Several parts at once were what Android closed as low memory. */
+-    private val videoUploadSlots = Semaphore(1)
++    /**
++     * 1.2.59: three videos go up at once (each to its own Space). With one at a time, a single part whose Space did not
++     * answer held every other part at "Uploading video 2 %" for 30 minutes and more. Memory stays small: the resumable
++     * upload reads 1 MB at a time per part, and the parts are cut one after another before this.
++     */
++    private val videoUploadSlots = Semaphore(VIDEO_UPLOADS_AT_ONCE)
++    /** Parts waiting for an upload slot, in order, so each card can say where it is in the queue. */
++    private val uploadQueue = java.util.concurrent.CopyOnWriteArrayList<String>()
++
++    private fun refreshUploadQueue() {
++        uploadQueue.forEachIndexed { i, id ->
++            updateHistory(id, eta = if (i == 0) "Queued - next to upload ($VIDEO_UPLOADS_AT_ONCE upload at a time)"
++                else "Queued - $i part${if (i == 1) "" else "s"} ahead ($VIDEO_UPLOADS_AT_ONCE upload at a time)")
++        }
++    }
++
++    private fun isUploadStall(e: Throwable): Boolean {
++        var t: Throwable? = e
++        var depth = 0
++        while (t != null && depth++ < 8) {
++            if (t is UploadStalledException) return true
++            t = t.cause
++        }
++        return false
++    }
+ 
+     private fun transferStarted() {
+         if (activeTransfers.incrementAndGet() == 1) {
+@@ -1998,6 +2033,7 @@
+         val job = viewModelScope.launch(guard + controlJob + Dispatchers.IO) {
+             try {
+             var wakeTries = 0
++            var stallTries = 0
+             while (true) {
+             try {
+                 val cur = history.find { it.id == localId }?.status
+@@ -2012,8 +2048,17 @@
+                 }
+                 hf.discoverSpace(targetSpace)
+                 val alreadyCached = videoUploadCache.containsKey(videoCacheKey(targetSpace, uri, trimStart, trimEnd))
+-                updateHistory(localId, status = if (alreadyCached) "Reusing upload" else "Uploading video", progress = .02f, eta = if (alreadyCached) "Video already on Space…" else "Uploading…")
+-                val videoUpload = videoUploadSlots.withPermit {
++                // 1.2.59: a part waiting for an upload slot says so, with its place in the queue (it used to read
++                // "Uploading video 2 %" the whole time, which looked stuck)
++                if (!alreadyCached) {
++                    uploadQueue.add(localId)
++                    updateHistory(localId, status = "Waiting to upload", progress = .02f)
++                    refreshUploadQueue()
++                }
++                val videoUpload = try { videoUploadSlots.withPermit {
++                    if (uploadQueue.remove(localId)) refreshUploadQueue()
++                    updateHistory(localId, status = if (alreadyCached) "Reusing upload" else "Uploading video", progress = .02f,
++                        eta = if (alreadyCached) "Video already on Space…" else if (stallTries > 0) "Resuming the upload…" else "Starting the upload…")
+                     uploadVideoOnce(targetSpace, uri, trimStart, trimEnd) { written, total ->
+                     if (total > 0) {
+                         val pct = (written.toFloat() / total).coerceIn(0f, 1f)
+@@ -2029,6 +2074,8 @@
+                         }
+                     }
+                     }
++                } } finally {
++                    if (uploadQueue.remove(localId)) refreshUploadQueue()
+                 }
+                 // 1.2.57: the part clip is KEPT until this part is done (updateHistory deletes it then). It used to be
+                 // deleted right after the upload, so a part the Space lost later could not be redone.
+@@ -2103,6 +2150,20 @@
+                     }
+                     pollPhoenixJob(targetSpace, remoteId, localId)
+                     break
++                } else if (isUploadStall(e) && stallTries < VIDEO_STALL_TRIES) {
++                    // 1.2.59: the Space stopped taking the video. Step out of the upload slot (the other parts go on), wait a
++                    // little and try again: the upload resumes at the last byte the Space holds.
++                    stallTries++
++                    updateHistory(localId, status = "Waiting to upload", eta = "Upload stalled - trying again ($stallTries of $VIDEO_STALL_TRIES)")
++                    status = "$spaceLabel stopped taking the video. Trying again ($stallTries of $VIDEO_STALL_TRIES); the other parts go on."
++                    if (!hasInternet()) waitForNetwork() else pauseOrWake(20_000L)
++                    continue
++                } else if (isUploadStall(e)) {
++                    lastError = "the upload to $spaceLabel stalled $VIDEO_STALL_TRIES times"
++                    updateHistory(localId, status = "Failed", eta = "Upload stalled $VIDEO_STALL_TRIES times - check this Space, then tap Redo part",
++                        errorName = "upload stalled")
++                    status = "Part on $spaceLabel failed: ${e.message ?: "upload stalled"}. Check the Space, then tap Redo part."
++                    break
+                 } else if (isOffline(e) || !hasInternet()) {
+                     val kept = existing?.status?.takeIf { it.isNotBlank() && it != "Failed" } ?: "Uploading video"
+                     updateHistory(localId, status = kept, eta = "No network — stays here until the signal is back")
+@@ -2505,6 +2566,16 @@
+     }
+ 
+     private fun resumeTrackedJobs() {
++        // 1.2.59: a card whose video never reached its Space (no job id) and that is not finished belonged to the app run
++        // that ended; nothing is sending it any more. It used to stay at "Uploading video 2 %" for ever.
++        history.filter {
++            it.kind == "Video" && it.remoteJobId.isNullOrBlank() && it.status !in TERMINAL_STATUSES &&
++                it.status != "Lost" && !parallelJobs.containsKey(it.id)
++        }.forEach {
++            updateHistory(it.id, status = "Interrupted",
++                eta = if (it.partCount > 1) "The app closed before this part was sent - tap Redo part"
++                else "The app closed before this video was sent - start it again")
++        }
+         val resumable = history.filter {
+             it.kind == "Video" &&
+                 !it.remoteJobId.isNullOrBlank() &&
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt
+--- Phoenix_APK_Builder_1.2.58_Azure/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt	2026-11-12 15:36:05.649864783 +0000
++++ Phoenix_APK_Builder_1.2.59_UploadQueue/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt	2026-11-13 08:29:05.989499492 +0000
+@@ -26,6 +26,13 @@
+ import java.util.concurrent.ConcurrentHashMap
+ 
+ /** Transport for the Phoenix Hugging Face Space. */
++
++/**
++ * 1.2.59: the resumable upload made no progress for its stall limit. Not an IOException on purpose: the upload loop's own
++ * IOException handlers must let it through, and the job treats it as "step aside and try again", not as "no network".
++ */
++class UploadStalledException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
++
+ class HfApi(private val tokenProvider: () -> String?) {
+ 
+     // HF/Gradio route discovery is metadata, not job state. Cache it briefly so
+@@ -415,8 +422,12 @@
+         fun pause(e: Throwable?) {
+             failures++
+             if (System.currentTimeMillis() - lastGood > maxStallMs) {
+-                throw if (e != null) friendlyNetworkError(e, host)
+-                else IllegalStateException("The upload to '$host' made no progress for ${maxStallMs / 60000} minutes.")
++                // 1.2.59: a stall is its own error, so the job can step out of the upload queue and try again later
++                // (resuming at the Space's offset) instead of failing or holding up the other parts
++                val why = if (e != null) friendlyNetworkError(e, host).message ?: e.javaClass.simpleName else null
++                throw UploadStalledException(
++                    "The upload to '$host' made no progress for ${maxOf(1L, maxStallMs / 60000)} min" +
++                        (if (why != null) " ($why)" else ""), e)
+             }
+             Thread.sleep(minOf(30_000L, 1000L shl minOf(failures, 5)))
+         }
