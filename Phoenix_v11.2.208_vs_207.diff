@@ -1,0 +1,77 @@
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-208*' v11.2.207_SteadyID/config.py v11.2.208_RefFallback/config.py
+--- v11.2.207_SteadyID/config.py	2026-11-13 14:22:05.713199566 +0000
++++ v11.2.208_RefFallback/config.py	2026-11-13 14:47:54.658256305 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.207"
+-BUILD = "SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.208"
++BUILD = "RefFallback · a person whose Detect picture matches no face for about a second is found by elimination; SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-208*' v11.2.207_SteadyID/core_pipeline.py v11.2.208_RefFallback/core_pipeline.py
+--- v11.2.207_SteadyID/core_pipeline.py	2026-11-13 14:07:39.601693578 +0000
++++ v11.2.208_RefFallback/core_pipeline.py	2026-11-13 14:49:10.941645609 +0000
+@@ -5423,6 +5423,7 @@
+         # span chunks, and any frame that is not yet bracketed is deferred to
+         # the next chunk instead of being emitted unswapped.
+         _geom_hist = {j: [] for j in smap.keys()}      # slot -> [(g, record)]
++        _no_preroll = {}                                # v11.2.208: slot -> first frame it may be painted on (fallback binds)
+         _aligned_hist = {j: [] for j in smap.keys()}   # slot -> [(g, fake, corr)]
+         # Output-stage opacity per slot, and the last record that actually
+         # composited for it. These persist for the whole job (not per chunk)
+@@ -5541,6 +5542,10 @@
+                         tr._reacquired = False
+                     except Exception:
+                         pass
++                if getattr(f, "_ref_fallback", False):
++                    # v11.2.208: found by elimination after its Detect picture matched nothing - the person was on screen
++                    # (and moving) before this frame, so the timeline must not hold this first position backwards over them
++                    _no_preroll.setdefault(slot, int(g))
+                 rec = _geom_record(
+                     f, tr,
+                     _render_alpha(f, tr),
+@@ -7333,6 +7338,8 @@
+                 _lo, _hi = _shot_lo(g), _shot_hi(g)
+                 out = {}
+                 for slot in sorted(smap.keys()):
++                    if slot in _no_preroll and g < _no_preroll[slot]:
++                        continue
+                     _tl = _geom_hist.get(slot) or []
+                     if _cut_list:
+                         _tl = [(gg, rr) for (gg, rr) in _tl if _lo <= gg < _hi]
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-208*' v11.2.207_SteadyID/swap_engine.py v11.2.208_RefFallback/swap_engine.py
+--- v11.2.207_SteadyID/swap_engine.py	2026-11-13 14:22:05.712617507 +0000
++++ v11.2.208_RefFallback/swap_engine.py	2026-11-13 14:49:10.845740953 +0000
+@@ -62,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.207-steadyid"
++ENGINE_VERSION = "aequus-1.2.208-reffallback"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -189,7 +189,7 @@
+     # v11.2.206 (SDOS-206) occlusion smoothness. Each 0 restores v11.2.205 exactly.
+     # v11.2.207 (SDOS-207): a person whose Detect picture matches no face for this many detector calls in a row (while a face
+     # nobody else has is there) is found by elimination instead (0 = 11.2.206: the picture alone, for as long as it takes)
+-    "trk_ref_stale_calls": 0,       # (45 = on; off in this pack until its job test is done - see SDOS-207)
++    "trk_ref_stale_calls": 45,
+     "trk_ref_stale_other": 0.30,     # ...but never a face that another person's picture matches this well
+     "occ_flow": 1.0,                # last frame's cut moves with the object (optical flow inside the face crop) before smoothing
+     "occ_instant": 1.0,             # a cut opens at once where the colour test AND the occlusion model both see the object
+@@ -3939,6 +3939,10 @@
+                         if pool:
+                             pick_i = pool[0]
+                             self.ref_fallback_n += 1
++                            try:
++                                faces[j]._ref_fallback = True      # the job paints this person from this frame on, not before
++                            except Exception:
++                                pass
+                             if slots[pick_i] not in self._ref_stale_logged:
+                                 self._ref_stale_logged.add(slots[pick_i])
+                                 logging.info("person %s: the Detect picture matched no face for %d detector calls - found "
