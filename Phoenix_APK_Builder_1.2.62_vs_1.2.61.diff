@@ -1,0 +1,649 @@
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/README.md Phoenix_APK_Builder_1.2.62_SpaceControl/README.md
+--- Phoenix_APK_Builder_1.2.61_OneUpload/README.md	2026-11-13 17:26:31.080622075 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/README.md	2026-11-14 00:47:35.749853017 +0000
+@@ -8,10 +8,31 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.61 (One upload: Detect sends the frame, not the video)
++# Phoenix APK Builder 1.2.62 (Space control: status, Pause, Restart / Resume for each Space)
+ 
+ Upload these six files: `Dockerfile`, `app.py`, `build.sh`, `gradle.properties`, `README.md`, `source.zip`. The page title must
+-say Phoenix Mobile 1.2.61. versionCode is **181**.
++say Phoenix Mobile 1.2.62. versionCode is **182**.
++
++**1.2.62 - each Space's status, and Pause / Restart in the app:**
++- **Status everywhere.** The dot on each Space number at the top shows its state on Hugging Face:
++  - green: running;
++  - blue: one of your jobs is running there;
++  - amber: paused;
++  - red: error;
++  - light blue: starting or building;
++  - grey: asleep, or not read yet.
++
++  Under the selected Space's name (Connection card) the state is in words. It is read when the app opens and every 5 minutes.
++- **Connection - "Pause / restart Spaces":** one row per Space with its state (and the error text when it has one), **Pause**
++  and **Restart** (**Resume** when paused), a colour key and **Check status**.
++- **Asked first, every time.** The app asks the Space whether a job is running. If one is, or the Space does not answer, it
++  says in red that pausing or restarting stops that job for good. A restart is followed until the Space runs again (or fails).
++- **A paused Space gets no jobs:** a split skips it, and a job sent to it says to resume it first.
++- **Needs the saved token to have write access to the Spaces** (the same as "Push to all Spaces"). Without it, the app says
++  so. It uses Hugging Face's own Space API: `/api/spaces/{owner}/{name}/runtime`, `/pause`, `/restart`.
++- Everything else as 1.2.61.
++
++## 1.2.61 (One upload: Detect sends the frame, not the video)
+ 
+ **1.2.61 - the video goes up once:**
+ - **Detect** ("Show frame & detect faces") and the **skin-tone Preview** send only the picked frame, as a photo. They used to
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/app.py Phoenix_APK_Builder_1.2.62_SpaceControl/app.py
+--- Phoenix_APK_Builder_1.2.61_OneUpload/app.py	2026-11-13 17:26:31.080267236 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/app.py	2026-11-14 00:47:35.749559692 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.61"
++VER = "1.2.62"
+ APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.61 build ===",
++        "=== Phoenix Mobile 1.2.62 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhoenixMobile-1.2.61-debug.apk was not produced.** "
++            "**Build reported success but PhoenixMobile-1.2.62-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -185,10 +185,10 @@
+             info = fh.read().strip()
+     except OSError:
+         pass
+-    if info and ("1.2.61" not in info or "versionCode 181" not in info):
++    if info and ("1.2.62" not in info or "versionCode 182" not in info):
+         yield (
+             log,
+-            "**Not offering this file.** It is not versionCode 181 (1.2.61). "
++            "**Not offering this file.** It is not versionCode 182 (1.2.62). "
+             "Installing an older build over the copy on the phone is what the phone calls an invalid package.\n\n```\n"
+             + info + "\n```",
+             None,
+@@ -297,12 +297,12 @@
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.61 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.62 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.61</h1>"
+-        "<p>versionCode 181. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.62</h1>"
++        "<p>versionCode 182. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.61-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.62-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.61-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.62-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/build.sh Phoenix_APK_Builder_1.2.62_SpaceControl/build.sh
+--- Phoenix_APK_Builder_1.2.61_OneUpload/build.sh	2026-11-13 17:26:31.066976893 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/build.sh	2026-11-14 00:47:35.739155858 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.61}"
++VER="${VER:-1.2.62}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/src/CHANGELOG.md Phoenix_APK_Builder_1.2.62_SpaceControl/src/CHANGELOG.md
+--- Phoenix_APK_Builder_1.2.61_OneUpload/src/CHANGELOG.md	2026-11-13 17:26:31.080976753 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/src/CHANGELOG.md	2026-11-14 00:47:35.750120904 +0000
+@@ -1,3 +1,30 @@
++# v1.2.62 - each Space's status; Pause and Restart / Resume per Space
++
++- **Asked:** "add option of pause and restart space in the frontend app itself, pause and restart button against each space",
++  then "add a display of status as well, pause, running, error".
++- **HfApi.kt:** `spaceRuntime`, `pauseSpace`, `restartSpace`. These are GET `/api/spaces/{repo}/runtime`, POST `/pause` and
++  POST `/restart`, as `huggingface_hub` 0.27.1 calls them (`get_space_runtime`, `pause_space`, `restart_space`; restart
++  resumes a paused Space). The token is sent as `Authorization: Bearer`. The reply's `stage`, `hardware.current` and
++  `errorMessage` are read. HTTP 401/403 says the token needs write access; 404 says to check the Space's name. The repository
++  name comes from the slot as for "Push to all Spaces" (`repoIdOf`).
++- **PhoenixViewModel.kt:**
++  - `spaceStages` / `spaceErrors` per Space, read when the app opens and every 5 minutes, and by Check status.
++  - `askSpaceAction` asks the Space (or this phone) whether a job is running; no answer counts as running.
++  - `confirmSpaceAction` pauses or restarts, then follows a restart until RUNNING or an error (8 minutes at most).
++  - Paused Spaces are left out of `idleSpaces()` (splits), and `startRemote` refuses to send a job to one.
++- **MainActivity.kt:**
++  - the Space chips' dot is the Space's status;
++  - the Connection card shows the selected Space's status in words;
++  - a "Pause / restart Spaces" panel: rows, a colour key and Check status;
++  - a confirmation dialog, red when a job would be lost.
++- **Checked here:**
++  - All sources compile with no new error except calls of Android types the sandbox has no definitions for.
++  - The real `HfApi` calls against a local stand-in for the Hub: the right method, path and token on each call; stage read;
++    paused, then resumed; 403, 404, no token and an unreachable Hub each give a plain message, no crash.
++  - The real status words and colours for all 14 stage cases.
++- **Not checked here:** a Gradle / Android build, the app on a phone, and the real Hugging Face API (huggingface.co is not
++  reachable from this sandbox; the calls follow the official library's source).
++
+ # v1.2.61 - the video goes up once; the progress bar only moves forward
+ 
+ - **Asked:** "Why does upload appear to happen 2 times"; then build both changes.
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.61_OneUpload/src/app/build.gradle.kts	2026-11-13 17:26:31.064462418 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/build.gradle.kts	2026-11-14 00:47:35.737159181 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 181
+-        versionName = "1.2.61"
++        versionCode = 182
++        versionName = "1.2.62"
+         // 1.2.56: 64-bit ARM phones only. The APK carried four copies of ONNX Runtime and the native lib (arm64, armv7,
+         // x86, x86_64); three were never used on a phone, and the 92 MB download kept breaking off half way - a cut-off
+         // APK is what the phone calls "package appears to be invalid".
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt
+--- Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt	2026-11-13 17:22:14.331042980 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/src/main/java/com/swamitech/phoenix/MainActivity.kt	2026-11-14 00:46:36.395032718 +0000
+@@ -1891,6 +1891,16 @@
+                     current?.url?.removePrefix("https://")?.ifBlank { "Not configured" } ?: "Not configured",
+                     color = Muted, fontSize = 10.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                 )
++                if (current != null && current.url.isNotBlank()) {          // 1.2.62: its status on Hugging Face
++                    val st = vm.spaceStage(current.url)
++                    val bz = vm.isSpaceBusy(current.url)
++                    Row(verticalAlignment = Alignment.CenterVertically) {
++                        Box(Modifier.size(7.dp).clip(CircleShape).background(spaceStatusColor(st, bz)))
++                        Spacer(Modifier.width(5.dp))
++                        Text(vm.spaceStageText(st) + if (bz) " \u00B7 job running" else "",
++                            color = Slate, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold)
++                    }
++                }
+             }
+             Text("Targeted next", color = Burgundy, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+         }
+@@ -1914,6 +1924,19 @@
+             )
+         }
+ 
++        // 1.2.62: pause / restart each Space from the app
++        var ctlOpen by remember { mutableStateOf(false) }
++        DisclosureRow(
++            label = if (ctlOpen) "Hide pause / restart" else "Pause / restart Spaces",
++            open = ctlOpen,
++            onClick = {
++                ctlOpen = !ctlOpen
++                if (ctlOpen && vm.spaceStages.isEmpty() && vm.hfTokenSet) vm.refreshSpaceStages()
++            }
++        )
++        if (ctlOpen) SpaceControlPanel(vm)
++        vm.spaceConfirm?.let { SpaceConfirmDialog(vm, it) }
++
+         DisclosureRow(
+             label = if (open) "Hide connection settings" else "Edit Space settings & token",
+             open = open,
+@@ -2000,6 +2023,146 @@
+     }
+ }
+ 
++/** 1.2.62: the colour of a Space's status - green running, blue one of this phone's jobs on it, amber paused, red error,
++ *  light blue starting / building, grey asleep or not read. */
++private fun spaceStatusColor(stage: String?, busy: Boolean): Color = when {
++    stage == "PAUSED" -> Color(0xFFD69E2E)
++    stage != null && (stage.endsWith("ERROR") || stage == "NO_APP_FILE") -> Color(0xFFD92D20)
++    busy -> Color(0xFF2886DE)
++    stage == "RUNNING" -> Color(0xFF1E9E5A)
++    stage in setOf("BUILDING", "RUNNING_BUILDING", "APP_STARTING", "RUNNING_APP_STARTING") -> Color(0xFF7CB9F0)
++    else -> Color(0xFF94A3B8)
++}
++
++/** 1.2.62: one row per configured Space - its state on Hugging Face, Pause, and Restart (Resume when paused). */
++@Composable
++private fun SpaceControlPanel(vm: PhoenixViewModel) {
++    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
++        Text(
++            "Pausing stops a Space until you resume it; paused time costs nothing. Restarting reloads it (a few minutes). " +
++                "Both need the saved token to have write access. A paused Space gets no jobs and no split parts.",
++            color = Muted, fontSize = 11.5.sp
++        )
++        if (!vm.hfTokenSet) {
++            Text("Save a Hugging Face token with write access first (Edit Space settings & token).",
++                color = Gold, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
++        }
++        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp),
++            verticalAlignment = Alignment.CenterVertically) {
++            listOf("Running" to spaceStatusColor("RUNNING", false), "Job running" to spaceStatusColor("RUNNING", true),
++                "Paused" to spaceStatusColor("PAUSED", false), "Starting" to spaceStatusColor("BUILDING", false),
++                "Error" to spaceStatusColor("RUNTIME_ERROR", false), "Asleep / not read" to spaceStatusColor(null, false)).forEach { (t, col) ->
++                Row(verticalAlignment = Alignment.CenterVertically) {
++                    Box(Modifier.size(8.dp).clip(CircleShape).background(col))
++                    Spacer(Modifier.width(4.dp))
++                    Text(t, color = Muted, fontSize = 10.5.sp)
++                }
++            }
++        }
++        GhostButton(if (vm.spaceStagesChecking) "Checking\u2026" else "Check status") { vm.refreshSpaceStages() }
++        vm.spaces.forEachIndexed { index, space ->
++            if (space.url.isBlank()) return@forEachIndexed
++            val stage = vm.spaceStage(space.url)
++            val acting = vm.spaceIsActing(space.url)
++            val paused = stage == "PAUSED"
++            val busy = vm.isSpaceBusy(space.url)
++            val stageColor = when {
++                stage == "RUNNING" -> GoodGreen
++                paused -> Gold
++                stage != null && (stage.endsWith("ERROR") || stage == "NO_APP_FILE") -> Color(0xFFB42318)
++                else -> Muted
++            }
++            val err = vm.spaceError(space.url)
++            Row(
++                Modifier
++                    .fillMaxWidth()
++                    .clip(RoundedCornerShape(12.dp))
++                    .background(Color.White)
++                    .border(1.dp, Line, RoundedCornerShape(12.dp))
++                    .padding(horizontal = 10.dp, vertical = 8.dp),
++                verticalAlignment = Alignment.CenterVertically
++            ) {
++                Box(Modifier.size(9.dp).clip(CircleShape).background(spaceStatusColor(stage, busy)))
++                Spacer(Modifier.width(8.dp))
++                Column(Modifier.weight(1f)) {
++                    Text("${index + 1} \u00B7 ${space.label.ifBlank { "Space ${index + 1}" }}",
++                        color = Ink, fontWeight = FontWeight.Bold, fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
++                    Text(
++                        (if (acting) "Working\u2026" else vm.spaceStageText(stage)) + if (busy) " \u00B7 job running" else "",
++                        color = stageColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
++                    )
++                    if (err != null) {
++                        Text(err.take(160), color = Color(0xFFB42318), fontSize = 10.5.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
++                    }
++                }
++                val canAct = vm.hfTokenSet && !acting
++                Text(
++                    "Pause",
++                    color = if (canAct && !paused) Burgundy else Color(0xFF94A3B8),
++                    fontWeight = FontWeight.Bold, fontSize = 12.5.sp,
++                    modifier = Modifier
++                        .clip(RoundedCornerShape(8.dp))
++                        .clickable(enabled = canAct && !paused) { vm.askSpaceAction(index, "pause") }
++                        .padding(horizontal = 8.dp, vertical = 6.dp)
++                )
++                Text(
++                    if (paused) "Resume" else "Restart",
++                    color = if (canAct) Burgundy else Color(0xFF94A3B8),
++                    fontWeight = FontWeight.Bold, fontSize = 12.5.sp,
++                    modifier = Modifier
++                        .clip(RoundedCornerShape(8.dp))
++                        .clickable(enabled = canAct) { vm.askSpaceAction(index, "restart") }
++                        .padding(horizontal = 8.dp, vertical = 6.dp)
++                )
++            }
++        }
++        if (vm.spaceAdminMessage.isNotBlank()) {
++            Text(vm.spaceAdminMessage, color = Slate, fontSize = 11.5.sp)
++        }
++    }
++}
++
++/** 1.2.62: asked before every pause or restart; says plainly when a job is running there (it would be lost). */
++@Composable
++private fun SpaceConfirmDialog(vm: PhoenixViewModel, c: PhoenixViewModel.SpaceConfirm) {
++    val pausing = c.action == "pause"
++    val verb = if (pausing) "Pause" else if (c.paused) "Resume" else "Restart"
++    val doing = if (pausing) "Pausing" else if (c.paused) "Resuming" else "Restarting"
++    AlertDialog(
++        onDismissRequest = { vm.dismissSpaceAction() },
++        title = { Text("$verb ${c.label}?") },
++        text = {
++            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
++                Text(
++                    when {
++                        pausing -> "It stops until you resume it, takes no jobs, and costs nothing while paused."
++                        c.paused -> "It starts again; that takes a few minutes. Then it takes jobs again."
++                        else -> "It stops and starts again; that takes a few minutes."
++                    },
++                    fontSize = 13.sp
++                )
++                when {
++                    c.checking -> Text("Checking whether a job is running there\u2026", color = Muted, fontSize = 12.5.sp)
++                    c.jobRunning -> Text(
++                        "A job is running on this Space (or it did not answer). $doing it stops that job, and it cannot " +
++                            "be resumed: the Space keeps nothing.",
++                        color = Color(0xFFB42318), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold
++                    )
++                    !c.paused -> Text("No job is running there.", color = GoodGreen, fontSize = 12.5.sp)
++                }
++            }
++        },
++        confirmButton = {
++            TextButton(onClick = { vm.confirmSpaceAction() }, enabled = !c.checking) {
++                Text(if (c.jobRunning) "$verb anyway" else verb,
++                    color = if (c.checking) Color(0xFF94A3B8) else if (c.jobRunning) Color(0xFFB42318) else Burgundy,
++                    fontWeight = FontWeight.Bold)
++            }
++        },
++        dismissButton = { TextButton(onClick = { vm.dismissSpaceAction() }) { Text("Cancel") } }
++    )
++}
++
+ /**
+  * Modern Space selector — compact numbered pills with live busy indicator.
+  * Selected Space gets a filled primary treatment; busy Spaces show a green pulse.
+@@ -2014,7 +2177,7 @@
+             val bg by animateColorAsState(if (selected) Burgundy else Color.White, animationSpec = tween(180), label = "spaceBg")
+             val fg by animateColorAsState(if (selected) Color.White else Ink, animationSpec = tween(180), label = "spaceFg")
+             val border = if (selected) Color.Transparent else if (configured) Line else Color(0xFFE8EDF3)
+-            val statusColor = when { busy -> Color(0xFF34D399); configured -> Color(0xFF94A3B8); else -> Color(0xFFCBD5E1) }
++            val statusColor = if (!configured) Color(0xFFCBD5E1) else spaceStatusColor(vm.spaceStage(space.url), busy)   // 1.2.62
+             // Compact pill. The old 72x72 tile repeated "SPACE n" AND the number
+             // AND a status word - three ways of saying the same thing, costing
+             // ~72dp of permanently-pinned height. The dot carries status, the
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt
+--- Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-13 17:24:01.457814235 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-14 00:46:09.724810994 +0000
+@@ -21,6 +21,7 @@
+ import androidx.compose.runtime.mutableFloatStateOf
+ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.mutableStateMapOf
+ import androidx.compose.runtime.setValue
+ import androidx.lifecycle.AndroidViewModel
+ import androidx.lifecycle.viewModelScope
+@@ -66,6 +67,8 @@
+         const val PROGRESS_DOWNLOAD = .96f
+         /** 1.2.61: Detect and the skin-tone Preview send the picked frame at most this big (long side). */
+         const val DETECT_FRAME_PX = 1920
++        /** 1.2.62: how often the Spaces' status (running / paused / error ...) is read from Hugging Face. */
++        const val SPACE_STATUS_EVERY_MS = 5 * 60_000L
+         /** 1.2.60: the copy of the picked video is made only with this much room left over (else it is read as before). */
+         const val LOCAL_COPY_SPARE_BYTES = 400L * 1024 * 1024
+         /** A history entry in one of these states is not using its Space (1.2.29: Cancelled/Error/Downloading added). */
+@@ -996,6 +999,7 @@
+         lastExitNote = ""
+         runCatching { watchNetwork() }
+         runCatching { resumeTrackedJobs() }
++        runCatching { startSpaceStatusLoop() }                   // 1.2.62
+     }
+ 
+     private fun reportLastExit() {
+@@ -1162,7 +1166,7 @@
+      *  - no answer -> what the phone knows.
+      */
+     private suspend fun idleSpaces(): List<SpaceSlot> = withContext(Dispatchers.IO) {
+-        spaces.filter { it.url.isNotBlank() }.map { slot ->
++        spaces.filter { it.url.isNotBlank() && spaceStages[normUrl(it.url)] != "PAUSED" }.map { slot ->   // 1.2.62
+             async {
+                 val base = normUrl(slot.url)
+                 val live = base in reservedUrls || history.any {
+@@ -1518,6 +1522,165 @@
+         }
+     }
+ 
++    // ---- 1.2.62: pause / restart each Space from the app (the Hugging Face Hub API, with the saved token) --------------
++
++    /** Per Space (its URL), its stage on the Hub when last asked: RUNNING, PAUSED, SLEEPING, BUILDING, ... or UNKNOWN. */
++    val spaceStages = mutableStateMapOf<String, String>()
++    /** Per Space, the Hub's error text when its stage is an error (shown in its row). */
++    val spaceErrors = mutableStateMapOf<String, String>()
++    /** Spaces with a pause or restart in flight. */
++    val spaceActing = mutableStateMapOf<String, Boolean>()
++    var spaceAdminMessage by mutableStateOf(""); private set
++    var spaceStagesChecking by mutableStateOf(false); private set
++
++    /** The question shown before a pause or restart. checking = still asking the Space whether a job is running. */
++    data class SpaceConfirm(val index: Int, val action: String, val label: String, val checking: Boolean,
++                            val jobRunning: Boolean, val paused: Boolean)
++    var spaceConfirm by mutableStateOf<SpaceConfirm?>(null); private set
++
++    fun spaceStage(url: String): String? = spaceStages[normUrl(url)]
++    fun spaceError(url: String): String? = spaceErrors[normUrl(url)]
++
++    private fun noteRuntime(url: String, rt: HfApi.SpaceRuntime) {
++        val key = normUrl(url)
++        spaceStages[key] = rt.stage
++        val err = rt.error?.takeIf { rt.stage.endsWith("ERROR") || rt.stage == "NO_APP_FILE" }
++        if (err != null) spaceErrors[key] = err else spaceErrors.remove(key)
++    }
++
++    private var statusLoopStarted = false
++
++    /** The status shown on the Space chips: read when the app opens, then every 5 minutes (needs the saved token). */
++    private fun startSpaceStatusLoop() {
++        if (statusLoopStarted) return
++        statusLoopStarted = true
++        viewModelScope.launch(guard + Dispatchers.IO) {
++            delay(4_000L)
++            while (true) {
++                if (hfTokenSet && spaces.any { it.url.isNotBlank() }) refreshSpaceStages(quiet = true)
++                delay(SPACE_STATUS_EVERY_MS)
++            }
++        }
++    }
++    fun spaceIsActing(url: String): Boolean = spaceActing[normUrl(url)] == true
++
++    /** Ask the Hub for every configured Space's stage. [quiet]: the regular refresh, which leaves the message line alone. */
++    fun refreshSpaceStages(quiet: Boolean = false) {
++        if (spaceStagesChecking) return
++        val slots = spaces.filter { it.url.isNotBlank() }
++        if (slots.isEmpty()) { if (!quiet) spaceAdminMessage = "No Space is configured."; return }
++        spaceStagesChecking = true
++        if (!quiet) spaceAdminMessage = "Asking Hugging Face about ${slots.size} Space(s)…"
++        viewModelScope.launch(guard + Dispatchers.IO) {
++            val failed = java.util.concurrent.atomic.AtomicInteger(0)
++            var lastErr = ""
++            try {
++                slots.map { slot ->
++                    async {
++                        val rt = try {
++                            hf.spaceRuntime(repoIdOf(slot))
++                        } catch (e: kotlinx.coroutines.CancellationException) {
++                            throw e
++                        } catch (e: Throwable) {
++                            failed.incrementAndGet(); lastErr = e.message ?: e.javaClass.simpleName
++                            HfApi.SpaceRuntime("UNKNOWN", null, null)
++                        }
++                        withContext(Dispatchers.Main) { noteRuntime(slot.url, rt) }
++                    }
++                }.awaitAll()
++                if (!quiet || failed.get() > 0) {
++                    spaceAdminMessage = if (failed.get() == 0) "Status checked." else "Status not read for ${failed.get()} Space(s): $lastErr"
++                }
++            } finally {
++                spaceStagesChecking = false
++            }
++        }
++    }
++
++    /** Tapped Pause or Restart/Resume on Space [index]: ask first. A running job (this phone's, or the Space's own answer)
++     *  is said plainly, because pausing or restarting stops it for good. No answer from the Space counts as running. */
++    fun askSpaceAction(index: Int, action: String) {
++        val slot = spaces.getOrNull(index)?.takeIf { it.url.isNotBlank() } ?: return
++        if (!hfTokenSet) { spaceAdminMessage = "Save a Hugging Face token with write access first (Edit Space settings & token)."; return }
++        if (spaceIsActing(slot.url)) return
++        val label = slot.label.ifBlank { "Space ${index + 1}" }
++        val paused = spaceStage(slot.url) == "PAUSED"
++        val localBusy = isSpaceBusy(slot.url)
++        spaceConfirm = SpaceConfirm(index, action, label, checking = !localBusy && !paused, jobRunning = localBusy, paused = paused)
++        if (localBusy || paused) return
++        viewModelScope.launch(guard + Dispatchers.IO) {
++            val running = runCatching { spaceHasRunningJob(slot) }.getOrDefault(true)
++            withContext(Dispatchers.Main) {
++                val c = spaceConfirm
++                if (c != null && c.index == index && c.action == action) spaceConfirm = c.copy(checking = false, jobRunning = running)
++            }
++        }
++    }
++
++    fun dismissSpaceAction() { spaceConfirm = null }
++
++    fun confirmSpaceAction() {
++        val c = spaceConfirm ?: return
++        if (c.checking) return
++        spaceConfirm = null
++        val slot = spaces.getOrNull(c.index)?.takeIf { it.url.isNotBlank() } ?: return
++        val key = normUrl(slot.url)
++        if (spaceActing[key] == true) return
++        spaceActing[key] = true
++        val pausing = c.action == "pause"
++        spaceAdminMessage = (if (pausing) "Pausing " else if (c.paused) "Resuming " else "Restarting ") + c.label + "…"
++        viewModelScope.launch(guard + Dispatchers.IO) {
++            try {
++                val repo = repoIdOf(slot)
++                val rt = if (pausing) hf.pauseSpace(repo) else hf.restartSpace(repo)
++                withContext(Dispatchers.Main) { noteRuntime(slot.url, rt) }
++                if (pausing) {
++                    spaceAdminMessage = "${c.label} is paused. It takes no jobs (and costs nothing) until you tap Resume."
++                } else {
++                    spaceAdminMessage = "${c.label} is ${if (c.paused) "resuming" else "restarting"}. It takes a few minutes; " +
++                        "the status below follows it."
++                    // follow it until it runs, fails, or 8 minutes have passed
++                    val until = System.currentTimeMillis() + 8 * 60_000L
++                    while (System.currentTimeMillis() < until) {
++                        delay(15_000L)
++                        val rtNow = runCatching { hf.spaceRuntime(repo) }.getOrNull() ?: continue
++                        val st = rtNow.stage
++                        withContext(Dispatchers.Main) { noteRuntime(slot.url, rtNow) }
++                        if (st == "RUNNING") { spaceAdminMessage = "${c.label} is running."; break }
++                        if (st.endsWith("ERROR") || st == "NO_APP_FILE") {
++                            spaceAdminMessage = "${c.label}: ${spaceStageText(st)}. Open the Space on Hugging Face to see why."
++                            break
++                        }
++                    }
++                }
++            } catch (e: kotlinx.coroutines.CancellationException) {
++                throw e
++            } catch (e: Throwable) {
++                spaceAdminMessage = e.message ?: e.javaClass.simpleName
++            } finally {
++                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { spaceActing.remove(key) }
++            }
++        }
++    }
++
++    /** A Hub stage in words for the Space's row. */
++    fun spaceStageText(stage: String?): String = when (stage) {
++        null -> "Not checked yet"
++        "RUNNING" -> "Running"
++        "PAUSED" -> "Paused"
++        "SLEEPING" -> "Asleep (wakes on the next job)"
++        "BUILDING", "RUNNING_BUILDING" -> "Building"
++        "APP_STARTING", "RUNNING_APP_STARTING" -> "Starting"
++        "STOPPED" -> "Stopped"
++        "BUILD_ERROR" -> "Build error"
++        "RUNTIME_ERROR" -> "Runtime error"
++        "CONFIG_ERROR" -> "Configuration error"
++        "NO_APP_FILE" -> "No app file"
++        "DELETING" -> "Being deleted"
++        "UNKNOWN" -> "Status not read"
++        else -> stage.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() }
++    }
++
+     private fun repoIdOf(slot: SpaceSlot): String {
+         val host = slot.url.trim()
+             .removePrefix("https://")
+@@ -2121,6 +2284,10 @@
+     ) {
+         val targetSpace = space
+         if (targetSpace.spaceUrl.isBlank()) { status = "Configure the selected Phoenix Space first"; return }
++        if (spaceStages[normUrl(targetSpace.spaceUrl)] == "PAUSED") {          // 1.2.62
++            status = "$label is paused. Resume it under Connection - Pause / restart Spaces (or tap Check status if you resumed it elsewhere)."
++            return
++        }
+         if (parallelJobs.size >= MAX_SPACES) { status = "All $MAX_SPACES Phoenix jobs are already active"; return }
+         val faces = listOf(face1, face2, face3, face4)
+         if (faces.all { it == null }) { status = "Select or capture at least one replacement face"; return }
+@@ -3165,6 +3332,7 @@
+             runCatching { watchNetwork() }
+             runCatching { resumeTrackedJobs() }
+             runCatching { resumePendingUpdates() }
++            runCatching { startSpaceStatusLoop() }               // 1.2.62
+         }
+     }
+ 
+diff -ruN -x source.zip -x __pycache__ Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt
+--- Phoenix_APK_Builder_1.2.61_OneUpload/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt	2026-11-13 17:22:14.333144635 +0000
++++ Phoenix_APK_Builder_1.2.62_SpaceControl/src/app/src/main/java/com/swamitech/phoenix/net/HfApi.kt	2026-11-14 00:43:16.378271324 +0000
+@@ -1014,6 +1014,61 @@
+      * retried once in its plain-JSON form before giving up, and both answers
+      * are reported.
+      */
++    /** 1.2.62: a Space as the Hugging Face Hub sees it. stage: RUNNING, PAUSED, SLEEPING, BUILDING, APP_STARTING,
++     *  RUNNING_BUILDING, RUNNING_APP_STARTING, BUILD_ERROR, RUNTIME_ERROR, CONFIG_ERROR, NO_APP_FILE, STOPPED, DELETING. */
++    data class SpaceRuntime(val stage: String, val hardware: String?, val error: String?)
++
++    /** The Hub's address; a test points it at a local stand-in. */
++    var hubBase = "https://huggingface.co"
++
++    private val hubHttp by lazy {
++        http.newBuilder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build()
++    }
++
++    /** 1.2.62: GET /api/spaces/{repo}/runtime - the Space's stage (as huggingface_hub's get_space_runtime). */
++    fun spaceRuntime(repoId: String): SpaceRuntime = hubSpaceCall(repoId, "runtime", post = false, verb = "read the state of")
++
++    /** 1.2.62: POST /api/spaces/{repo}/pause - the Space stops and takes nothing until restarted (huggingface_hub's
++     *  pause_space). Paused time is not billed. Needs a token with write access to the Space. */
++    fun pauseSpace(repoId: String): SpaceRuntime = hubSpaceCall(repoId, "pause", post = true, verb = "pause")
++
++    /** 1.2.62: POST /api/spaces/{repo}/restart - restarts the Space, and is how a paused Space is resumed (huggingface_hub's
++     *  restart_space). Needs a token with write access to the Space. */
++    fun restartSpace(repoId: String): SpaceRuntime = hubSpaceCall(repoId, "restart", post = true, verb = "restart")
++
++    private fun hubSpaceCall(repoId: String, action: String, post: Boolean, verb: String): SpaceRuntime {
++        val token = tokenProvider()?.trim().orEmpty()
++        if (post && token.isEmpty()) throw IllegalStateException("Save a Hugging Face token with write access first")
++        val b = Request.Builder().url("${hubBase.trimEnd('/')}/api/spaces/$repoId/$action")
++        if (token.isNotEmpty()) b.header("Authorization", "Bearer $token")
++        if (post) b.post(ByteArray(0).toRequestBody(null)) else b.get()
++        try {
++            hubHttp.newCall(b.build()).execute().use { r ->
++                val body = r.body?.string().orEmpty()
++                if (!r.isSuccessful) {
++                    val why = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty().ifBlank { body.take(160) }
++                    throw IllegalStateException(when (r.code) {
++                        401, 403 -> "The saved token may not $verb $repoId (HTTP ${r.code}). It needs write access to this Space: " +
++                            "a token with the \"write\" role, or a fine-grained token with write permission on this repository."
++                        404 -> "Hugging Face has no Space $repoId (HTTP 404). Check this Space's name and URL in the settings."
++                        429 -> "Hugging Face is limiting requests (HTTP 429). Try again in a minute."
++                        else -> "Could not $verb $repoId: HTTP ${r.code} $why".trim()
++                    })
++                }
++                val j = JSONObject(body)
++                val hw = j.optJSONObject("hardware")?.optString("current")?.takeIf { it.isNotBlank() && it != "null" }
++                val err = j.optString("errorMessage").takeIf { it.isNotBlank() && it != "null" }
++                return SpaceRuntime(j.optString("stage").ifBlank { "UNKNOWN" }, hw, err)
++            }
++        } catch (e: IllegalStateException) {
++            throw e
++        } catch (e: org.json.JSONException) {
++            throw IllegalStateException("Hugging Face answered something unreadable for $repoId")
++        } catch (e: Throwable) {
++            throw friendlyNetworkError(e, "huggingface.co")
++        }
++    }
++
+     fun commitSpaceFiles(repoId: String, files: List<Pair<String, ByteArray>>) {
+         if (files.isEmpty()) throw IllegalStateException("No files to upload")
+         val token = tokenProvider()?.trim().orEmpty()
