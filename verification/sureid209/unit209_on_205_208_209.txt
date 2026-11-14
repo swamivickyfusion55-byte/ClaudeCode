@@ -1,0 +1,45 @@
+== v11.2.205_SkinTone
+PASS the woman alone, the man's Detect picture matching nobody (job DFA984A1): the male replacement is never put on her  [0 calls with the male replacement on her]
+FAIL the woman alone, no Detect pictures: the male replacement is never put on her  [1 calls with the male replacement on her, first at call 20]
+FAIL ...also when her side view is read as male (side views are not trusted for gender)  [1 calls, first at call 20]
+PASS both on screen, no pictures: the man gets the male replacement at once (as before)  [first at call 0, 0 wrong]
+FAIL both on screen, the man's picture matching nobody: he is found by elimination after about 45 sightings (job C77E081B)  [first at call None, 0 wrong]
+FAIL ...also when his gender is read wrong: with the woman found in the same frame, he can only be the man  [first at call None, 0 wrong]
+PASS ...but a weak detection (score 0.35: maybe not a face) is never taken this way  [first None]
+PASS ...nor with a third face on screen (the picture must decide then)  [first None]
+PASS the man alone after the woman left, facing the camera and read as male: found after a short check  [first at call 0]
+FAIL the man alone in a side view: not taken on a guess; found at once when the woman is back in the picture  [alone: 0, with her back: True]
+FAIL the man alone, read as female: not taken on a guess; found at once when the woman is back  [alone: 0, with her back: True]
+PASS a one-person job is not affected (the face is taken at once)
+PASS the first person of a two-person job is taken at once (as before)  [{0: True}]
+6 check(s) failed
+== v11.2.208_RefFallback
+FAIL the woman alone, the man's Detect picture matching nobody (job DFA984A1): the male replacement is never put on her  [1 calls with the male replacement on her, first at call 200]
+FAIL the woman alone, no Detect pictures: the male replacement is never put on her  [1 calls with the male replacement on her, first at call 20]
+FAIL ...also when her side view is read as male (side views are not trusted for gender)  [1 calls, first at call 20]
+PASS both on screen, no pictures: the man gets the male replacement at once (as before)  [first at call 0, 0 wrong]
+PASS both on screen, the man's picture matching nobody: he is found by elimination after about 45 sightings (job C77E081B)  [first at call 45, 0 wrong]
+PASS ...also when his gender is read wrong: with the woman found in the same frame, he can only be the man  [first at call 45, 0 wrong]
+FAIL ...but a weak detection (score 0.35: maybe not a face) is never taken this way  [first 45]
+PASS ...nor with a third face on screen (the picture must decide then)  [first None]
+PASS the man alone after the woman left, facing the camera and read as male: found after a short check  [first at call 0]
+FAIL the man alone in a side view: not taken on a guess; found at once when the woman is back in the picture  [alone: 0, with her back: True]
+FAIL the man alone, read as female: not taken on a guess; found at once when the woman is back  [alone: 0, with her back: True]
+PASS a one-person job is not affected (the face is taken at once)
+PASS the first person of a two-person job is taken at once (as before)  [{0: True}]
+6 check(s) failed
+== v11.2.209_SureID
+PASS the woman alone, the man's Detect picture matching nobody (job DFA984A1): the male replacement is never put on her  [0 calls with the male replacement on her]
+PASS the woman alone, no Detect pictures: the male replacement is never put on her  [0 calls with the male replacement on her]
+PASS ...also when her side view is read as male (side views are not trusted for gender)  [0 calls]
+PASS both on screen, no pictures: the man gets the male replacement at once (as before)  [first at call 0, 0 wrong]
+PASS both on screen, the man's picture matching nobody: he is found by elimination after about 45 sightings (job C77E081B)  [first at call 45, 0 wrong]
+PASS ...also when his gender is read wrong: with the woman found in the same frame, he can only be the man  [first at call 45, 0 wrong]
+PASS ...but a weak detection (score 0.35: maybe not a face) is never taken this way  [first None]
+PASS ...nor with a third face on screen (the picture must decide then)  [first None]
+PASS the man alone after the woman left, facing the camera and read as male: found after a short check  [first at call 11]
+PASS the man alone in a side view: not taken on a guess; found at once when the woman is back in the picture  [alone: None, with her back: True]
+PASS the man alone, read as female: not taken on a guess; found at once when the woman is back  [alone: None, with her back: True]
+PASS a one-person job is not affected (the face is taken at once)
+PASS the first person of a two-person job is taken at once (as before)  [{0: True}]
+all checks passed

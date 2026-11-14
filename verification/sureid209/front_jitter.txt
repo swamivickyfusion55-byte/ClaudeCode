@@ -1,0 +1,5 @@
+box-area jitter | trials where the face in front changed on noise alone (of 400), mean changes per trial
+   1 %          | 11.2.176-206 rule    :   0 trials (0.00 changes each) | with the 11.2.207 rule: 147 trials (0.37 changes each)
+   2 %          | 11.2.176-206 rule    : 109 trials (0.27 changes each) | with the 11.2.207 rule: 393 trials (0.98 changes each)
+   3 %          | 11.2.176-206 rule    : 261 trials (0.65 changes each) | with the 11.2.207 rule: 345 trials (0.86 changes each)
+   5 %          | 11.2.176-206 rule    : 203 trials (0.52 changes each) | with the 11.2.207 rule: 232 trials (0.59 changes each)

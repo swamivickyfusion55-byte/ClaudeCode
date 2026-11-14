@@ -1,0 +1,293 @@
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-20*' v11.2.208_RefFallback/config.py v11.2.209_SureID/config.py
+--- v11.2.208_RefFallback/config.py	2026-11-13 14:47:54.658256305 +0000
++++ v11.2.209_SureID/config.py	2026-11-14 08:02:36.041528514 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.208"
+-BUILD = "RefFallback · a person whose Detect picture matches no face for about a second is found by elimination; SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.209"
++BUILD = "SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-20*' v11.2.208_RefFallback/core_pipeline.py v11.2.209_SureID/core_pipeline.py
+--- v11.2.208_RefFallback/core_pipeline.py	2026-11-13 14:49:10.941645609 +0000
++++ v11.2.209_SureID/core_pipeline.py	2026-11-14 08:04:35.285309787 +0000
+@@ -4114,7 +4114,12 @@
+ 
+ _FRONT_MEM = {}      # v11.2.176: (slot_lo, slot_hi) -> [lo_in_front, frames_the_other_way, last_frame, last_identity_frame]
+ _FRONT_NOW = {}      # v11.2.176: the frame being painted: (slot_lo, slot_hi) -> lo is in front
+-FRONT_TREND = True   # v11.2.207: a first near-tie front decision switches as soon as that face shrinks steadily (False = 206)
++# v11.2.207 switched a first near-tie front decision as soon as that face shrank on two frames in a row (5 % in all). It
++# removed one wrong frame of a synthetic clip, whose boxes are noise-free. v11.2.209 (SDOS-209) turns it OFF: with a real
++# detector's box jitter of 1-2 % it changed the face in front on noise alone in 37-98 % of long same-size contacts
++# (front_jitter.py), against 0-27 % for the 11.2.176 rule, and a wrong face in front paints one person's replacement over
++# the other where they overlap.
++FRONT_TREND = False
+ _FRONT_STATS = {"identity": 0, "seen": 0, "size": 0, "changes": 0}
+ 
+ 
+@@ -8062,22 +8067,24 @@
+             logging.info("FRONT/BEHIND: decided by identity on %d face-pair frames, by sight on %d, by size (held) on %d; changes %d",
+                          _FRONT_STATS["identity"], _FRONT_STATS["seen"], _FRONT_STATS["size"], _FRONT_STATS["changes"])
+             logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
+-            # v11.2.207 (SDOS-207): say it plainly when the identity check refused a person more often than it painted them
++            # v11.2.209 (SDOS-209): the identity decisions of this job, in plain words
+             try:
+                 _rfb = int(getattr(_tk, "ref_fallback_n", 0) or 0)
+                 if _rfb:
+                     logging.info("IDENTITY: %d face(s) given to a person by elimination because their Detect picture matched "
+-                                 "no face for a while", _rfb)
+-                for _s, _d in sorted((getattr(_tk, "diag", None) or {}).items()):
+-                    _rej = int(_d.get("id_reject", 0) or 0)
+-                    _pt = int((stats.get("slot_painted") or {}).get(_s, 0) or 0)
+-                    if _rej >= 60 and _rej > _pt:
+-                        logging.warning(
+-                            "IDENTITY: person %d was refused %d times (painted on %d frames): the faces found did not look "
+-                            "like person %d's Detect picture or first sighting (similarity under 0.25). If those faces ARE "
+-                            "person %d (another scene, light or angle), capture person %d in Detect from this part, or run "
+-                            "it without Detect pictures. If they are other people, leaving them original is correct.",
+-                            int(_s) + 1, _rej, _pt, int(_s) + 1, int(_s) + 1, int(_s) + 1)
++                                 "no face, with the other person identified in the same frame", _rfb)
++                _vh = int(getattr(_tk, "virgin_held_n", 0) or 0)
++                if _vh:
++                    logging.info("IDENTITY: %d time(s) a person not found yet was NOT given a face that could have been "
++                                 "someone already found (that person was not identified elsewhere in the frame)", _vh)
++                # (v11.2.207 counted refusals per person here; that count includes every correct refusal of the OTHER
++                # person's face, so it said nothing. What matters: looks at the video where faces were found and none was used.)
++                _vr, _dc = int(stats.get("vis_reject_calls", 0) or 0), int(stats.get("detector_calls", 0) or 0)
++                if _vr >= 60 and _vr * 10 >= max(1, _dc):
++                    logging.warning(
++                        "IDENTITY: on %d of %d looks at the video, faces were found but none was close enough to a person's "
++                        "Detect picture or first sighting to be sure who it is; those frames stay original (see UNPAINTED "
++                        "below). Usual causes: side views or a new scene, or other people on screen.", _vr, _dc)
+             except Exception as _ie:
+                 logging.debug("identity summary skipped: %s", _ie)
+             for _s, _gs in sorted((stats.get("painted_g") or {}).items()):
+diff -ru '--exclude=__pycache__' '--exclude=SDOS-20*' v11.2.208_RefFallback/swap_engine.py v11.2.209_SureID/swap_engine.py
+--- v11.2.208_RefFallback/swap_engine.py	2026-11-13 15:23:41.694658122 +0000
++++ v11.2.209_SureID/swap_engine.py	2026-11-14 08:25:45.653439012 +0000
+@@ -62,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.208-reffallback"
++ENGINE_VERSION = "aequus-1.2.209-sureid"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -187,9 +187,16 @@
+     "occ_net_core_x": 0.17,         # ...and within this distance of the centre line (fraction of the crop)...
+     "occ_net_core_min": 0.002,
+     # v11.2.206 (SDOS-206) occlusion smoothness. Each 0 restores v11.2.205 exactly.
+-    # v11.2.207 (SDOS-207): a person whose Detect picture matches no face for this many detector calls in a row (while a face
+-    # nobody else has is there) is found by elimination instead (0 = 11.2.206: the picture alone, for as long as it takes)
++    # v11.2.208/209: a person whose Detect picture matches no face on this many sightings in a row, WITH the other people
++    # identified in the same frame, is found by elimination (0 = 11.2.206: the picture alone, for as long as it takes)
+     "trk_ref_stale_calls": 45,
++    "trk_ref_stale_score": 0.5,      # ...and only a confident detection (the detector's own score)
++    "trk_ref_stale_gap": 30,         # ...sightings of the same face no more than this many calls apart
++    # v11.2.209 (SDOS-209): a not-yet-found person takes a face no picture decides only when the people already found are
++    # identified in the same frame, or on a front view of the right gender this many calls in a row (0 = 11.2.205's rule)
++    "trk_virgin_guard": 1,
++    "trk_virgin_gender_calls": 12,
++    "trk_virgin_yaw": 0.34,          # a front view: the nose under this far off the eye midpoint (in eye distances)
+     "trk_ref_stale_other": 0.30,     # ...but never a face that another person's picture matches this well
+     "occ_flow": 1.0,                # last frame's cut moves with the object (optical flow inside the face crop) before smoothing
+     "occ_instant": 1.0,             # a cut opens at once where the colour test AND the occlusion model both see the object
+@@ -3270,12 +3277,62 @@
+         self._ref_stale = {}
+         self._ref_stale_logged = set()
+         self.ref_fallback_n = 0
++        # v11.2.209 (SDOS-209): the evidence for giving a not-yet-found person a face (see _virgin_evidence)
++        self._ref_cand = {}          # slot -> (box, sightings in a row, call): towards giving up its Detect picture
++        self._g_cand = {}            # slot -> (box, sightings in a row, call): front-view gender evidence
++        self._ref_burned = set()     # slots whose elimination binding turned out to be the other person: no second try
++        self.virgin_held_n = 0       # times a not-yet-found person was NOT given a face that could be someone else
+         # Why faces were NOT bound, per slot. Without this a job that binds
+         # nothing for minutes is indistinguishable from one with nobody there.
+         self.diag = {s: {"id_reject": 0, "rel_rescued": 0, "rel_waiting": 0,
+                          "rel_no_margin": 0, "rel_below_floor": 0}
+                      for s in slots}
+ 
++    def _has_id(self, s):
++        t = self.tracks[s]
++        return getattr(t, "id_lock", None) is not None or t.emb is not None
++
++    def _virgin_evidence(self, i, j, pairing, faces, slots):
++        """v11.2.209 (SDOS-209): may the not-yet-found person of slot i be given face j, which matches no picture of theirs?
++        A face that reads unlike a found person is NOT proof it is someone else: the same person in a side view reads 0.1-0.3
++        against their own first sighting. (v11.2.208 and the old first-binding rule took 'unlike' as enough, and put the man's
++        replacement on the woman when she was alone on screen in an unfamiliar view.) Returns:
++          "first"  - nobody else has been found yet: the first binding, as always;
++          "proof"  - every person already found is identified in THIS frame on another face: j can only be someone else;
++          "gender" - a confident front view whose gender is this slot's replacement's and not that of any found person who
++                     is missing from this frame (the caller wants this on several frames in a row);
++          None     - no evidence: j may be a found person in an unfamiliar view."""
++        found = [i2 for i2 in range(len(slots)) if i2 != i and self._has_id(slots[i2])]
++        if not found:
++            return "first"
++        if all(pairing.get(i2) is not None and pairing.get(i2) != j for i2 in found):
++            return "proof"
++        try:
++            f = faces[j]
++            g, sg = _det_gender(f), self.slot_gender.get(slots[i])
++            if g in (0, 1) and sg == g and float(getattr(f, "det_score", 0.0) or 0.0) >= 0.5:
++                yo = _yaw_offset(getattr(f, "kps", None))
++                if yo is not None and yo < float(_P.get("trk_virgin_yaw", 0.34)):
++                    missing = [i2 for i2 in found if pairing.get(i2) is None or pairing.get(i2) == j]
++                    if all(self.slot_gender.get(slots[i2]) in (0, 1) and self.slot_gender.get(slots[i2]) != g
++                           for i2 in missing):
++                        return "gender"
++        except Exception:
++            pass
++        return None
++
++    def _in_a_row(self, store, s, bbox, max_gap=3):
++        """Sightings of the same face for slot s: its box overlapping the last one (or within a face width of it), and no
++        more than max_gap calls since. Calls without evidence in between do not count and, within max_gap, do not restart it."""
++        bb = np.asarray(bbox, np.float32).reshape(-1)[:4]
++        p = store.get(s)
++        k = p[1] + 1 if (p is not None and self._call_n - p[2] <= max_gap
++                         and (_iou(p[0], bb) >= 0.2 or _cdist_norm(p[0], bb) < 1.0)) else 1
++        if p is not None and p[2] == self._call_n:
++            k = p[1]
++        store[s] = (bb, k, self._call_n)
++        return k
++
+     def _rel_admit(self, i, j, s, f, sim, sim_all, has_id_all, slots):
+         """Admit a face the absolute gate rejected, if it is clearly THIS person.
+ 
+@@ -3597,6 +3654,14 @@
+                 if ref1 is not None or ref2 is not None:
+                     if _cos_emb(ref2, e2) > _cos_emb(ref1, e1):
+                         keep = s2
++                # v11.2.209: a slot found by elimination (its picture matched nobody) that now looks like the other person
++                # was the other person: it is the one dropped, and it is not found by elimination again in this job
++                _fb = [x for x in (s, s2) if x in self._ref_stale_logged]
++                if len(_fb) == 1:
++                    keep = s2 if _fb[0] == s else s
++                    self._ref_burned.add(_fb[0]); self._ref_stale_logged.discard(_fb[0])
++                    logging.info("person %s: found by elimination, but looks like person %s - undone",
++                                 _fb[0] + 1 if isinstance(_fb[0], int) else _fb[0], keep + 1 if isinstance(keep, int) else keep)
+                 drop_s = s2 if keep == s else s
+                 trd = self.tracks[drop_s]
+                 trd.emb = None
+@@ -3923,37 +3988,6 @@
+                         continue
+                     if rs > best_rs:
+                         best_rs, pick_i = rs, i
+-                # v11.2.207 (SDOS-207): a Detect picture that has matched no face for trk_ref_stale_calls calls in a row,
+-                # while a face nobody else has was there, stops blocking: that slot is filled by elimination (gender
+-                # first), as it would be without a picture. The picture may be of another moment of the video (a split
+-                # part, another scene); with it the person stayed original until some frame happened to match it.
+-                _stale_n = int(_P.get("trk_ref_stale_calls", 0) or 0)
+-                stale_i = [i for i in empty_i if refs and refs.get(slots[i]) is not None
+-                           and _stale_n > 0 and (self._ref_stale.get(slots[i], 0) >= _stale_n
+-                                                 or slots[i] in self._ref_stale_logged)]   # given up once: at once
+-                # only with no more faces on screen than people to swap: with bystanders around, the picture must decide
+-                if pick_i is None and any_ref and stale_i and m <= n:
+-                    # not a face that one of the OTHER pictures claims, nor one a locked person looks like
+-                    _claimed_by_ref = max((ref_sim[i2][j] for i2 in range(n)
+-                                           if i2 not in stale_i and refs.get(slots[i2]) is not None), default=-1.0)
+-                    if _claimed_by_ref < float(_P.get("trk_ref_stale_other", 0.30)) and mx < 0.30:
+-                        got_g = _det_gender(faces[j])
+-                        # gender first, as the no-picture path: a slot whose replacement matches the face's gender; when
+-                        # none does, any of them (a wrong gender tag must not leave the person original)
+-                        pool = [i for i in stale_i if got_g in (0, 1) and self.slot_gender.get(slots[i]) == got_g] or list(stale_i)
+-                        if pool:
+-                            pick_i = pool[0]
+-                            self.ref_fallback_n += 1
+-                            try:
+-                                faces[j]._ref_fallback = True      # the job paints this person from this frame on, not before
+-                            except Exception:
+-                                pass
+-                            if slots[pick_i] not in self._ref_stale_logged:
+-                                self._ref_stale_logged.add(slots[pick_i])
+-                                logging.info("person %s: the Detect picture matched no face for %d detector calls - found "
+-                                             "by elimination instead (ref_sim=%.2f)", slots[pick_i] + 1 if isinstance(
+-                                                 slots[pick_i], int) else slots[pick_i], self._ref_stale.get(slots[pick_i], 0),
+-                                             ref_sim[pick_i][j])
+                 if pick_i is None and not any_ref:
+                     got_g = _det_gender(faces[j])
+                     pool = list(empty_i)
+@@ -3984,18 +4018,67 @@
+                 logging.info("late-join slot %s ← face (ref_sim=%.2f locked=%.2f)",
+                              slots[pick_i], best_rs, mx)
+ 
+-        # v11.2.207: staleness of the Detect pictures (see above)
+-        if refs:
++        # v11.2.208 / v11.2.209 (SDOS-209): the person whose Detect picture matches nobody. Found by elimination only on
++        # evidence (_virgin_evidence): one face left over, confident, of a size with the others, unlike everyone found and
++        # every other picture - and the other people identified in this very frame (or a front view of the right gender) on
++        # trk_ref_stale_calls sightings in a row. One face alone on screen is never enough.
++        _fb_ok = set()
++        _stale_n = int(_P.get("trk_ref_stale_calls", 0) or 0)
++        if refs and _stale_n > 0 and n >= 2 and m <= n:
+             _claimed_now = set(pairing.values())
+-            _free_face = any(j not in _claimed_now for j in range(m))
+-            for i, s in enumerate(slots):
+-                if refs.get(s) is None:
++            _free = [j for j in range(m) if j not in _claimed_now and getattr(faces[j], "normed_embedding", None) is not None]
++            _stale = [i for i, s_ in enumerate(slots) if pairing.get(i) is None and refs.get(s_) is not None
++                      and not self._has_id(s_) and s_ not in self._ref_burned]
++            if len(_free) == 1 and len(_stale) == 1:
++                i, j = _stale[0], _free[0]
++                s_, f_ = slots[i], faces[j]
++                _locks = [e_ for e_ in ((getattr(self.tracks[x], "id_lock", None) if getattr(self.tracks[x], "id_lock", None)
++                                         is not None else self.tracks[x].emb) for x in slots) if e_ is not None]
++                _mx = max((_cos_emb(f_.normed_embedding, e_) for e_ in _locks), default=-1.0)
++                _oref = max((ref_sim[i2][j] for i2 in range(n) if i2 != i and refs.get(slots[i2]) is not None), default=-1.0)
++                _wj = float(f_.bbox[2] - f_.bbox[0])
++                _wo = [float(faces[pairing[i2]].bbox[2] - faces[pairing[i2]].bbox[0]) for i2 in range(n) if pairing.get(i2) is not None]
++                _sure = (float(getattr(f_, "det_score", 0.0) or 0.0) >= float(_P.get("trk_ref_stale_score", 0.5))
++                         and _mx < 0.30 and _oref < float(_P.get("trk_ref_stale_other", 0.30))
++                         and (not _wo or _wj >= 0.4 * min(_wo)))
++                _ev = self._virgin_evidence(i, j, pairing, faces, slots) if _sure else None
++                if _ev in ("proof", "gender"):
++                    # (up to a second without evidence - the other person missed for a few frames, as in a fast step -
++                    # does not restart the count: the first build restarted it and never reached 45 on the fast-step clip)
++                    _k = self._in_a_row(self._ref_cand, s_, f_.bbox, max_gap=int(_P.get("trk_ref_stale_gap", 30)))
++                    if _k >= _stale_n or s_ in self._ref_stale_logged:
++                        pairing[i] = j
++                        _fb_ok.add(i)
++                        self.ref_fallback_n += 1
++                        try:
++                            f_._ref_fallback = True          # the job paints this person from this frame on, not before
++                        except Exception:
++                            pass
++                        if s_ not in self._ref_stale_logged:
++                            self._ref_stale_logged.add(s_)
++                            logging.info("person %s: the Detect picture matched no face on %d sightings with the "
++                                         "other person identified - found by elimination instead (ref_sim=%.2f, evidence: %s)",
++                                         s_ + 1 if isinstance(s_, int) else s_, _k, ref_sim[i][j], _ev)
++
++        # v11.2.209 (SDOS-209): the same evidence for EVERY first binding that no picture decides. Before, a not-yet-found
++        # person took any face that read unlike the people already found - also a found person alone on screen in an
++        # unfamiliar view, who then carried the other person's replacement.
++        if n >= 2 and bool(int(_P.get("trk_virgin_guard", 1))):
++            for i, s_ in enumerate(slots):
++                j = pairing.get(i)
++                if j is None or i in _fb_ok or self._has_id(s_):
++                    continue
++                _r = refs.get(s_) if refs else None
++                if (_r is not None and ref_sim[i][j] >= _PICK_FLOOR
++                        and ref_sim[i][j] >= max((ref_sim[i2][j] for i2 in range(n) if i2 != i), default=-1.0)):
++                    continue                                 # its own Detect picture says so
++                _ev = self._virgin_evidence(i, j, pairing, faces, slots)
++                if _ev in ("first", "proof"):
++                    continue
++                if _ev == "gender" and self._in_a_row(self._g_cand, s_, faces[j].bbox) >= int(_P.get("trk_virgin_gender_calls", 12)):
+                     continue
+-                _locked = getattr(self.tracks[s], "id_lock", None) is not None or self.tracks[s].emb is not None
+-                if pairing.get(i) is not None or _locked:
+-                    self._ref_stale[s] = 0
+-                elif _free_face:
+-                    self._ref_stale[s] = self._ref_stale.get(s, 0) + 1
++                pairing.pop(i, None)
++                self.virgin_held_n += 1
+ 
+         # Re-entry steal: if a detection is clearly a locked slot's person,
+         # give it back even if Hungarian/bootstrap parked it elsewhere.
