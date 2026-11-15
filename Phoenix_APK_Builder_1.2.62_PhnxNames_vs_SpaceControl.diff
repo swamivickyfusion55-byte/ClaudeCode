@@ -1,0 +1,75 @@
+--- Phoenix_APK_Builder_1.2.62_SpaceControl/build.sh	2026-11-14 00:47:35.739155858 +0000
++++ Phoenix_APK_Builder_1.2.62_PhnxNames/build.sh	2026-11-15 10:05:46.939886339 +0000
+@@ -73,7 +73,7 @@
+ # "Something went wrong". Check the first three here and print the key so the
+ # fourth can be compared between builds.
+ BT="$SDK/build-tools/35.0.0"
+-INFO="$ROOT/PhoenixMobile-$VER-install-info.txt"
++INFO="$ROOT/PhnxMobile-$VER-install-info.txt"
+ : > "$INFO"
+ if [ -x "$BT/apksigner" ]; then
+     if ! SIGOUT="$("$BT/apksigner" verify --verbose --print-certs "$APK" 2>&1)"; then
+@@ -115,9 +115,9 @@
+ echo "--- install info ---"
+ cat "$INFO"
+ 
+-sha256sum "$APK" | tee "$ROOT/PhoenixMobile-$VER-debug.sha256"
+-cp "$APK" "$ROOT/PhoenixMobile-$VER-debug.apk"
+-ls -lh "$ROOT/PhoenixMobile-$VER-debug.apk"
++sha256sum "$APK" | tee "$ROOT/PhnxMobile-$VER-debug.sha256"
++cp "$APK" "$ROOT/PhnxMobile-$VER-debug.apk"
++ls -lh "$ROOT/PhnxMobile-$VER-debug.apk"
+ 
+ echo
+ echo "=== BUILD PASS ==="
+--- Phoenix_APK_Builder_1.2.62_SpaceControl/app.py	2026-11-14 00:47:35.749559692 +0000
++++ Phoenix_APK_Builder_1.2.62_PhnxNames/app.py	2026-11-15 10:05:46.940107239 +0000
+@@ -11,9 +11,9 @@
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+ VER = "1.2.62"
+-APK = f"{ROOT}/PhoenixMobile-{VER}-debug.apk"
+-SHA = f"{ROOT}/PhoenixMobile-{VER}-debug.sha256"
+-INFO = f"{ROOT}/PhoenixMobile-{VER}-install-info.txt"
++APK = f"{ROOT}/PhnxMobile-{VER}-debug.apk"
++SHA = f"{ROOT}/PhnxMobile-{VER}-debug.sha256"
++INFO = f"{ROOT}/PhnxMobile-{VER}-install-info.txt"
+ 
+ INSTALL_TIP = (
+     "**Install this APK over the Phoenix that is already on the phone. Do not uninstall first** - "
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhoenixMobile-1.2.62-debug.apk was not produced.** "
++            "**Build reported success but PhnxMobile-1.2.62-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -219,7 +219,7 @@
+         f"<div style='padding:14px;border-radius:14px;background:#FDF2F6;border:1px solid #F3C6D8'>"
+         f"<a href='{_apk_url()}' target='_blank' rel='noopener' download "
+         f"style='display:block;text-align:center;padding:14px;border-radius:12px;background:#9B1B4A;color:#fff;"
+-        f"font-weight:800;font-size:17px;text-decoration:none'>Download PhoenixMobile-{VER}-debug.apk</a>"
++        f"font-weight:800;font-size:17px;text-decoration:none'>Download PhnxMobile-{VER}-debug.apk</a>"
+         f"<p style='margin:10px 2px 0;font-size:14px'>Size: <b>{nbytes:,} bytes</b> - the phone's Downloads list shows "
+         f"<b>{nbytes / 1e6:.2f} MB</b>. Install only a file of exactly that size. If Downloads says \"Download failed\", "
+         "delete it and tap the button again (it resumes).</p></div>"
+@@ -302,7 +302,7 @@
+         "<div id='phx-head'><h1>Phoenix Mobile 1.2.62</h1>"
+         "<p>versionCode 182. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhoenixMobile-1.2.62-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhnxMobile-1.2.62-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhoenixMobile-1.2.62-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhnxMobile-1.2.62-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
