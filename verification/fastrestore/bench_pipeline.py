@@ -93,6 +93,45 @@ if os.environ.get("MASK_DUMP"):
         return m
     swap_engine.AlignedCompositor.build_mask = _bm
     atexit.register(lambda: np.savez_compressed(WORK + "/mask_dump.npz", m=np.array(_DUMP), slot=np.array([a for a, _, _, _ in _MS]), M=np.array([b for _, b, _, _ in _MS]), size=np.array([c for _, _, c, _ in _MS]), g=np.array([d for _, _, _, d in _MS])))
+if os.environ.get("STAGE_DUMP"):
+    # v11.2.210: what each rule of build_mask did to each face on each frame - the face's own outline, the cut for a face in
+    # front (rivals), the colour test, the occlusion model, the eating rule - as the share of the crop kept, so a frame where
+    # the paint is lost can be put down to one rule
+    import atexit as _ax2
+    _SD = []; _SC = [None]
+    _o_bm2 = swap_engine.AlignedCompositor.build_mask
+    def _wrapfn(name, fn, rec):
+        def w(*a, **k):
+            r = fn(*a, **k)
+            try:
+                if _SC[0] is not None: rec(_SC[0], a, k, r)
+            except Exception:
+                pass
+            return r
+        return w
+    def _mean(x):
+        return None if x is None else round(float(np.mean(x)), 4)
+    if hasattr(swap_engine, "hull_mask"):
+        swap_engine.hull_mask = _wrapfn("hull", swap_engine.hull_mask, lambda c, a, k, r: c["hull"].append(_mean(r)))
+    if hasattr(swap_engine, "occluder_keep"):
+        swap_engine.occluder_keep = _wrapfn("col", swap_engine.occluder_keep, lambda c, a, k, r: c.__setitem__("colour_keep", _mean(r)))
+    if hasattr(swap_engine, "occ_net_keep"):
+        swap_engine.occ_net_keep = _wrapfn("net", swap_engine.occ_net_keep, lambda c, a, k, r: c.__setitem__("net_keep", _mean(r)))
+    if hasattr(swap_engine, "_eating_mouth"):
+        swap_engine._eating_mouth = _wrapfn("eat", swap_engine._eating_mouth, lambda c, a, k, r: c.__setitem__("eat", [_mean(a[0]), _mean(r)]))
+    def _bm2(self, face, M, size, **kw):
+        tr_ = kw.get("track")
+        c = {"g": int(getattr(cp, "_ORDER_NOW", [0])[0]), "slot": -1 if tr_ is None else int(getattr(tr_, "slot", -1)),
+             "rivals": len(kw.get("rivals") or []), "hull": [], "kps": np.asarray(getattr(face, "kps", np.zeros((5, 2))), float).round(1).tolist()}
+        _SC[0] = c
+        try:
+            m = _o_bm2(self, face, M, size, **kw)
+        finally:
+            _SC[0] = None
+        c["final"] = _mean(m); _SD.append(c)
+        return m
+    swap_engine.AlignedCompositor.build_mask = _bm2
+    _ax2.register(lambda: json.dump(_SD, open(WORK + "/stage_dump.json", "w")))
 
 # --- per-function wall-time accounting (all threads) ---------------------------------------
 T = collections.defaultdict(float); C = collections.defaultdict(int); LK = threading.Lock()
