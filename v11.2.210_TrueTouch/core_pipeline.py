@@ -3226,6 +3226,7 @@ def _reuse_one(work, orig, rec, quality, *, rivals=None, cached=None, partners=N
     face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], None, 0.5)
     face._track = track
     face._partners = partners            # v11.2.210: the faces touching this one, for the side-view rule of the mask
+    face._hid = bool(rec.get("hid"))     # ...and whether its position is the carried one (_HiddenHold)
     try:
         return comp.reuse(
             work, orig, rec["kps"], face,
@@ -4528,7 +4529,7 @@ class _HiddenHold:
         self.stt = {"identity": 0, "seen": 0, "size": 0, "changes": 0}
         self.last_g = None
         self.stats = {"frames": 0, "ref": 0, "flow": 0, "shift": 0, "coast": 0, "entered": 0, "handed": 0, "jumped": 0,
-                      "hidden": 0}
+                      "hidden": 0, "lost": 0}
 
     @staticmethod
     def enabled():
@@ -4618,7 +4619,7 @@ class _HiddenHold:
                               "vel": np.zeros(2, np.float32), "used": False}
                         self.act[slot] = st
                 if st is None:
-                    if det:
+                    if det and dcov < lo:                    # (only a reading of the face clear of the other one)
                         self.trust[slot] = (g, rec["kps"].copy(), rec["lmk"].copy(), rec["bbox"].copy())
                     continue
             # where the face is on this frame
@@ -4666,6 +4667,12 @@ class _HiddenHold:
                     if st["coast"] > 12:
                         st["vel"] = (v * 0.90).astype(np.float32)
                     self.stats["coast"] += 1
+            if not followed and st.get("coast", 0) > int(P.get("hid_lost", 5)):
+                # nothing of it followed for this long (it is all but gone behind the other face): no guessing on - the job's
+                # own rules place it, as in 11.2.209, until it is clear of the other face again
+                del self.act[slot]
+                self.stats["lost"] += 1
+                continue
             kps, bbox, lmk = self._geom(st)
             if followed:
                 st["coast"], st["T_cv"] = 0, None
@@ -8419,6 +8426,7 @@ def _run_job_body(jid, src_paths, vp, cfg):
                         face = _E.PredictedFace(rec["bbox"], rec["kps"], rec["lmk"], _emb, 0.5)
                         face.predicted = not bool(rec.get("det", True))
                         face._partners = partners
+                        face._hid = bool(rec.get("hid"))
                         trial, ok = _swap_one(out, orig, face, _src, quality,
                                               alpha=rec["alpha"], rivals=rivals)
                     if not ok or trial is None:
@@ -8592,12 +8600,13 @@ def _run_job_body(jid, src_paths, vp, cfg):
             _hs = _HH.stats
             if int(_hs.get("frames", 0)) > 0 or int(_E.SIDE_STATS.get("frames", 0)) > 0:
                 logging.info(
-                    "CONTACT: a face partly behind another was placed by its own visible part on %d face-frames (%d times: "
-                    "motion of the visible part %d, its shift only %d, its last motion %d; handed back to the detector %d, "
-                    "found again elsewhere %d). Side-view pairs: %d face-frames painted on their own side of the line "
-                    "between the faces (face map held over from an earlier frame %d, landmark outline %d)",
-                    int(_hs.get("frames", 0)), int(_hs.get("entered", 0)), int(_hs.get("flow", 0)), int(_hs.get("shift", 0)),
-                    int(_hs.get("coast", 0)), int(_hs.get("handed", 0)), int(_hs.get("jumped", 0)),
+                    "TOUCH: a face partly behind another was placed by its own visible part on %d face-frames (%d times: "
+                    "found by its reference on %d frames, by its last motion on %d; handed back to the detector %d times, "
+                    "let go when nothing of it was left to follow %d, found again elsewhere %d). Side-view pairs: %d "
+                    "face-frames painted on their own side of the line between the faces (face map held over from an "
+                    "earlier frame %d, landmark outline %d)",
+                    int(_hs.get("frames", 0)), int(_hs.get("entered", 0)), int(_hs.get("ref", 0)),
+                    int(_hs.get("coast", 0)), int(_hs.get("handed", 0)), int(_hs.get("lost", 0)), int(_hs.get("jumped", 0)),
                     int(_E.SIDE_STATS.get("frames", 0)), int(_E.SIDE_STATS.get("held", 0)), int(_E.SIDE_STATS.get("outline", 0)))
             logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
             # v11.2.209 (SDOS-209): the identity decisions of this job, in plain words

@@ -56,6 +56,13 @@ def run(E, switches, n=None):
 
 off = {"occ_flow": 0.0, "occ_instant": 0.0, "occ_snap": 0.0, "occ_net_wide": 0.0}
 ON = {"occ_flow": 1.0, "occ_instant": 1.0, "occ_snap": 1.0, "occ_net_wide": 1.0}
+if "occ_net_follow" in E6._P:
+    # v11.2.210: its own switches too - off for the "equals v11.2.205" check, as shipped for the rest
+    V210 = {k: E6._P[k] for k in ("eat_mouth", "occ_net_lo", "occ_net_hi", "occ_net_follow", "occ_net_below", "occ_face_forget")}
+    off.update({"eat_mouth": 1.0, "occ_net_lo": 0.5, "occ_net_hi": 1.0, "occ_net_follow": 0.0, "occ_net_below": 0.0, "occ_face_forget": 0.15})
+    ON.update(V210)
+for _kv in filter(None, os.environ.get("OVR", "").split(",")):       # (for experiments: OVR=key=value,key=value)
+    ON[_kv.split("=")[0]] = float(_kv.split("=")[1])
 m5, M = run(E5, {}, 70)
 m6, _ = run(E6, off, 70)
 d = max(float(np.abs(a - b).max()) for a, b in zip(m5, m6))
@@ -80,6 +87,10 @@ for t in range(18, 66, 1):
     near = cv2.dilate((cv2.warpAffine(gt[t].astype(np.float32) / 255.0, M, (size, size)) > 0.5).astype(np.uint8),
                       np.ones((15, 15), np.uint8)).astype(bool)
     r = (m5[t] > 0.05) & ~near
+    if "occ_net_follow" in E6._P:
+        # v11.2.210 cuts the object under the swap's soft border too, beyond the face's edge. "The rest of the face" is
+        # therefore the face itself (where the occlusion model sees face before the object comes), not that border.
+        r &= face0
     rest.append(float(((m6on[t] < m5[t] - 0.1) & r).sum()) / max(1.0, float(r.sum())))
     of = o & face0
     if of.sum() < 200:

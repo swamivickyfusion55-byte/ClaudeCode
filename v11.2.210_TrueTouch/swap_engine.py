@@ -285,6 +285,10 @@ _P = {
     "hid_enter": 0.15,       # ...and from this share on the detector's reading is not used at all (in between: less and less)
     "hid_pull": 0.5,         # how hard the detector's reading pulls per frame while it is still trusted
     "hid_deep": 0.60,        # with this share covered, frame-to-frame motion is not used (only the reference, or the face's last motion)
+    "hid_lost": 5,           # frames without anything of the face followed before it is left to the job's own rules again
+    "rival_forehead": 0.32,  # for such a face, the face in front cuts with its forehead too (its outline ends at the brows): this share of the outline's height on top
+    "rival_feather_hid": 0.05,  # ...and with a shorter soft edge (the position is exact now; 11.2.209's 0.09 ate into a narrow visible strip)
+    "contact_side_bias": 0.04,  # side-view pairs: the line lies this far (fraction of the crop) on the side of the face behind - the lips and nose that meet belong to the face in front
     "hid_yaw": 0.45,         # the face in front must be a front view (nose offset under this; a side view's outline is no cover)
     "two_elim": 1,
     "smart_keys": 1,         # v11.2.204: Optimized - every frame swapped in contact or a side pose over ~40 deg
@@ -1849,7 +1853,8 @@ class PredictedFace:
     __slots__ = ("bbox", "kps", "landmark_2d_106", "normed_embedding",
                  "embedding", "det_score", "predicted", "_track", "_slot",
                  "_occlusion_guard", "_frame_shape",
-                 "_partners")     # v11.2.210: the other faces touching this one (5 points, outline, in front or not)
+                 "_partners",     # v11.2.210: the other faces touching this one (5 points, outline, in front or not)
+                 "_hid")          # v11.2.210: its position is carried by its visible part (core_pipeline._HiddenHold)
 
     def __init__(self, bbox, kps, lmk=None, emb=None, det_score=0.5):
         self.bbox = np.asarray(bbox, np.float32).reshape(4).copy()
@@ -2010,10 +2015,11 @@ def _face_span(kps):
         return None
 
 
-def _own_side(kps, pkps, M, size):
+def _own_side(kps, pkps, M, size, bias=0.0):
     """v11.2.210: paint weight 1 on this face's side of the line between two faces, 0 on the partner's (in the face crop).
     The line crosses the stretch between the two faces' points at right angles, nearer the smaller face in proportion to
-    the two sizes. None when it cannot be told."""
+    the two sizes; ``bias`` (fraction of the crop) moves it toward the partner (+) or toward this face (-). None when it
+    cannot be told."""
     try:
         A = np.asarray(M, np.float32).reshape(2, 3)
         a = np.asarray(kps, np.float32).reshape(-1, 2) @ A[:, :2].T + A[:, 2]
@@ -2030,7 +2036,7 @@ def _own_side(kps, pkps, M, size):
         mid = ca - d * t
         n = d / L
         yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
-        s = (xx - mid[0]) * n[0] + (yy - mid[1]) * n[1]
+        s = (xx - mid[0]) * n[0] + (yy - mid[1]) * n[1] + float(bias) * size
         soft = max(1.0, float(_P.get("contact_side_soft", 0.03)) * size)
         return np.clip(0.5 + s / (2.0 * soft), 0.0, 1.0).astype(np.float32)
     except Exception:
@@ -2310,7 +2316,8 @@ def _occ_net_follow(keep, m, mk, hull, hull0, outside, region, W, prev_cut=None)
         seed = (comp & done) if f_on else None
         if seed is None or not bool(seed.any()):
             seed = None
-            if b_on and float((comp & core).sum()) >= need:
+            if b_on and float((comp & core).sum()) >= need and float(comp[W // 2:].sum()) >= 0.5 * float(comp.sum()):
+                # (most of it in the lower half of the face: a hand over an eye or a brow is the wide rule's, as in 11.2.206)
                 # inside the face's own outline as the landmarks see it NOW: when a jaw closes, the chin's edge and the
                 # outline move up together, and what is left below is neck, not an object
                 if zone is None:
@@ -2866,7 +2873,8 @@ class AlignedCompositor:
                         _yp = _yaw_offset(_pk)
                         if _yp is None or _yp < _sy:
                             continue
-                        _w = _own_side(face.kps, _pk, M, size)
+                        _w = _own_side(face.kps, _pk, M, size,
+                                       bias=(-1.0 if _pp.get("front") else 1.0) * float(_P.get("contact_side_bias", 0.0)))
                         if _w is None:
                             continue
                         _side = _w if _side is None else np.minimum(_side, _w)
@@ -2890,15 +2898,26 @@ class AlignedCompositor:
             cut = float(_P.get("rival_cut", 0.85) or 0.0)
             if cut > 0.0:
                 block = np.zeros((size, size), np.float32)
+                # v11.2.210: a face whose position is carried (_HiddenHold) lies where it really is, under the head in front
+                _hid = bool(getattr(face, "_hid", False)) and float(_P.get("hid_hold", 0) or 0) > 0
+                _fh = float(_P.get("rival_forehead", 0.0) or 0.0) if _hid else 0.0
                 for rl in rivals:
                     if id(rl) in _side_riv:
                         continue                 # (a side-view partner: the line between the faces decides, above)
+                    if _fh > 0.0:
+                        try:
+                            _l = np.asarray(rl, np.float32).reshape(-1, 2)
+                            _top = float(_l[:, 1].min()); _hh = float(_l[:, 1].max()) - _top
+                            _up = _l[_l[:, 1] < _top + 0.35 * _hh].copy(); _up[:, 1] -= _fh * _hh
+                            rl = np.vstack([_l, _up])
+                        except Exception:
+                            pass
                     rp = _landmarks_to_aligned(rl, M, size)
                     rh = hull_mask(rp, size)
                     if rh is not None:
                         np.maximum(block, rh, out=block)
                 if float(block.max()) > 0.02:
-                    k = int(max(3, round(size * float(_P.get("rival_feather", 0.09))))) | 1
+                    k = int(max(3, round(size * float(_P.get("rival_feather_hid" if _hid else "rival_feather", 0.09))))) | 1
                     block = cv2.GaussianBlur(block, (k, k), 0)
                     mask = mask * (1.0 - cut * np.clip(block, 0.0, 1.0))
 
@@ -2960,7 +2979,10 @@ class AlignedCompositor:
                     # v11.2.210: the face is learnt in a few frames and forgotten slowly, so an object that comes in slowly is
                     # still known to be in front of face when it is big enough to be cut (11.2.206-209: 0.15 both ways)
                     _fg = float(_P.get("occ_face_forget", 0.15))
-                    upd = _fr + np.where(_fm > _fr, 0.15, _fg).astype(np.float32) * (_fm - _fr)
+                    if abs(_fg - 0.15) < 1e-9:
+                        upd = 0.85 * _fr + 0.15 * _fm           # (11.2.209's own arithmetic, bit for bit)
+                    else:
+                        upd = _fr + np.where(_fm > _fr, 0.15, _fg).astype(np.float32) * (_fm - _fr)
                     track.occ_face_ref = np.where(_cutnow, _fr, upd).astype(np.float32)
         _K = None
         # After the temporal mask, so a cone or scoop is removed on the
