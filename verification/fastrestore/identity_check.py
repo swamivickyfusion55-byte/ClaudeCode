@@ -19,7 +19,7 @@ input frame). The replacement photos are embedded whole, so a half-hidden face s
   that mask over the same region instead - the paint actually laid on the face, which a colour test cannot tell apart from a
   replacement whose skin tone matches the original.
 Also: flicker = mean |frame-to-frame change| inside the face in the output, divided by the input's own (1.0 = as steady as the input)."""
-import sys, cv2, numpy as np
+import sys, os, cv2, numpy as np
 from insightface.app import FaceAnalysis
 from insightface.utils import face_align
 OUT, CLIP, GT, SA, SB = sys.argv[1:6]
@@ -130,6 +130,8 @@ def painted(p):
             sh.append(float(pm[m].mean()) if pm is not None else 0.0); vv.append(share); continue
         d = np.abs(out[t].astype(np.int16) - inp[t].astype(np.int16)).max(axis=2) > 10
         sh.append(float((d & m).sum()) / float(m.sum())); vv.append(share)
+    if os.environ.get('SHARE'):                  # (v11.2.211: the painting share of every frame, for tuning)
+        print('SH', p, [None if x is None else round(x, 2) for x in sh])
     base = np.median([s for s, v in zip(sh, vv) if s is not None and v >= 0.9] or [s for s in sh if s is not None] or [1.0])
     rev = [t for t in range(n) if sh[t] is not None and vv[t] >= 0.30 and sh[t] < 0.40 * base]
     weak = [t for t in range(n) if sh[t] is not None and vv[t] >= 0.30 and 0.40 * base <= sh[t] < 0.70 * base]

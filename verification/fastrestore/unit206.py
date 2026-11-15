@@ -61,6 +61,11 @@ if "occ_net_follow" in E6._P:
     V210 = {k: E6._P[k] for k in ("eat_mouth", "occ_net_lo", "occ_net_hi", "occ_net_follow", "occ_net_below", "occ_face_forget")}
     off.update({"eat_mouth": 1.0, "occ_net_lo": 0.5, "occ_net_hi": 1.0, "occ_net_follow": 0.0, "occ_net_below": 0.0, "occ_face_forget": 0.15})
     ON.update(V210)
+if "lmk_smooth" in E6._P:
+    # v11.2.211: its own switches too (the smoothed landmarks, the thin-strip rule, the mouth rule's hold) - off for the "equals v11.2.205" check
+    V211 = {k: E6._P[k] for k in ("lmk_smooth", "occ_net_rim", "occ_net_hold_core")}
+    off.update({"lmk_smooth": 0.0, "occ_net_rim": 0.0, "occ_net_hold_core": 0.0})
+    ON.update(V211)
 for _kv in filter(None, os.environ.get("OVR", "").split(",")):       # (for experiments: OVR=key=value,key=value)
     ON[_kv.split("=")[0]] = float(_kv.split("=")[1])
 m5, M = run(E5, {}, 70)

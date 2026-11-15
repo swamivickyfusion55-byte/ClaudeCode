@@ -1,0 +1,11 @@
+mask_steady.py: person A (the face behind): placement of the paint against the true 5 points (mean px), and the mean paint on its visible face
+clip       | 11.2.209                 | 11.2.210                 | 11.2.211                
+smooch     |  29.8 px  paint 0.39  (c 0) |  11.1 px  paint 0.53  (c 65) |  10.9 px  paint 0.55  (c 65)
+smoochdeg  |  30.2 px  paint 0.39  (c 0) |  12.2 px  paint 0.54  (c 66) |  12.0 px  paint 0.55  (c 66)
+hide       |  47.7 px  paint 0.28  (c 0) |  18.2 px  paint 0.41  (c 72) |  10.1 px  paint 0.42  (c 72)
+hidedeg    |  48.4 px  paint 0.30  (c 0) |  19.4 px  paint 0.40  (c 72) |  12.1 px  paint 0.41  (c 71)
+cross      |  43.4 px  paint 0.40  (c 0) |  32.0 px  paint 0.46  (c 24) |   9.0 px  paint 0.56  (c 42)
+crossdeg   |  49.5 px  paint 0.39  (c 0) |  50.0 px  paint 0.44  (c 45) |  14.5 px  paint 0.55  (c 47)
+pkiss      |  11.7 px  paint 0.31  (c 0) |  11.7 px  paint 0.43  (c 0) |  11.7 px  paint 0.43  (c 0)
+pkissdeg   |  12.4 px  paint 0.33  (c 0) |  12.4 px  paint 0.44  (c 0) |  12.4 px  paint 0.44  (c 0)
+(c = frames the carry placed the face)

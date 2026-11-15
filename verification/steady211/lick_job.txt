@@ -1,0 +1,4 @@
+l211_strawberry strawberry: lips shown as the replacement's - nothing there 1.00 | scoop on the lips: mean 0.88, lowest 0.81 | between licks: mean 1.00, lowest 0.95 | largest change in one frame 0.11
+l211_strawberry strawberry: the scoop over the face painted over (output differs from the footage) - on the lips: mean 0%, worst frame 3% | under the lips: mean 0%, worst frame 0% | the engine's paint on it: 0.02 / 0.43
+l211_vanilla vanilla: lips shown as the replacement's - nothing there 1.00 | scoop on the lips: mean 0.90, lowest 0.85 | between licks: mean 1.00, lowest 0.95 | largest change in one frame 0.09
+l211_vanilla vanilla: the scoop over the face painted over (output differs from the footage) - on the lips: mean 0%, worst frame 0% | under the lips: mean 0%, worst frame 1% | the engine's paint on it: 0.00 / 0.30

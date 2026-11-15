@@ -1,0 +1,54 @@
+== v11.2.209_SureID strawberry
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.03, lowest 0.00 | scoop below the lips (between licks): mean 0.52, lowest 0.00
+face next to the scoop painted: scoop on the lips mean 0.43 | below the lips mean 0.83
+the scoop painted over (must be near 0): on the lips mean 0.15, worst 0.23 | below the lips mean 0.76, worst 0.95
+the scoop under the swap's soft border, outside the face: paint mean 0.69
+lips paint, change from frame to frame: mean 0.045, largest 0.61
+== v11.2.210_TrueTouch strawberry
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.90, lowest 0.82 | scoop below the lips (between licks): mean 1.00, lowest 0.95
+face next to the scoop painted: scoop on the lips mean 0.78 | below the lips mean 0.83
+the scoop painted over (must be near 0): on the lips mean 0.01, worst 0.01 | below the lips mean 0.08, worst 0.32
+the scoop under the swap's soft border, outside the face: paint mean 0.08
+lips paint, change from frame to frame: mean 0.009, largest 0.09
+== v11.2.211_Steady strawberry
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.90, lowest 0.82 | scoop below the lips (between licks): mean 1.00, lowest 0.95
+face next to the scoop painted: scoop on the lips mean 0.78 | below the lips mean 0.83
+the scoop painted over (must be near 0): on the lips mean 0.01, worst 0.01 | below the lips mean 0.08, worst 0.32
+the scoop under the swap's soft border, outside the face: paint mean 0.08
+lips paint, change from frame to frame: mean 0.009, largest 0.09
+== v11.2.209_SureID vanilla
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.02, lowest 0.00 | scoop below the lips (between licks): mean 0.54, lowest 0.01
+face next to the scoop painted: scoop on the lips mean 0.37 | below the lips mean 0.84
+the scoop painted over (must be near 0): on the lips mean 0.14, worst 0.28 | below the lips mean 0.76, worst 0.97
+the scoop under the swap's soft border, outside the face: paint mean 0.68
+lips paint, change from frame to frame: mean 0.044, largest 0.45
+== v11.2.210_TrueTouch vanilla
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.92, lowest 0.87 | scoop below the lips (between licks): mean 1.00, lowest 0.96
+face next to the scoop painted: scoop on the lips mean 0.72 | below the lips mean 0.86
+the scoop painted over (must be near 0): on the lips mean 0.00, worst 0.00 | below the lips mean 0.11, worst 0.94
+the scoop under the swap's soft border, outside the face: paint mean 0.10
+lips paint, change from frame to frame: mean 0.007, largest 0.07
+== v11.2.211_Steady vanilla
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.92, lowest 0.87 | scoop below the lips (between licks): mean 1.00, lowest 0.96
+face next to the scoop painted: scoop on the lips mean 0.72 | below the lips mean 0.86
+the scoop painted over (must be near 0): on the lips mean 0.00, worst 0.00 | below the lips mean 0.11, worst 0.94
+the scoop under the swap's soft border, outside the face: paint mean 0.10
+lips paint, change from frame to frame: mean 0.007, largest 0.07
+== v11.2.209_SureID choc
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.04, lowest 0.00 | scoop below the lips (between licks): mean 0.60, lowest 0.07
+face next to the scoop painted: scoop on the lips mean 0.38 | below the lips mean 0.86
+the scoop painted over (must be near 0): on the lips mean 0.13, worst 0.32 | below the lips mean 0.77, worst 0.98
+the scoop under the swap's soft border, outside the face: paint mean 0.69
+lips paint, change from frame to frame: mean 0.045, largest 0.40
+== v11.2.210_TrueTouch choc
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.91, lowest 0.84 | scoop below the lips (between licks): mean 1.00, lowest 0.96
+face next to the scoop painted: scoop on the lips mean 0.77 | below the lips mean 0.88
+the scoop painted over (must be near 0): on the lips mean 0.00, worst 0.00 | below the lips mean 0.03, worst 0.25
+the scoop under the swap's soft border, outside the face: paint mean 0.08
+lips paint, change from frame to frame: mean 0.009, largest 0.08
+== v11.2.211_Steady choc
+lips painted with the swap: nothing there 1.00 | scoop on the lips: mean 0.91, lowest 0.84 | scoop below the lips (between licks): mean 1.00, lowest 0.96
+face next to the scoop painted: scoop on the lips mean 0.77 | below the lips mean 0.88
+the scoop painted over (must be near 0): on the lips mean 0.00, worst 0.00 | below the lips mean 0.03, worst 0.25
+the scoop under the swap's soft border, outside the face: paint mean 0.08
+lips paint, change from frame to frame: mean 0.009, largest 0.08

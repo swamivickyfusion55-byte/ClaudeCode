@@ -1,4 +1,6 @@
-"""det_err.py CLIP GT OUT.npz  - the detector's own 5 points / box against the truth, per frame and person, with the visible share"""
+"""det_err.py CLIP GT OUT.npz  - the detector's own 5 points / box against the truth, per frame and person, with the visible share
+(v11.2.211: a detection goes to the person whose five true points it is closest to - not by the centre: the faces of a side-view kiss
+have centres only 10-20 px apart, and the centre swapped the two people for stretches of frames)"""
 import sys, cv2, numpy as np
 from insightface.app import FaceAnalysis
 CLIP, GT, OUT = sys.argv[1:4]
@@ -15,7 +17,7 @@ for t in range(n):
     faces = fa.get(fr[t]); used = set()
     for p in range(2):
         res["share"][t, p] = float((vis[t, p] > 127).sum()) / max(1.0, float(full[p]))
-    cand = sorted(((float(np.linalg.norm(f.kps.mean(0) - kps[t, p].mean(0))), i, p) for i, f in enumerate(faces) for p in range(2)))
+    cand = sorted(((float(np.linalg.norm(f.kps - kps[t, p], axis=1).mean()), i, p) for i, f in enumerate(faces) for p in range(2)))
     donep = set()
     for d, i, p in cand:
         if i in used or p in donep or d > 150: continue

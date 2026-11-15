@@ -1,0 +1,564 @@
+diff -ru -x __pycache__ -x 'SDOS-*' v11.2.210_TrueTouch/config.py v11.2.211_Steady/config.py
+--- v11.2.210_TrueTouch/config.py	2026-11-15 05:47:56.780467018 +0000
++++ v11.2.211_Steady/config.py	2026-11-15 14:57:37.452980008 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.210"
+-BUILD = "TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.211"
++BUILD = "Steady · the face outline and the line where one face lies over another no longer shake with the detector (landmarks smoothed in the face's own frame, a face going behind another filtered) · TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru -x __pycache__ -x 'SDOS-*' v11.2.210_TrueTouch/core_pipeline.py v11.2.211_Steady/core_pipeline.py
+--- v11.2.210_TrueTouch/core_pipeline.py	2026-11-15 08:35:33.784723753 +0000
++++ v11.2.211_Steady/core_pipeline.py	2026-11-15 18:49:46.887332297 +0000
+@@ -4561,6 +4561,48 @@
+         return records
+ 
+     @staticmethod
++    def _smooth_T(st, P):
++        """v11.2.211: the carried face's size, turn and centre, each measured anew from the reference every frame (so nothing adds
++        up), filtered with a level and a trend each (Holt): steady motion - a face going behind another at a steady speed, turning
++        steadily - passes without lag, and what does not fit the trend, the measurement's own noise, is smoothed. A measurement
++        far from the trend (the face really did something) is followed at once. Measured: the raw measurement's size and turn
++        jitter by 0.5-1 % and 0.2 deg, which a point near the ear shows as 1-3 px of waving. Returns the filtered 2x3 transform."""
++        T = st["T"]
++        c_ref = st["kps0"].mean(0)
++        sc = float(np.hypot(T[0, 0], T[1, 0]))
++        th = float(np.arctan2(T[1, 0], T[0, 0]))
++        c = (T[:, :2] @ c_ref + T[:, 2]).astype(np.float64)
++        z = np.array([sc, th, c[0], c[1]], np.float64)
++        f = st.get("F")
++        if f is None or float(P.get("hid_filter", 1.0)) <= 0.0:
++            tr0 = np.zeros(4)
++            tr0[2:4] = np.asarray(st.get("vel", np.zeros(2)), np.float64)         # (it was already moving when it went behind)
++            st["F"] = (z.copy(), tr0)
++            return T
++        lv, tr = f
++        pred = lv + tr
++        fw = float(max(8.0, st["bbox0"][2] - st["bbox0"][0])) * max(0.5, lv[0])
++        al = np.array([float(P.get("hid_f_scale", 0.25)), float(P.get("hid_f_turn", 0.25)),
++                       float(P.get("hid_f_pos", 0.45)), float(P.get("hid_f_pos", 0.45))])
++        be = max(float(P.get("hid_f_trend", 0.06)), 0.6 / (float(st.get("age", 0)) + 1.0))      # (the trend is learnt fast at first)
++        ref = np.array([0.03, 0.05, 0.05 * fw, 0.05 * fw])          # a residual of this size is the face doing something: followed at once
++        r = z - pred
++        open_ = np.clip(np.abs(r) / ref - 1.0, 0.0, 1.0)
++        al = al + (1.0 - al) * open_
++        lv_new = pred + al * r
++        # the trend learns a fraction of what the measurement showed, also when it was followed at once: taking one big jump for
++        # the speed made the next prediction overshoot by the whole jump (a noisy reading of a hidden face, degraded footage:
++        # placement 12 -> 30 px)
++        tr_new = tr + be * r
++        cap = 0.12 * fw                                           # (a face does not move more than this in a frame)
++        tr_new[2:4] = np.clip(tr_new[2:4], -cap, cap)
++        st["F"] = (lv_new, tr_new)
++        sc, th, cx, cy = lv_new
++        R = sc * np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
++        c = np.array([cx, cy])
++        return np.hstack([R, (c - R @ c_ref).reshape(2, 1)]).astype(np.float32)
++
++    @staticmethod
+     def _geom(st):
+         T = st["T"]
+         kps = _hh_apply(T, st["kps0"])
+@@ -4606,6 +4648,24 @@
+                 if st["gone"] > 5:
+                     del self.act[slot]
+         for slot, rec in records.items():
++            try:
++                self._step_slot(slot, rec, records, behind, g, frame, prev, out, P, lo, enter, pull_max)
++            except Exception as _se:                  # v11.2.211: a fault with one face drops that face's carry, nothing else
++                self.act.pop(slot, None)
++                self.stats["faults"] = self.stats.get("faults", 0) + 1
++                logging.debug("hidden-face carry dropped for slot %s: %s", slot, _se)
++        self.prev = (g, frame)
++        self.prev_lmk = {s: (r["lmk"].copy() if r.get("lmk") is not None else None) for s, r in records.items()}
++        self.prev_kc = {s: np.asarray(r["kps"], np.float32).mean(0) for s, r in records.items() if r.get("kps") is not None}
++        if out:
++            self.over[g] = out
++        if len(self.over) > 1200:
++            for k_ in sorted(self.over)[:-600]:
++                del self.over[k_]
++
++    def _step_slot(self, slot, rec, records, behind, g, frame, prev, out, P, lo, enter, pull_max):
++        """One face of step(): where it is on this frame if it is being carried (written to ``out``)."""
++        if True:
+             fronts = behind.get(slot, [])
+             st = self.act.get(slot)
+             det = bool(rec.get("det")) and rec.get("lmk") is not None
+@@ -4622,7 +4682,7 @@
+                 if st is None:
+                     if det and dcov < lo:                    # (only a reading of the face clear of the other one)
+                         self.trust[slot] = (g, rec["kps"].copy(), rec["lmk"].copy(), rec["bbox"].copy())
+-                    continue
++                    return
+             # where the face is on this frame
+             k_before, _, l_before = self._geom(st)
+             f_lmk = [records[f_]["lmk"] for f_ in fronts]
+@@ -4640,6 +4700,7 @@
+                 # on the other side of the face in front)
+                 T_new, kind, ni = _hh_ref_track(st["ref"], frame, st["T_cv"], f_lmk)
+             followed = False
++            weak = False
+             if T_new is not None:
+                 st["T"] = T_new
+                 self.stats["ref"] += 1
+@@ -4647,7 +4708,20 @@
+                 followed = True
+             else:
+                 A = None
+-                if prev is not None and st["g"] == g - 1 and cov0 < float(P.get("hid_deep", 0.60)):
++                # How the face in front moved since the last frame, and whether this face was moving against it:
++                vf = np.zeros(2, np.float32)
++                if prev is not None:
++                    d_ = [records[f_]["kps"].mean(0) - self.prev_kc[f_] for f_ in fronts if f_ in self.prev_kc]
++                    if d_:
++                        vf = np.mean(np.asarray(d_, np.float32), axis=0).astype(np.float32)
++                v = st["vel"]
++                fw0 = float(max(8.0, np.ptp(k_before[:, 0]) * 2.2))
++                passing = float(np.linalg.norm(v - vf)) > float(P.get("hid_rel", 0.02)) * fw0
++                # v11.2.211: not while it is passing behind: the corners of the visible part then include the face in front's hair
++                # and ear, moving the other way, and the fit takes them (crossing clip, whole job: A pulled 45 px back from frame 67
++                # while its own motion was right to 3 px; the original face showed on 11 frames)
++                no_flow = passing and float(P.get("hid_pass_noflow", 1.0)) > 0.0
++                if prev is not None and st["g"] == g - 1 and cov0 < float(P.get("hid_deep", 0.60)) and not no_flow:
+                     # (frame-to-frame motion has no picture of the face to check against: not when most of it is hidden,
+                     # where the corners it finds belong to the face in front or the background)
+                     A, kind = _hh_flow(prev[1], frame, k_before, l_before, [self.prev_lmk.get(f_) for f_ in fronts], f_lmk)
+@@ -4655,16 +4729,15 @@
+                     st["T"] = _hh_compose(A, st["T"])
+                     self.stats[kind] += 1
+                     followed = True
++                    # v11.2.211: this reading has no picture of the face to check against (it is the corners of whatever is in
++                    # the visible part). It moves the position, but is not allowed to change what the face was DOING (its speed,
++                    # and the count to "lost"): on the crossing clip, with 60 % of the face hidden, it read the face in front's
++                    # own motion, the carry then took the face to be "not moving against the face in front" and dragged it with
++                    # that one for 20 frames, up to 180 px off, painted beside the front face's ear.
++                    weak = float(P.get("hid_weak_flow", 1.0)) > 0.0
+                 else:
+-                    # Nothing of it to follow. How the face in front moved since the last frame:
+-                    vf = np.zeros(2, np.float32)
+-                    if prev is not None:
+-                        d_ = [records[f_]["kps"].mean(0) - self.prev_kc[f_] for f_ in fronts if f_ in self.prev_kc]
+-                        if d_:
+-                            vf = np.mean(np.asarray(d_, np.float32), axis=0).astype(np.float32)
+-                    v = st["vel"]
+-                    fw0 = float(max(8.0, np.ptp(k_before[:, 0]) * 2.2))
+-                    if float(np.linalg.norm(v - vf)) <= float(P.get("hid_rel", 0.02)) * fw0:
++                    # Nothing of it to follow (vf, v, fw0, passing: above)
++                    if not passing:
+                         # it was not moving against the face in front (a kiss, a hug): it stays with that face
+                         st["T"] = _hh_compose(np.float32([[1, 0, vf[0]], [0, 1, vf[1]]]), st["T"])
+                         st["vel"] = (0.5 * v + 0.5 * vf).astype(np.float32)
+@@ -4672,8 +4745,8 @@
+                         st["T_cv"] = None
+                     else:
+                         # it was moving against it (passing behind): on with its own last motion - a head keeps moving
+-                        if st.get("drift", 0) == 0:
+-                            st["v0"], st["T_cv"] = v.copy(), st["T"].copy()
++                        if st.get("drift", 0) == 0 or st.get("T_cv") is None or st.get("v0") is None:
++                            st["v0"], st["T_cv"] = v.copy(), st["T"].copy()     # (v11.2.210 failed here when the face had alternated between the two modes)
+                         v0 = st["v0"]
+                         st["T_cv"] = _hh_compose(np.float32([[1, 0, v0[0]], [0, 1, v0[1]]]), st["T_cv"])    # (speed kept)
+                         st["T"] = _hh_compose(np.float32([[1, 0, v[0]], [0, 1, v[1]]]), st["T"])
+@@ -4692,14 +4765,14 @@
+                 st["g"] = g
+                 if wgt >= 1.0:
+                     del self.act[slot]
+-                    continue
++                    return
+                 out[slot] = ((kps * (1 - wgt) + rec["kps"] * wgt).astype(np.float32),
+                              (bbox * (1 - wgt) + rec["bbox"] * wgt).astype(np.float32),
+                              (lmk * (1 - wgt) + rec["lmk"] * wgt).astype(np.float32)
+                              if (rec.get("lmk") is not None and rec["lmk"].shape == lmk.shape) else lmk.copy())
+                 self.stats["frames"] += 1
+-                continue
+-            if followed:
++                return
++            if followed and not weak:
+                 st["coast"], st["drift"], st["T_cv"] = 0, 0, None
+                 st["vel"] = (0.5 * st["vel"] + 0.5 * (kps.mean(0) - k_before.mean(0))).astype(np.float32)
+             st["g"] = g
+@@ -4711,10 +4784,20 @@
+                 # the detector sees the face somewhere else (it came out on the other side of the face in front). A reading
+                 # squeezed into the visible part is at most a fifth of a face width off; further than 0.3 is another place.
+                 if float(np.linalg.norm(rec["kps"].mean(0) - kps.mean(0))) > 0.30 * fw:
++                    self.stats["jumped"] += 1
++                    if float(P.get("hid_hand", 1.0)) > 0.0 and rec.get("lmk") is not None and rec["lmk"].shape == lmk.shape:
++                        # v11.2.211: handed over to the detector over a few frames, like a face that was lost (11.2.210 snapped:
++                        # the paint jumped 40-60 px in one frame as the face came out from behind the other one)
++                        wgt = 1.0 / 6.0
++                        st["leaving"] = 2
++                        out[slot] = ((kps * (1 - wgt) + rec["kps"] * wgt).astype(np.float32),
++                                     (bbox * (1 - wgt) + rec["bbox"] * wgt).astype(np.float32),
++                                     (lmk * (1 - wgt) + rec["lmk"] * wgt).astype(np.float32))
++                        self.stats["frames"] += 1
++                        return
+                     del self.act[slot]
+                     self.trust[slot] = (g, rec["kps"].copy(), rec["lmk"].copy(), rec["bbox"].copy())
+-                    self.stats["jumped"] += 1
+-                    continue
++                    return
+                 # ...and is believed as far as it can be: fully while little is covered, not at all from `enter` on
+                 c_ = max(cov, dcov)
+                 p = pull_max * float(np.clip((enter - c_) / max(1e-6, enter - lo), 0.0, 1.0))
+@@ -4728,7 +4811,7 @@
+                         self.trust[slot] = (g, rec["kps"].copy(), rec["lmk"].copy(), rec["bbox"].copy())
+                         if st["used"]:
+                             self.stats["handed"] += 1
+-                        continue
++                        return
+                 else:
+                     st["out"] = 0
+                 st["free"] = 0
+@@ -4736,22 +4819,16 @@
+                 st["free"] += 1
+                 if st["free"] > 15:                         # uncovered and not seen for half a second: the job's own rules
+                     del self.act[slot]
+-                    continue
++                    return
+             if not st["used"] and cov >= enter:
+                 st["used"] = True
+                 self.stats["entered"] += 1
+             if cov >= enter:
+                 self.stats["hidden"] += 1
++            st["T"] = self._smooth_T(st, P)                 # v11.2.211
++            kps, bbox, lmk = self._geom(st)
+             out[slot] = (kps.copy(), bbox.copy(), lmk.copy())
+             self.stats["frames"] += 1
+-        self.prev = (g, frame)
+-        self.prev_lmk = {s: (r["lmk"].copy() if r.get("lmk") is not None else None) for s, r in records.items()}
+-        self.prev_kc = {s: np.asarray(r["kps"], np.float32).mean(0) for s, r in records.items() if r.get("kps") is not None}
+-        if out:
+-            self.over[g] = out
+-        if len(self.over) > 1200:
+-            for k_ in sorted(self.over)[:-600]:
+-                del self.over[k_]
+ 
+ 
+ _HH = _HiddenHold()
+diff -ru -x __pycache__ -x 'SDOS-*' v11.2.210_TrueTouch/swap_engine.py v11.2.211_Steady/swap_engine.py
+--- v11.2.210_TrueTouch/swap_engine.py	2026-11-15 08:35:33.787196639 +0000
++++ v11.2.211_Steady/swap_engine.py	2026-11-15 19:50:24.132469645 +0000
+@@ -62,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.210-truetouch"
++ENGINE_VERSION = "aequus-1.2.211-steady"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -195,6 +195,15 @@
+     "occ_net_follow_reach": 0.12,   # ...and no further than this from the piece it belongs to
+     "occ_net_below": 1.0,           # a piece coming in over the chin's edge counts too (a cone, a cup, a hand: 11.2.209 painted the chin over it)
+     "occ_net_below_depth": 0.03,    # ...when it reaches this far into the face (fraction of the crop; the chin's edge moving is thinner)
++    # v11.2.211 (SDOS-211): a thin strip along the face's own edge - where the other face, or hair, meets it - was taken for an object
++    # by the mouth rule (it only asks for 0.2 % of the crop in the mouth zone) and switched on and off from frame to frame: the
++    # "wave" along the cheek from the point where two faces touch. 0 = 11.2.210.
++    "occ_net_rim": 1,               # a piece is NOT an object when it is thin...
++    "occ_net_rim_thick": 0.06,      # ...its widest point under this (fraction of the crop: a spoon's tip is 0.08 and more)...
++    "occ_net_rim_hug": 0.12,        # ...and this share of it lies within this distance of the face outline (fraction of the crop)
++    "occ_net_rim_frac": 0.6,
++    "occ_net_rim_alone": 0,         # 1 = the rule also applies to a face with no other face touching it (it cut less of a scoop resting on the chin)
++    "occ_net_hold_core": 1,         # a piece cut on the last frame stays cut while it still overlaps itself (the mouth rule too)
+     "occ_face_forget": 0.04,        # how fast the face memory forgets where the model no longer sees face (per frame; 11.2.209: 0.15)
+     # v11.2.210 (SDOS-210) two faces touching, both in side view (a kiss in profile). Both faces fill each face's crop; the
+     # occlusion model then takes one or the other as "the face" from frame to frame, and a landmark outline drawn on a side
+@@ -284,8 +293,17 @@
+     "hid_lo": 0.03,          # a reference of the face is taken when this share of its outline is inside the outline in front...
+     "hid_enter": 0.15,       # ...and from this share on the detector's reading is not used at all (in between: less and less)
+     "hid_pull": 0.5,         # how hard the detector's reading pulls per frame while it is still trusted
++    "hid_hand": 1,           # v11.2.211: a carried face the detector finds somewhere else is handed over to it over 6 frames, not at once (0 = 11.2.210)
++    "rival_dilate_hid": 0.06,        # v11.2.211: the outline of the face in front is dilated this much (fraction of the crop) when cutting a CARRIED face (hull_dilate 0.085 otherwise; 0 = hull_dilate)
++    "hid_pass_noflow": 1,    # v11.2.211: a face passing behind another (moving against it) is not placed by frame-to-frame flow, only by its own motion (0 = 11.2.210)
++    "hid_weak_flow": 1,      # v11.2.211: a frame-to-frame reading (no picture to check) moves the carried face but never changes its learnt speed or the count to "lost" (0 = 11.2.210)
++    "hid_filter": 1,         # v11.2.211: the carried face's size, turn and centre are filtered (0 = 11.2.210)
++    "hid_f_scale": 0.35,     # ...size: share of a frame's new measurement taken (the trend carries steady change)
++    "hid_f_turn": 0.35,      # ...turn: the same
++    "hid_f_pos": 0.35,       # ...centre: the same
++    "hid_f_trend": 0.15,     # ...how fast each one's trend follows what the measurement shows
+     "hid_deep": 0.60,        # with this share covered, frame-to-frame motion is not used (only the reference, or the face's last motion)
+-    "hid_lost": 5,           # a face passing behind another: frames on its own last motion before the job's own rules take it back
++    "hid_lost": 20,          # a face passing behind another: frames on its own last motion before the job's own rules take it back (11.2.210: 5; 20 = two thirds of a second at 30 fps; crossing clip, placement 32 -> 9 px)
+     "hid_rel": 0.02,         # ...passing = moving against the face in front by this much a frame (face widths); else it stays with that face
+     "rival_forehead": 0.32,  # for such a face, the face in front cuts with its forehead too (its outline ends at the brows): this share of the outline's height on top
+     "rival_feather_hid": 0.05,  # ...and with a shorter soft edge (the position is exact now; 11.2.209's 0.09 ate into a narrow visible strip)
+@@ -328,6 +346,13 @@
+     # still or slow-moving face.
+     "kps_min_cutoff": 0.06,
+     "kps_beta": 0.015,
++    # v11.2.211 (SDOS-211): the 106 landmarks (the face outline, and the line along which one face is cut where another lies over
++    # it) were stored RAW while the 5 alignment points above are smoothed with a cutoff of 0.06: the paint sat steady and its edge
++    # shook with the detector's noise. They are now smoothed in the face's own frame (the shape found by the 5 points) and moved
++    # with the smoothed points, so there is no lag on head motion. 0 = 11.2.210.
++    "lmk_smooth": 1,
++    "lmk_min_cutoff": 0.08,         # One Euro on each landmark, in a 112-px face (about 3.3 x smaller than a 300-px face)...
++    "lmk_beta": 0.12,               # ...opening with the point's own speed in that frame (px a frame): a mouth that opens is not held back
+     # --- alpha-beta motion filter (bbox + kps velocity) --------------------
+     # Replaces the flat EMA over MEASURED velocity that this class used up to
+     # v11.2.5. That EMA had no notion of acceleration or of its own prediction
+@@ -734,15 +759,16 @@
+         return None
+ 
+ 
+-def hull_mask(pts_aligned, size) -> np.ndarray | None:
+-    """Convex hull of aligned landmarks, dilated + feathered, float32 [0,1]."""
++def hull_mask(pts_aligned, size, dilate=None) -> np.ndarray | None:
++    """Convex hull of aligned landmarks, dilated + feathered, float32 [0,1]. ``dilate`` (v11.2.211): the dilation as a fraction of the
++    crop, instead of hull_dilate."""
+     if pts_aligned is None:
+         return None
+     try:
+         m = np.zeros((size, size), np.uint8)
+         hull = cv2.convexHull(np.round(pts_aligned).astype(np.int32))
+         cv2.fillConvexPoly(m, hull, 255)
+-        d = int(max(1, round(size * _P["hull_dilate"])))
++        d = int(max(1, round(size * (_P["hull_dilate"] if dilate is None else float(dilate)))))
+         m = cv2.dilate(m, np.ones((d * 2 + 1, d * 2 + 1), np.uint8), 1)
+         k = int(max(3, round(size * 0.10))) | 1
+         m = cv2.GaussianBlur(m, (k, k), 0)
+@@ -999,6 +1025,22 @@
+ # --------------------------------------------------------------------------
+ # Per-identity temporal memory
+ # --------------------------------------------------------------------------
++def _lmk_canon(lmk, kps):
++    """(canonical landmarks, image->canonical affine): the 106 points in the frame of a 112-px ArcFace crop of ``kps``"""
++    M = _umeyama(np.asarray(kps, np.float32).reshape(-1, 2)[:5], _arcface_dst(112))
++    if M is None:
++        return None, None
++    return np.asarray(lmk, np.float32).reshape(-1, 2) @ M[:, :2].T + M[:, 2], M
++
++
++def _lmk_uncanon(c, kps):
++    M = _umeyama(np.asarray(kps, np.float32).reshape(-1, 2)[:5], _arcface_dst(112))
++    if M is None:
++        return None
++    IM = cv2.invertAffineTransform(np.asarray(M, np.float32))
++    return (np.asarray(c, np.float32) @ IM[:, :2].T + IM[:, 2]).astype(np.float32)
++
++
+ class TrackState:
+     """Temporal memory for one identity slot.
+ 
+@@ -1007,7 +1049,7 @@
+     long-term identity embedding.
+     """
+ 
+-    __slots__ = ("slot", "bbox", "obs_bbox", "kps", "lmk", "vel_bbox", "vel_kps",
++    __slots__ = ("slot", "bbox", "obs_bbox", "kps", "lmk", "lmk_c", "vel_bbox", "vel_kps",
+                  "emb", "id_lock", "hits", "missed", "mask_ema", "cm_dmean", "cm_ratio",
+                  "flip_votes", "crossing", "last_face", "det_score", "last_hit_bbox",
+                  "hull_ema", "occl_w", "alpha_ema", "last_dt", "last_hit_kps", "_contact_vel",
+@@ -1028,6 +1070,7 @@
+         self.obs_bbox = None      # last RAW detection (unsmoothed) — association
+         self.kps = None
+         self.lmk = None
++        self.lmk_c = None
+         self.vel_bbox = np.zeros(4, np.float32)
+         self.vel_kps = None
+         # Alpha-beta filter position states. Deliberately NOT the same thing
+@@ -1199,6 +1242,7 @@
+                 self.obs_bbox = (self.obs_bbox + vb * float(steps)).astype(np.float32)
+             if self.kps is not None and vk is not None:
+                 self.kps = (self.kps + vk * float(steps)).astype(np.float32)
++                self._refresh_lmk()
+             return self.bbox
+         # Already left the frame — count the miss but do not keep coasting.
+         if self._paste_frozen:
+@@ -1224,6 +1268,7 @@
+             self.obs_bbox = (self.obs_bbox + self.vel_bbox * step).astype(np.float32)
+         if self.kps is not None and self.vel_kps is not None:
+             self.kps = (self.kps + self.vel_kps * step).astype(np.float32)
++            self._refresh_lmk()
+         # Freeze when mostly outside the last known frame (set by core).
+         if self._frame_wh is not None and self.bbox is not None:
+             try:
+@@ -1283,6 +1328,7 @@
+         for i, good in enumerate(ok):
+             new_kps[i] = measured[i] if good else original[i] + med
+         self.kps = new_kps.astype(np.float32)
++        self._refresh_lmk()
+         slide = np.array([med[0], med[1], med[0], med[1]], np.float32)
+         if self.bbox is not None:
+             self.bbox = (np.asarray(self.bbox, np.float32) + slide).astype(np.float32)
+@@ -1294,6 +1340,44 @@
+         self.vel_bbox = np.array([per[0], per[1], per[0], per[1]], np.float32)
+         return True
+ 
++    def _set_lmk(self, lmk, kp_raw, elapsed=1.0):
++        """v11.2.211: the 106 landmarks of a detection, smoothed in the face's own frame and placed with the smoothed 5 points
++        (self.kps). Off (lmk_smooth 0), or without usable points, they are kept as detected (11.2.210)."""
++        lm = np.asarray(lmk, np.float32).reshape(-1, 2)
++        if not bool(_P.get("lmk_smooth", 0)) or kp_raw is None or self.kps is None:
++            self.lmk, self.lmk_c = lm.copy(), None
++            return
++        try:
++            c, _M = _lmk_canon(lm, kp_raw)
++            if c is None:
++                self.lmk, self.lmk_c = lm.copy(), None
++                return
++            prev = self.lmk_c
++            if prev is None or prev.shape != c.shape:
++                self.lmk_c = c.astype(np.float32)
++            else:
++                # One Euro per landmark: its own speed in the face's frame opens the filter (a mouth opening moves the jaw
++                # points at once; the cheek's noise does not)
++                sp = np.linalg.norm(c - prev, axis=1) / max(1.0, float(elapsed))
++                cutoff = float(_P.get("lmk_min_cutoff", 0.10)) + float(_P.get("lmk_beta", 0.10)) * sp
++                r = 2.0 * math.pi * cutoff * max(1.0, float(elapsed))
++                a = (r / (r + 1.0)).astype(np.float32)[:, None]
++                self.lmk_c = (prev * (1.0 - a) + c * a).astype(np.float32)
++            out = _lmk_uncanon(self.lmk_c, self.kps)
++            self.lmk = out if out is not None else lm.copy()
++        except Exception:
++            self.lmk, self.lmk_c = lm.copy(), None
++
++    def _refresh_lmk(self):
++        """the landmarks follow the 5 points when those are moved without a detection (predict, flow)"""
++        if self.lmk_c is not None and self.kps is not None:
++            try:
++                out = _lmk_uncanon(self.lmk_c, self.kps)
++                if out is not None:
++                    self.lmk = out
++            except Exception:
++                pass
++
+     def update(self, face, update_embedding=True, dt_frames: float = 1.0, kps_ok: bool = True):
+         a = float(_P["trk_alpha"])
+         dt = max(1.0, float(dt_frames or 1.0))
+@@ -1432,7 +1516,8 @@
+                 self.last_hit_kps = kp.copy()
+             lmk = getattr(face, "landmark_2d_106", None)
+             if lmk is not None:
+-                self.lmk = np.asarray(lmk, np.float32).copy()
++                self.lmk_c = None                         # (a new place: nothing of the old shape is carried over)
++                self._set_lmk(lmk, getattr(face, "kps", None), elapsed)
+             if update_embedding:
+                 self._commit_identity(getattr(face, "normed_embedding", None))
+             self.det_score = _fnum_local(getattr(face, "det_score", 0.5), 0.5)
+@@ -1601,7 +1686,7 @@
+ 
+         lmk = getattr(face, "landmark_2d_106", None)
+         if lmk is not None:
+-            self.lmk = np.asarray(lmk, np.float32).copy()
++            self._set_lmk(lmk, getattr(face, "kps", None), elapsed)
+ 
+         if update_embedding:
+             self._commit_identity(getattr(face, "normed_embedding", None))
+@@ -2149,6 +2234,15 @@
+ 
+ 
+ _OCC_TL = threading.local()
++
++
++def _rim_active():
++    """v11.2.211: the thin-edge-strip rule (occ_net_rim) applies while another face touches this one (build_mask sets it): there the
++    sliver along the cheek is the neighbour's edge, not an object. A face on its own keeps 11.2.210's cut: a scoop resting on the
++    chin is a thin piece along the jaw's edge too (measured: painted over 0.08 -> 0.91 when the rule applied to it)."""
++    if float(_P.get("occ_net_rim", 0.0) or 0.0) <= 0.0:
++        return False
++    return bool(getattr(_OCC_TL, "contact", True)) or float(_P.get("occ_net_rim_alone", 0.0) or 0.0) > 0.0
+ _OCC_GRID = {}
+ 
+ 
+@@ -2248,10 +2342,14 @@
+     full_lab = None
+     hold = float(_P.get("occ_net_wide_hold", 0.30))
+     n, lab = cv2.connectedComponents(cand.astype(np.uint8), connectivity=8)
++    rim_on = _rim_active()
+     for c in range(1, n):
+         comp = lab == c
+         if outside is not None and bool((comp & outside).any()):
+             continue
++        if rim_on and _rim_piece(comp, hull0, W):
++            OCCNET_STATS["rim"] = OCCNET_STATS.get("rim", 0) + 1          # (a thin strip along the face's own edge: not an object)
++            continue
+         area = float(comp.sum())
+         if area >= wmin and float((comp & inner).sum()) >= winner * area:
+             OCCNET_STATS["wide"] = OCCNET_STATS.get("wide", 0) + 1
+@@ -2271,6 +2369,20 @@
+                 keep[ext] = np.minimum(keep[ext], m[ext])
+ 
+ 
++def _rim_piece(comp, hull0, W):
++    """v11.2.211: is this piece of "not face" a thin strip along the face's own edge (not an object)? Thin: its widest point is
++    under occ_net_rim_thick of the crop; along the edge: occ_net_rim_frac of it lies within occ_net_rim_hug of the outline."""
++    try:
++        thick = float(cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 3).max())
++        if thick >= float(_P.get("occ_net_rim_thick", 0.06)) * W:
++            return False
++        hd = cv2.distanceTransform(hull0.astype(np.uint8), cv2.DIST_L2, 3)
++        near = float((hd[comp] < float(_P.get("occ_net_rim_hug", 0.12)) * W).mean())
++        return near >= float(_P.get("occ_net_rim_frac", 0.6))
++    except Exception:
++        return False
++
++
+ def _occ_net_follow(keep, m, mk, hull, hull0, outside, region, W, prev_cut=None):
+     """v11.2.210 (SDOS-210): all of the object at the mouth. 11.2.209 cut a piece only inside the face's outline taken 8 % in:
+     the lower half of a scoop on the lower lip, and all of a scoop resting on the chin, were painted over with the
+@@ -2341,6 +2453,8 @@
+                     OCCNET_STATS["held"] = OCCNET_STATS.get("held", 0) + 1
+         if seed is None:
+             continue
++        if _rim_active() and _rim_piece(comp, hull0, W):
++            continue
+         if reach > 0:
+             comp = comp & cv2.dilate(seed.astype(np.uint8), cv2.getStructuringElement(
+                 cv2.MORPH_ELLIPSE, (2 * reach + 1, 2 * reach + 1))).astype(bool)
+@@ -2422,12 +2536,23 @@
+             core = (np.abs(xx / float(W) - 0.5) < cx) & (yy / float(W) >= float(_P.get("occ_net_core_y", 0.58)))
+             need = float(_P.get("occ_net_core_min", 0.002)) * W * W
+             n, lab = cv2.connectedComponents(occ.astype(np.uint8), connectivity=8)
++            rim_on = _rim_active()
++            hold_on = float(_P.get("occ_net_hold_core", 0.0) or 0.0) > 0.0 and prev_cut is not None
++            hold = float(_P.get("occ_net_wide_hold", 0.30))
+             for c in range(1, n):
+                 comp = lab == c
+                 if outside is not None and bool((comp & outside).any()):
+                     continue
++                if rim_on and _rim_piece(comp, hull0, W):
++                    OCCNET_STATS["rim"] = OCCNET_STATS.get("rim", 0) + 1
++                    continue
+                 if float((comp & core).sum()) >= need:
+                     keep[comp] = mk[comp]
++                elif hold_on:
++                    ar = float(comp.sum())
++                    if ar >= 0.5 * need and float((comp & prev_cut).sum()) >= hold * ar:
++                        keep[comp] = mk[comp]                    # (cut on the last frame, and still the same piece)
++                        OCCNET_STATS["held"] = OCCNET_STATS.get("held", 0) + 1
+         _occ_net_follow(keep, m, mk, hull, hull0, outside, region, W, prev_cut)          # v11.2.210
+         if bool(occ.any()):
+             core_keep = keep.copy()
+@@ -2914,7 +3039,9 @@
+                         except Exception:
+                             pass
+                     rp = _landmarks_to_aligned(rl, M, size)
+-                    rh = hull_mask(rp, size)
++                    # v11.2.211: a carried face's position is known (it is followed by its own visible part), so the face in front cuts it
++                    # at its outline, dilated less: the crescent of a face coming out from behind lost half of its width to the dilation
++                    rh = hull_mask(rp, size, dilate=(float(_P["rival_dilate_hid"]) if (_hid and float(_P.get("rival_dilate_hid", 0) or 0) > 0) else None))
+                     if rh is not None:
+                         np.maximum(block, rh, out=block)
+                 if float(block.max()) > 0.02:
+@@ -2950,7 +3077,7 @@
+             # rightly sees no face)
+             _yo = _yaw_offset(getattr(face, "kps", None))
+             _wide_now = _wide and not rivals and _yo is not None and _yo < float(_P.get("occ_net_wide_yaw", 0.34))
+-            if track is not None and _wide_now:
++            if track is not None and (_wide_now or float(_P.get("occ_net_hold_core", 0.0) or 0.0) > 0.0):
+                 _pv = getattr(track, "occn_keep", None)
+                 if _pv is not None and getattr(_pv, "shape", None) == (size, size) and float(_pv.min()) < 0.5:
+                     if _flow is not None:
+@@ -2962,6 +3089,7 @@
+                 if _fr is not None and getattr(_fr, "shape", None) == (256, 256):
+                     # (not moved with the flow: the crop is aligned to the face, so the face stays where it is in it)
+                     _rg = _fr > float(_P.get("occ_net_wide_face", 0.4))   # the model saw face here on recent frames
++            _OCC_TL.contact = bool(_partners)             # v11.2.211: the thin-strip rule applies while another face touches this one
+             _nk_early = occ_net_keep(aligned_target, pts, size, M=M, frame_wh=frame_wh,
+                                      raw_out=_raw if (_wide or float(_P.get("occ_instant", 0.0) or 0.0) > 0.0) else None,
+                                      prev_cut=_pc, region=_rg, wide=_wide_now)

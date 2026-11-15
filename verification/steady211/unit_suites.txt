@@ -1,0 +1,106 @@
+== unit176
+PASS 2 people: a whole face turned away (reads as nobody, ~0.13) is kept by elimination, never swapped  [15 of 15, 0 wrong]
+PASS two_elim 0: the v11.2.92 behaviour (that face is refused)  [0 of 15]
+PASS a sliver (its box 0.75 of its last width) is not taken by elimination  [0 of 15]
+PASS against its partner, a face whose points are marked unreliable (maybe a sliver) is not taken by elimination  [0 of 15]
+PASS away from its partner, a blurred whole face (points unreliable) is kept by elimination - a fast step  [15 of 15, 0 wrong]
+PASS a third face in the frame: elimination does not act  [0 of 15, 0 wrong]
+PASS in contact, a face missed for 60 frames is carried while its partner is seen (v11.2.92: 24)  [60 of 60 (contact_follow 0: 24)]
+PASS ...but when both are lost, the v11.2.92 limit stands (no face kept on a guess for long)  [24 of 60]
+PASS a fast step (60 px a frame): the face's points follow the detection (v11.2.92 trailed it)  [lag [0.0, 0.0, 0.0] px (fast_snap 0: [14.3, 15.2, 15.3] px)]
+PASS a still face with detector jitter is smoothed exactly as in v11.2.92  [frame-to-frame jitter 0.65 px out of 2.18 in (v11.2.92 0.65)]
+PASS against its partner, a face that shrank slowly to 0.76 of its width and reads as nobody is not taken by elimination  [0 of 10 taken]
+PASS a crossing: A comes out on the other side and is its own again within a few frames (not carried with B)  [back on call 31 (A reappears on call 30)]
+all checks passed
+== unit176_pipe
+PASS boxes the same size within 3 %: the face in front stays the same (v11.2.92 changed it on every frame)  [0 changes in 60 frames (v11.2.92 rule: 59)]
+PASS a face whose crop reads as its partner is behind, whatever the box size  [False]
+PASS ...and that holds through frames without an identity reading (bigger box, 49 frames)  [0 frames flipped]
+PASS a face not seen (carried on a guess) is never in front of one that is seen  [False]
+PASS the face behind is cut by the face in front, never the other way round  [behind cut by 1, front cut by 0]
+PASS no decision made (contact_follow 0): the v11.2.92 rule, the bigger box in front
+PASS first touch a near tie, then the other face clearly bigger: it is in front from that frame on  [[True, True, True, False, False, False, False, False, False, False]]
+PASS ...but once decided on a clear difference, one contrary frame does not change it  [[False, False, False, False, False, False, False, False, False, False, False, False, False]]
+PASS first touch a near tie, then the face in front shrinks steadily: it goes behind within 2 frames of becoming the smaller  [[True, True, True, True, True, True, True, False, False, False, False, False] (switch at 7; the smaller from index 6)]
+PASS ...while detector jitter that alternates every frame (+-6 % area) never switches it  [0 changes]
+PASS side-view kiss (points of both faces ~15 px apart, boxes apart): both faces kept and each given to its own person  [40 of 40 frames both kept, 40 both right, 0 wrong]
+PASS (without the box test - the points test only - the face behind was merged away or refused)  [0 of 40 both kept, 0 both right]
+PASS two boxes on one face (a cheek box, its centre inside the face's box) are not 'two faces'
+PASS a side-view pair (overlap 0.14, centres outside each other's box) is two faces
+all checks passed
+== unit204
+PASS two faces apart (centres 1.7 face sizes): not contact
+PASS two faces 20 px apart, or overlapping: contact
+PASS frontal (offset 0.10) and 36 deg (0.34): not a side pose
+PASS about 45 deg (0.51) and 60 deg (0.9): side pose
+PASS the same 45 deg face rolled 30 deg (head tilted): still a side pose; a tilted frontal face is not
+PASS one of two faces in a side pose is enough
+PASS switches: smart_keys and side_key_h exist (0 / a higher value restore v11.2.203)
+all checks passed
+== unit209
+PASS the woman alone, the man's Detect picture matching nobody (job DFA984A1): the male replacement is never put on her  [0 calls with the male replacement on her]
+PASS the woman alone, no Detect pictures: the male replacement is never put on her  [0 calls with the male replacement on her]
+PASS ...also when her side view is read as male (side views are not trusted for gender)  [0 calls]
+PASS both on screen, no pictures: the man gets the male replacement at once (as before)  [first at call 0, 0 wrong]
+PASS both on screen, the man's picture matching nobody: he is found by elimination after about 45 sightings (job C77E081B)  [first at call 45, 0 wrong]
+PASS ...also when his gender is read wrong: with the woman found in the same frame, he can only be the man  [first at call 45, 0 wrong]
+PASS ...but a weak detection (score 0.35: maybe not a face) is never taken this way  [first None]
+PASS ...nor with a third face on screen (the picture must decide then)  [first None]
+PASS the man alone after the woman left, facing the camera and read as male: found after a short check  [first at call 11]
+PASS the man alone in a side view: not taken on a guess; found at once when the woman is back in the picture  [alone: None, with her back: True]
+PASS the man alone, read as female: not taken on a guess; found at once when the woman is back  [alone: None, with her back: True]
+PASS a one-person job is not affected (the face is taken at once)
+PASS the first person of a two-person job is taken at once (as before)  [{0: True}]
+all checks passed
+== unit203
+PASS two people far apart: ArcFace skipped on about 2 calls in 3, every face still given to its own person  [40 faces skipped, 20 embedded, 0 wrong assignments]
+PASS two people close (a kiss, a hug): ArcFace runs on every face  [0 skipped]
+PASS a third face in the picture: ArcFace runs on every face  [0 skipped]
+PASS arc_skip 0: every face embedded (v11.2.92)  [0 skipped]
+PASS a face that is not on its person's last box: no reuse
+PASS a new shot with the two people swapped: the skip relabels no later than without it  [wrong frames 1, last wrong 1 (no skip: 0, 0)]
+PASS with insightface's own Face objects the skip works too (normed_embedding comes from embedding)  [16 faces reused]
+PASS round trip: the decrypted file is identical (9.5 MB, 3 chunks)
+PASS the sealed file does not contain the plain bytes
+PASS a changed byte is refused
+PASS a cut file (last chunk missing) is refused
+PASS chunks in another order are refused
+PASS another secret cannot open it
+PASS saved inputs are sealed files (.enc)  [['face0.jpg.enc', 'face1.jpg.enc', 'patch0_frame.jpg.enc', 'patch0_mask.png.enc', 'resume.json', 'video.mp4.enc']]
+PASS the result-ZIP password is not saved
+PASS a restart decrypts the video, faces and patch frames into /tmp, identical to the originals  [/tmp/phoenix_resume/UNIT0203/video.mp4]
+PASS without the secret a sealed job cannot be resumed (and says so), nothing crashes
+PASS without the secret: kept as before (plain), still without the ZIP password  [['face0.jpg', 'face1.jpg', 'patch0_frame.jpg', 'patch0_mask.png', 'resume.json', 'video.mp4']]
+all checks passed
+== unit205
+PASS the app's list [a1..a4]: slot index = position, 0 = unchanged
+PASS a dict of 1-based slot numbers ('1', 'slot2', '#3')
+PASS a JSON string
+PASS out of range is clipped to -1..1; NaN, text and slot 5 are ignored
+PASS nothing, junk or all zeros: off
+PASS 0: lightness and colour unchanged
+PASS brighter +30 %: mid-tones up, black stays black, white stays white, a little less saturated  [L 128 -> 143]
+PASS brighter +100 %: mid-tones up, black stays black, white stays white, a little less saturated  [L 128 -> 168]
+PASS darker -30 %: mid-tones down, order kept (no banding inversions), colour a little deeper  [L 128 -> 113]
+PASS darker -100 %: mid-tones down, order kept (no banding inversions), colour a little deeper  [L 128 -> 77]
+PASS toned keeps the hue (within 3 deg) and moves lightness the right way  [L 135 / 169 / 187]
+PASS no models (colour fallback): the chosen person's face and arm change, the other's do not  [face 22.0 arm 17.7 | other face 0.00 arm 0.00]
+PASS no models: the shirt and the wall are not changed  [shirt 0.00 wall 0.00]
+PASS the summary says which method ran  [SKIN-TONE: skin: face-colour model (unit test: no model); person: way from each face only (unit test: no model); 1 frames, 116 ms a frame (s]
+PASS a chosen person not found keeps their tone 12 frames, fading, then none (no sudden flash)  [21.0 20.0 18.0 17.0 15.0 13.0 ... 0.0]
+PASS a shot cut forgets the last place at once
+PASS nothing chosen: the frame is the same object, untouched
+PASS a broken record never stops the job (frame returned as is)
+PASS preview: a mask for the chosen person only, and its share  [{"2": 0.0312}]
+PASS the job settings keep skin_tone
+PASS the adapter turns it into a plain list of 4, or None when all natural
+PASS no Detect references: slots left to right (the job's own start)
+PASS with Detect references: each slot to its own person, whatever the position
+PASS one reference: that slot by identity, the other gets the remaining face
+PASS with the replacement faces (1 a woman, 2 a man), no references: #1 on the woman although she is on the right (as the job paired them on the layered scene)  [the replacement faces' gender]
+PASS a Detect reference outranks gender (#1 captured as the man)
+PASS without the replacement faces: left to right, and says so
+PASS two men, no references: the first man from the left gets #1 (the job pairs same-gender people at the clip's start)
+PASS submit_video takes skin_tone and puts it in the job
+PASS a job resumed after a restart still has its skin tone
+all checks passed

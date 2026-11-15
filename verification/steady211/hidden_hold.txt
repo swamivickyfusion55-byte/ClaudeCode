@@ -1,0 +1,21 @@
+== smooch
+carried on 65 frames ({'frames': 65, 'ref': 66, 'flow': 66, 'entered': 1, 'handed': 1, 'hidden': 59})
+on those frames: detector mean 30.7 px, worst 42.4 px | carried mean 12.3 px, worst 12.7 px
+all frames with 30 % or more of the face visible: detector mean 18.5 px, worst 42.4 px | carried mean 8.6 px, worst 12.7 px
+largest change of the offset from one frame to the next: detector 7.4 px | carried 4.2 px
+wobble of the carried points (a frame minus the median of its 5 neighbours): mean 0.34 px, 90th 0.64 px, worst 1.23 px (65 frames)
+apart (97 % or more visible): carried on 0 of 8 frames (must be 0)
+== hide
+carried on 72 frames ({'frames': 72, 'ref': 73, 'flow': 26, 'shift': 47, 'entered': 1, 'handed': 1, 'hidden': 63})
+on those frames: detector mean 44.8 px, worst 63.6 px | carried mean 9.5 px, worst 13.0 px
+all frames with 30 % or more of the face visible: detector mean 28.5 px, worst 63.6 px | carried mean 7.3 px, worst 13.0 px
+largest change of the offset from one frame to the next: detector 8.3 px | carried 2.5 px
+wobble of the carried points (a frame minus the median of its 5 neighbours): mean 0.13 px, 90th 0.48 px, worst 1.78 px (72 frames)
+apart (97 % or more visible): carried on 0 of 21 frames (must be 0)
+== cross
+carried on 41 frames ({'frames': 41, 'ref': 17, 'flow': 15, 'shift': 2, 'coast': 25, 'entered': 1, 'hidden': 33, 'lost': 1})
+on those frames: detector mean 64.3 px, worst 156.5 px | carried mean 12.3 px, worst 23.6 px
+all frames with 30 % or more of the face visible: detector mean 15.4 px, worst 156.5 px | carried mean 5.9 px, worst 23.6 px
+largest change of the offset from one frame to the next: detector 106.9 px | carried 3.8 px
+wobble of the carried points (a frame minus the median of its 5 neighbours): mean 0.09 px, 90th 0.14 px, worst 1.22 px (41 frames)
+apart (97 % or more visible): carried on 0 of 48 frames (must be 0)

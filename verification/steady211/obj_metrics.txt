@@ -1,0 +1,18 @@
+o206_hand_eye hand_eye: trail - face just left by the object still not swapped: mean 62.1% worst 76.5% (12 frames)
+o206_hand_eye hand_eye: object painted over - entering (frames 20-23) 5.4%, first full frame 2.1%, holding mean 3.8% worst 5.0%; rest of the face swapped 45% before, 45% during; reverted frames 0
+o210_hand_eye hand_eye: trail - face just left by the object still not swapped: mean 63.9% worst 76.0% (12 frames)
+o210_hand_eye hand_eye: object painted over - entering (frames 20-23) 4.6%, first full frame 0.0%, holding mean 0.0% worst 0.0%; rest of the face swapped 45% before, 45% during; reverted frames 0
+o211_hand_eye hand_eye: trail - face just left by the object still not swapped: mean 62.9% worst 75.8% (12 frames)
+o211_hand_eye hand_eye: object painted over - entering (frames 20-23) 4.6%, first full frame 0.0%, holding mean 0.1% worst 0.3%; rest of the face swapped 45% before, 45% during; reverted frames 0
+o206_cup_cheek cup_cheek: trail - face just left by the object still not swapped: mean 60.2% worst 66.7% (4 frames)
+o206_cup_cheek cup_cheek: object painted over - entering (frames 20-23) 0.9%, first full frame 2.1%, holding mean 1.1% worst 2.1%; rest of the face swapped 45% before, 36% during; reverted frames 0
+o210_cup_cheek cup_cheek: trail - face just left by the object still not swapped: mean 60.8% worst 66.7% (4 frames)
+o210_cup_cheek cup_cheek: object painted over - entering (frames 20-23) 0.9%, first full frame 0.8%, holding mean 0.2% worst 0.8%; rest of the face swapped 45% before, 43% during; reverted frames 0
+o211_cup_cheek cup_cheek: trail - face just left by the object still not swapped: mean 60.9% worst 67.3% (4 frames)
+o211_cup_cheek cup_cheek: object painted over - entering (frames 20-23) 0.8%, first full frame 0.8%, holding mean 0.2% worst 0.8%; rest of the face swapped 45% before, 43% during; reverted frames 0
+o206_hand_sweep hand_sweep: trail - face just left by the object still not swapped: mean 78.3% worst 100.0% (40 frames)
+o206_hand_sweep hand_sweep: object painted over - entering (frames 20-23) 3.2%, first full frame 0.9%, holding mean 1.0% worst 3.7%; rest of the face swapped 45% before, 34% during; reverted frames 0
+o210_hand_sweep hand_sweep: trail - face just left by the object still not swapped: mean 76.3% worst 100.0% (40 frames)
+o210_hand_sweep hand_sweep: object painted over - entering (frames 20-23) 1.0%, first full frame 0.9%, holding mean 0.7% worst 3.6%; rest of the face swapped 45% before, 40% during; reverted frames 1
+o211_hand_sweep hand_sweep: trail - face just left by the object still not swapped: mean 76.4% worst 100.0% (40 frames)
+o211_hand_sweep hand_sweep: object painted over - entering (frames 20-23) 1.1%, first full frame 0.8%, holding mean 0.7% worst 3.6%; rest of the face swapped 45% before, 40% during; reverted frames 1

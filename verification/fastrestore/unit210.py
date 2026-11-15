@@ -86,6 +86,8 @@ def lick_numbers(E, res):
 
 OFF = {"eat_mouth": 1.0, "occ_net_lo": 0.5, "occ_net_hi": 1.0, "occ_net_follow": 0.0, "occ_net_below": 0.0, "occ_face_forget": 0.15,
        "contact_side": 0}
+if "lmk_smooth" in E0._P:                       # (v11.2.211's own switches too: off for the "equals v11.2.209" check)
+    OFF.update({"lmk_smooth": 0.0, "occ_net_rim": 0.0, "occ_net_hold_core": 0.0})
 r9 = run_lick(E9, {}); r0off = run_lick(E0, OFF); r0 = run_lick(E0, {})
 dmax = max(float(np.abs(a[0] - b[0]).max()) for a, b in zip(r9, r0off))
 check("the new switches off: v11.2.210's mask equals v11.2.209's on all %d frames of the eating clip" % len(r9), dmax < 1e-6, "largest difference %.2e" % dmax)

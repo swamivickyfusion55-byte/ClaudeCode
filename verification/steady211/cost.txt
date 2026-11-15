@@ -1,0 +1,8 @@
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+model ignore: /root/.insightface/models/buffalo_l/genderage.onnx genderage
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+model ignore: /root/.insightface/models/buffalo_l/w600k_r50.onnx recognition
+set det-size: (640, 640)
+v11.2.209: the face mask on the eating clip (object at the mouth on most frames): 185.2 ms per face-frame (median), 187.6 mean
+v11.2.210: the face mask on the eating clip (object at the mouth on most frames): 176.7 ms per face-frame (median), 178.4 mean
+v11.2.210: the carry step per frame of a two-person job - faces apart 0.09 ms, while a face is carried 8.8 ms (median; 55 and 65 frames)
