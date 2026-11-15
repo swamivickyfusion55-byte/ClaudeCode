@@ -1,0 +1,8 @@
+c209 smooch: A's paint left visible on B: mean 3476 px (1.7 % of B's area), worst frame 27833 px (frame 34) | B's paint on A's visible area: mean 3371 px, worst 4944
+g210 smooch: A's paint left visible on B: mean 4292 px (2.1 % of B's area), worst frame 16564 px (frame 32) | B's paint on A's visible area: mean 3359 px, worst 4944
+c209 pkiss: A's paint left visible on B: mean 130 px (0.2 % of B's area), worst frame 589 px (frame 24) | B's paint on A's visible area: mean 170 px, worst 682
+g210 pkiss: A's paint left visible on B: mean 549 px (0.8 % of B's area), worst frame 1074 px (frame 63) | B's paint on A's visible area: mean 27 px, worst 77
+c209 hide: A's paint left visible on B: mean 4920 px (2.4 % of B's area), worst frame 26190 px (frame 30) | B's paint on A's visible area: mean 3735 px, worst 4528
+h210 hide: A's paint left visible on B: mean 9820 px (4.9 % of B's area), worst frame 15600 px (frame 29) | B's paint on A's visible area: mean 3731 px, worst 4528
+c209 cross: A's paint left visible on B: mean 7495 px (3.7 % of B's area), worst frame 29794 px (frame 45) | B's paint on A's visible area: mean 1051 px, worst 2929
+h210 cross: A's paint left visible on B: mean 5249 px (2.6 % of B's area), worst frame 22016 px (frame 45) | B's paint on A's visible area: mean 1054 px, worst 2929

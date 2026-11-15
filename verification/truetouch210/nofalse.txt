@@ -1,0 +1,8 @@
+  as it is         6 faces: the newer pack cuts more than v11.2.205 on at most 0.00% of a face (worst frame)
+  camera noise     6 faces: the newer pack cuts more than v11.2.205 on at most 0.00% of a face (worst frame)
+  blurred          6 faces: the newer pack cuts more than v11.2.205 on at most 0.00% of a face (worst frame)
+  darker           6 faces: the newer pack cuts more than v11.2.205 on at most 0.00% of a face (worst frame)
+  brighter         6 faces: the newer pack cuts more than v11.2.205 on at most 0.00% of a face (worst frame)
+  JPEG quality 25  6 faces: the newer pack cuts more than v11.2.205 on at most 0.00% of a face (worst frame)
+PASS 36 face runs, nothing in front: the newer pack cuts no more of any face than v11.2.205 (at most 1 % of it, on its worst frame)  [worst 0.00% of a face]
+all checks passed

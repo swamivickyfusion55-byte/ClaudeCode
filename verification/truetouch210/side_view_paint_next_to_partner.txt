@@ -1,0 +1,2 @@
+c209 pkiss A, frames 30-99: within 8 px 12-15 % (mean 13) | 8-20 px 13-16 % (mean 14) | 20-40 px 16-25 % (mean 20)
+g210 pkiss A, frames 30-99: within 8 px 55-76 % (mean 64) | 8-20 px 70-86 % (mean 75) | 20-40 px 83-96 % (mean 89)

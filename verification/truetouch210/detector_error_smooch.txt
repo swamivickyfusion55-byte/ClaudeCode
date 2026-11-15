@@ -1,0 +1,31 @@
+frame | A: share visible, detector's 5-point error (px), box width, score | B: the same
+  0 | A share  97% err   5.8 w  319 sc 0.82 | B share  97% err   5.0 w  293 sc 0.78
+  4 | A share  93% err   6.1 w  314 sc 0.81 | B share 100% err   4.0 w  299 sc 0.75
+  8 | A share  99% err   6.7 w  317 sc 0.83 | B share  93% err   6.2 w  292 sc 0.80
+ 12 | A share  93% err   6.5 w  311 sc 0.83 | B share  97% err   4.3 w  294 sc 0.77
+ 16 | A share  85% err   3.9 w  300 sc 0.79 | B share 100% err   2.6 w  302 sc 0.76
+ 20 | A share  84% err   6.5 w  319 sc 0.84 | B share  93% err   4.9 w  293 sc 0.81
+ 24 | A share  74% err   9.4 w  315 sc 0.82 | B share  97% err   3.9 w  299 sc 0.77
+ 28 | A share  62% err   8.1 w  278 sc 0.74 | B share 100% err   3.7 w  308 sc 0.77
+ 32 | A share  60% err  10.2 w  291 sc 0.76 | B share  93% err   3.8 w  295 sc 0.79
+ 36 | A share  47% err  18.6 w  267 sc 0.60 | B share  97% err   3.2 w  299 sc 0.79
+ 40 | A share  34% err  43.8 w  242 sc 0.61 | B share 100% err   3.1 w  302 sc 0.74
+ 44 | A share  39% err  42.2 w  250 sc 0.62 | B share  93% err   4.5 w  290 sc 0.80
+ 48 | A share  38% err  39.9 w  252 sc 0.63 | B share  97% err   3.5 w  295 sc 0.77
+ 52 | A share  36% err  39.5 w  249 sc 0.63 | B share 100% err   3.8 w  300 sc 0.74
+ 56 | A share  40% err  40.0 w  253 sc 0.61 | B share  93% err   4.6 w  289 sc 0.80
+ 60 | A share  36% err  44.5 w  241 sc 0.63 | B share  97% err   3.2 w  295 sc 0.77
+ 64 | A share  35% err  41.3 w  246 sc 0.63 | B share 100% err   3.4 w  301 sc 0.74
+ 68 | A share  42% err  38.4 w  249 sc 0.62 | B share  93% err   5.2 w  289 sc 0.79
+ 72 | A share  36% err  44.5 w  241 sc 0.63 | B share  97% err   3.2 w  296 sc 0.77
+ 76 | A share  33% err  44.2 w  240 sc 0.62 | B share 100% err   3.0 w  302 sc 0.74
+ 80 | A share  41% err  38.2 w  255 sc 0.63 | B share  93% err   5.1 w  288 sc 0.80
+ 84 | A share  47% err  18.0 w  268 sc 0.59 | B share  97% err   3.3 w  299 sc 0.80
+ 88 | A share  53% err  15.0 w  269 sc 0.74 | B share 100% err   3.2 w  303 sc 0.78
+ 92 | A share  68% err   8.9 w  302 sc 0.80 | B share  93% err   3.3 w  298 sc 0.80
+ 96 | A share  74% err   9.5 w  315 sc 0.82 | B share  97% err   3.8 w  299 sc 0.77
+100 | A share  78% err   4.8 w  309 sc 0.80 | B share 100% err   2.8 w  305 sc 0.79
+104 | A share  91% err   4.1 w  311 sc 0.85 | B share  93% err   4.2 w  294 sc 0.79
+108 | A share  93% err   6.3 w  312 sc 0.83 | B share  97% err   4.0 w  294 sc 0.77
+112 | A share  93% err   6.8 w  308 sc 0.80 | B share 100% err   2.8 w  303 sc 0.77
+116 | A share 100% err   5.2 w  323 sc 0.84 | B share  93% err   6.2 w  289 sc 0.73

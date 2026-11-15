@@ -4522,6 +4522,7 @@ class _HiddenHold:
     def reset(self):
         self.prev = None          # (g, picture) of the frame before
         self.prev_lmk = {}        # slot -> outline on that frame (the faces in front, for the flow)
+        self.prev_kc = {}         # slot -> centre of its 5 points on that frame
         self.trust = {}           # slot -> (g, kps, lmk, bbox): the last position taken from the detector as it is
         self.act = {}             # slot -> the face being carried
         self.over = {}            # g -> {slot: (kps, bbox, lmk)}
@@ -4540,7 +4541,7 @@ class _HiddenHold:
 
     def cut(self):
         """A shot change: nothing is carried across it."""
-        self.prev, self.prev_lmk, self.trust, self.act, self.mem = None, {}, {}, {}, {}
+        self.prev, self.prev_lmk, self.prev_kc, self.trust, self.act, self.mem = None, {}, {}, {}, {}, {}
 
     def apply(self, records, g):
         """The carried position of every face being carried on frame g, written into a copy of its record."""
@@ -4655,27 +4656,51 @@ class _HiddenHold:
                     self.stats[kind] += 1
                     followed = True
                 else:
-                    # nothing of it to follow: on with its own last motion - a head keeps moving - for 12 frames, then
-                    # dying away
+                    # Nothing of it to follow. How the face in front moved since the last frame:
+                    vf = np.zeros(2, np.float32)
+                    if prev is not None:
+                        d_ = [records[f_]["kps"].mean(0) - self.prev_kc[f_] for f_ in fronts if f_ in self.prev_kc]
+                        if d_:
+                            vf = np.mean(np.asarray(d_, np.float32), axis=0).astype(np.float32)
                     v = st["vel"]
-                    if st.get("coast", 0) == 0:
-                        st["v0"], st["T_cv"] = v.copy(), st["T"].copy()
-                    v0 = st["v0"]
-                    st["T_cv"] = _hh_compose(np.float32([[1, 0, v0[0]], [0, 1, v0[1]]]), st["T_cv"])    # (speed kept)
-                    st["T"] = _hh_compose(np.float32([[1, 0, v[0]], [0, 1, v[1]]]), st["T"])
-                    st["coast"] = st.get("coast", 0) + 1
-                    if st["coast"] > 12:
-                        st["vel"] = (v * 0.90).astype(np.float32)
+                    fw0 = float(max(8.0, np.ptp(k_before[:, 0]) * 2.2))
+                    if float(np.linalg.norm(v - vf)) <= float(P.get("hid_rel", 0.02)) * fw0:
+                        # it was not moving against the face in front (a kiss, a hug): it stays with that face
+                        st["T"] = _hh_compose(np.float32([[1, 0, vf[0]], [0, 1, vf[1]]]), st["T"])
+                        st["vel"] = (0.5 * v + 0.5 * vf).astype(np.float32)
+                        st["coast"] = st.get("coast", 0) + 1
+                        st["T_cv"] = None
+                    else:
+                        # it was moving against it (passing behind): on with its own last motion - a head keeps moving
+                        if st.get("drift", 0) == 0:
+                            st["v0"], st["T_cv"] = v.copy(), st["T"].copy()
+                        v0 = st["v0"]
+                        st["T_cv"] = _hh_compose(np.float32([[1, 0, v0[0]], [0, 1, v0[1]]]), st["T_cv"])    # (speed kept)
+                        st["T"] = _hh_compose(np.float32([[1, 0, v[0]], [0, 1, v[1]]]), st["T"])
+                        st["coast"] = st.get("coast", 0) + 1
+                        st["drift"] = st.get("drift", 0) + 1
+                        if st["drift"] > int(P.get("hid_lost", 5)) and not st.get("leaving"):
+                            # ...but not on a guess for long: the job's own rules take it back, over a few frames (no
+                            # jump), as in 11.2.209, until it is clear of the other face again
+                            st["leaving"] = 1
+                            self.stats["lost"] += 1
                     self.stats["coast"] += 1
-            if not followed and st.get("coast", 0) > int(P.get("hid_lost", 5)):
-                # nothing of it followed for this long (it is all but gone behind the other face): no guessing on - the job's
-                # own rules place it, as in 11.2.209, until it is clear of the other face again
-                del self.act[slot]
-                self.stats["lost"] += 1
-                continue
             kps, bbox, lmk = self._geom(st)
+            if st.get("leaving"):
+                wgt = st["leaving"] / 6.0
+                st["leaving"] += 1
+                st["g"] = g
+                if wgt >= 1.0:
+                    del self.act[slot]
+                    continue
+                out[slot] = ((kps * (1 - wgt) + rec["kps"] * wgt).astype(np.float32),
+                             (bbox * (1 - wgt) + rec["bbox"] * wgt).astype(np.float32),
+                             (lmk * (1 - wgt) + rec["lmk"] * wgt).astype(np.float32)
+                             if (rec.get("lmk") is not None and rec["lmk"].shape == lmk.shape) else lmk.copy())
+                self.stats["frames"] += 1
+                continue
             if followed:
-                st["coast"], st["T_cv"] = 0, None
+                st["coast"], st["drift"], st["T_cv"] = 0, 0, None
                 st["vel"] = (0.5 * st["vel"] + 0.5 * (kps.mean(0) - k_before.mean(0))).astype(np.float32)
             st["g"] = g
             st["gone"] = 0
@@ -4721,6 +4746,7 @@ class _HiddenHold:
             self.stats["frames"] += 1
         self.prev = (g, frame)
         self.prev_lmk = {s: (r["lmk"].copy() if r.get("lmk") is not None else None) for s, r in records.items()}
+        self.prev_kc = {s: np.asarray(r["kps"], np.float32).mean(0) for s, r in records.items() if r.get("kps") is not None}
         if out:
             self.over[g] = out
         if len(self.over) > 1200:

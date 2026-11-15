@@ -1,0 +1,6 @@
+c209 smooch: frames with under 70 % of A visible: 69 | A's visible face painted, against the same part with the faces apart: mean 0.67, lowest frame 0.54, frames under 0.70: 46, under 0.40: 0 | largest change in one frame 0.10
+g210 smooch: frames with under 70 % of A visible: 69 | A's visible face painted, against the same part with the faces apart: mean 0.90, lowest frame 0.85, frames under 0.70: 0, under 0.40: 0 | largest change in one frame 0.05
+c209 hide: frames with under 70 % of A visible: 73 | A's visible face painted, against the same part with the faces apart: mean 0.91, lowest frame 0.72, frames under 0.70: 0, under 0.40: 0 | largest change in one frame 0.09
+h210 hide: frames with under 70 % of A visible: 73 | A's visible face painted, against the same part with the faces apart: mean 0.97, lowest frame 0.90, frames under 0.70: 0, under 0.40: 0 | largest change in one frame 0.07
+c209 cross: frames with under 70 % of A visible: 40 | A's visible face painted, against the same part with the faces apart: mean 0.83, lowest frame 0.66, frames under 0.70: 6, under 0.40: 0 | largest change in one frame 0.25
+h210 cross: frames with under 70 % of A visible: 40 | A's visible face painted, against the same part with the faces apart: mean 0.83, lowest frame 0.67, frames under 0.70: 4, under 0.40: 0 | largest change in one frame 0.13

@@ -1,0 +1,12 @@
+== unit206 hand_eye (v11.2.205 against v11.2.210)
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.044 vs 0.937; the whole object 0.052 vs 0.930]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.52 %, worst frame 5.12 %]
+all checks passed
+== unit206 cup_cheek (v11.2.205 against v11.2.210)
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.004 vs 0.673; the whole object 0.055 vs 0.750]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.66 %, worst frame 1.93 %]
+all checks passed

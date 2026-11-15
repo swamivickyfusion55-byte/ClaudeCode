@@ -1,0 +1,20 @@
+PASS the new switches off: v11.2.210's mask equals v11.2.209's on all 150 frames of the eating clip  [largest difference 0.00e+00]
+PASS a valid mask (0-1, finite) on every frame
+PASS the scoop on the lips: the replacement's lips stay on (0.80 or more of the lips not under it; v11.2.209 showed the footage's own)  [v11.2.210 0.90, v11.2.209 0.03]
+PASS between licks (the scoop under the lips): the lips fully the replacement's (0.95 or more; v11.2.209 faded them in and out)  [lowest: v11.2.210 0.95, v11.2.209 0.00]
+PASS the mouth does not change between the two people from one frame to the next (lips paint changes by under 0.15)  [largest change: v11.2.210 0.09, v11.2.209 0.61]
+PASS the scoop over the face is not painted over while it is on the lips (under 0.05)  [v11.2.210 0.01, v11.2.209 0.15]
+PASS ...nor while it rests on the chin, under the lips (under 0.15; v11.2.209 painted the chin over it)  [v11.2.210 0.08, v11.2.209 0.76]
+PASS with nothing at the mouth the lips are fully painted  [1.000]
+PASS the side-view clip's two faces are found apart and are side views (nose offset 0.45 or more)  [offsets 0.83, 0.93]
+PASS side-view partners, the face behind: no paint on the partner's side of the line  [largest paint there 0.000 (without the rule 0.000)]
+PASS side-view partners, the face behind: its own side painted as without a partner (within 3 %)  [18490 vs 18490]
+PASS side-view partners, the face behind: the occlusion model's cut is not run (it takes either face for the face there)  [calls with a partner 0, without 1]
+PASS side-view partners, the face in front: no paint on the partner's side of the line  [largest paint there 0.000 (without the rule 0.000)]
+PASS side-view partners, the face in front: its own side painted as without a partner (within 3 %)  [15768 vs 15768]
+PASS side-view partners, the face in front: the occlusion model's cut is not run (it takes either face for the face there)  [calls with a partner 0, without 1]
+PASS a front-view partner: the mask is as without the rule, and the occlusion model's cut runs  [largest difference 0.00e+00, calls 1]
+PASS the line between two faces of the same size lies midway: own side painted, the partner's not  [at own centre 1.00, midway 0.50, partner 0.00]
+PASS cover of an outline by one shifted half its width is 0.5; apart, 0
+PASS a least-squares similarity recovers a turn of 12 deg, a size change of 7 % and a shift exactly
+all checks passed

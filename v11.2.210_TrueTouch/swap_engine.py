@@ -285,7 +285,8 @@ _P = {
     "hid_enter": 0.15,       # ...and from this share on the detector's reading is not used at all (in between: less and less)
     "hid_pull": 0.5,         # how hard the detector's reading pulls per frame while it is still trusted
     "hid_deep": 0.60,        # with this share covered, frame-to-frame motion is not used (only the reference, or the face's last motion)
-    "hid_lost": 5,           # frames without anything of the face followed before it is left to the job's own rules again
+    "hid_lost": 5,           # a face passing behind another: frames on its own last motion before the job's own rules take it back
+    "hid_rel": 0.02,         # ...passing = moving against the face in front by this much a frame (face widths); else it stays with that face
     "rival_forehead": 0.32,  # for such a face, the face in front cuts with its forehead too (its outline ends at the brows): this share of the outline's height on top
     "rival_feather_hid": 0.05,  # ...and with a shorter soft edge (the position is exact now; 11.2.209's 0.09 ate into a narrow visible strip)
     "contact_side_bias": 0.04,  # side-view pairs: the line lies this far (fraction of the crop) on the side of the face behind - the lips and nose that meet belong to the face in front

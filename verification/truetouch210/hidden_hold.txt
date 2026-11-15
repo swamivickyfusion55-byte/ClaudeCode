@@ -1,0 +1,18 @@
+== smooch
+carried on 65 frames ({'frames': 65, 'ref': 66, 'flow': 66, 'entered': 1, 'handed': 1, 'hidden': 59})
+on those frames: detector mean 30.7 px, worst 42.4 px | carried mean 12.2 px, worst 12.6 px
+all frames with 30 % or more of the face visible: detector mean 18.5 px, worst 42.4 px | carried mean 8.5 px, worst 12.7 px
+largest change of the offset from one frame to the next: detector 7.4 px | carried 4.3 px
+apart (97 % or more visible): carried on 0 of 8 frames (must be 0)
+== hide
+carried on 72 frames ({'frames': 72, 'ref': 73, 'flow': 26, 'shift': 47, 'entered': 1, 'handed': 1, 'hidden': 63})
+on those frames: detector mean 44.8 px, worst 63.6 px | carried mean 14.0 px, worst 17.5 px
+all frames with 30 % or more of the face visible: detector mean 28.5 px, worst 63.6 px | carried mean 10.0 px, worst 17.5 px
+largest change of the offset from one frame to the next: detector 8.3 px | carried 2.5 px
+apart (97 % or more visible): carried on 0 of 21 frames (must be 0)
+== cross
+carried on 26 frames ({'frames': 26, 'ref': 16, 'flow': 16, 'coast': 11, 'entered': 1, 'hidden': 18, 'lost': 1})
+on those frames: detector mean 43.9 px, worst 100.7 px | carried mean 15.4 px, worst 83.6 px
+all frames with 30 % or more of the face visible: detector mean 15.4 px, worst 156.5 px | carried mean 13.8 px, worst 156.5 px
+largest change of the offset from one frame to the next: detector 106.9 px | carried 106.9 px
+apart (97 % or more visible): carried on 0 of 48 frames (must be 0)
