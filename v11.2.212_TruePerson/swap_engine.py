@@ -237,6 +237,7 @@ _P = {
     "id_gender_agree": 0.70,         # (a clean reading of this person's gender this likely overrides that memory)
     "id_gender_decay": 0.90,         # the evidence on a bound person: decayed sum of log-odds over clean views...
     "id_gender_unbind": 9.0,         # ...at this much against (about 3 clean frames) the person is unbound and found again
+    "id_gender_own_sim": 0.40,       # (the bound person's face: where expected AND this like their learnt look, more than anyone else's)
     "id_gender_found": 0.95,         # found by gender: the only person of that gender, and the only face on screen read as it...
     "id_gender_found_calls": 3,      # ...on this many detections in a row (clean views, this probable)...
     "id_gender_found_ref": 0.10,     # ...and not unlike their own Detect picture (a picture sim under this: someone else)
@@ -3809,11 +3810,30 @@ class MultiFaceTracker:
                         ev = np.asarray(e, np.float32).reshape(-1)
                         if max(float(np.dot(ev, b)) for b in bad) >= msim:
                             out[i][j] = True
-            # the bound person's own face (where the track expects it), read on a clean view
+            # the bound person's own face (where the track expects it, AND looking like the person bound - their learnt look - more
+            # than like anyone else bound), read on a clean view. Where it is expected is not enough: while she is hidden behind him,
+            # the only face found where she was is his, and his gender is no evidence against her binding (found on the hug clip).
             if not (tr.established and tr.match_bbox is not None):
                 continue
-            own = [j for j in range(m) if clean[j] is not None
-                   and (_iou(tr.match_bbox, faces[j].bbox) >= 0.3 or _cdist_norm(tr.match_bbox, faces[j].bbox) < 0.5)]
+            look = self._look(s)
+            if look is None:
+                continue
+            others = [lk for lk in (self._look(s2) for s2 in slots if s2 != s) if lk is not None]
+            osim = float(_P.get("id_gender_own_sim", 0.40))
+            own = []
+            for j in range(m):
+                if clean[j] is None or not (_iou(tr.match_bbox, faces[j].bbox) >= 0.3
+                                            or _cdist_norm(tr.match_bbox, faces[j].bbox) < 0.5):
+                    continue
+                e = getattr(faces[j], "normed_embedding", None)
+                if e is None:
+                    continue
+                ev = np.asarray(e, np.float32).reshape(-1)
+                ev = ev / (float(np.linalg.norm(ev)) + 1e-6)
+                cs = float(np.dot(ev, look)) if ev.size == look.size else -1.0
+                if cs < osim or any(ev.size == lk.size and float(np.dot(ev, lk)) >= cs for lk in others):
+                    continue
+                own.append(j)
             if not own:
                 continue
             j = max(own, key=lambda jj: _iou(tr.match_bbox, faces[jj].bbox))
@@ -3837,6 +3857,21 @@ class MultiFaceTracker:
                 logging.info("person %s: bound to a face that reads as a %s on clean views (P %.2f) - let go, to be found again",
                              s + 1 if isinstance(s, int) else s, "man" if G == 0 else "woman", pc)
         return out
+
+    def _look(self, s):
+        """v11.2.212: the learnt look of slot s (its identity lock, else its running embedding), unit length; None if not bound."""
+        t = self.tracks[s]
+        v = getattr(t, "id_lock", None)
+        if v is None:
+            v = t.emb
+        if v is None:
+            return None
+        try:
+            v = np.asarray(v, np.float32).reshape(-1)
+            n = float(np.linalg.norm(v))
+            return v / n if n > 1e-6 else None
+        except Exception:
+            return None
 
     def _has_id(self, s):
         t = self.tracks[s]

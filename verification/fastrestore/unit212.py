@@ -155,6 +155,18 @@ p2, T = run(E2, fr, refs={0: eW, 1: eM})
 check("the ordinary case (good pictures, both clean): every frame painted, none refused", right(p2) == 160 and T.gender_refused_n == 0,
       "%d right of 160, %d refused" % (right(p2), T.gender_refused_n))
 
+# 8b. A hug (found on the bench's hug clip): she goes behind him and is not detected, while his face - alone, front, clean, a man -
+# is where she was. That is HIS face, not hers read as a man: her binding is kept, and she is painted again the frame she is back.
+fr = [[face("W", 400), face("M", 900)] for _ in range(20)]
+fr += [[face("W", 400, p_male=0.5), face("M", 900 - 38 * k, p_male=0.5)] for k in range(1, 11)]      # coming together (contact)
+fr += [[face("M", 410)] for _ in range(15)]                                                         # she is behind him, he is where she was
+fr += [[face("W", 400), face("M", 900)] for _ in range(20)]
+p2, T = run(E2, fr, refs={0: eW, 1: eM})
+back = p2[45:]
+check("a hug: her hidden, his face alone where she was - she is NOT let go, and has hers the frame she is back",
+      T.gender_unbound_n == 0 and back[0].get(0) == "W" and all(p.get(0) == "W" for p in back) and wrong(p2) == 0,
+      "let go %d, after: %s, wrong %d" % (T.gender_unbound_n, [p.get(0) for p in back[:4]], wrong(p2)))
+
 # 9. The app's genders as they arrive
 sys.path.insert(0, P212)
 import types
