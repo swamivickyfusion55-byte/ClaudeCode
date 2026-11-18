@@ -76,6 +76,11 @@ own = {}
 for p in range(2):
     early = [s for s in sims[p][:10] if s is not None]
     own[p] = int(np.argmax(np.bincount([int(s[1] > s[0]) for s in early], minlength=2))) if early else p
+if os.environ.get("IDC_INTENDED"):
+    # v11.2.212: the replacement each person SHOULD get (e.g. "1,0": A photo B, B photo A), instead of the one they got on the first
+    # frames - a person hidden at the start (a later part of a split video) has no first frames, and a mix-up from the first frame
+    # on would otherwise count as 'correct'
+    own = {i: int(v) for i, v in enumerate(os.environ["IDC_INTENDED"].split(","))}
 for p in range(2):
     for t in range(n):
         s = sims[p][t]
