@@ -1,0 +1,551 @@
+diff -ru -x __pycache__ -x SDOS-212_TruePerson.md v11.2.211_Steady/config.py v11.2.212_TruePerson/config.py
+--- v11.2.211_Steady/config.py	2026-11-15 14:57:37.452980008 +0000
++++ v11.2.212_TruePerson/config.py	2026-11-18 01:30:13.832275526 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.211"
+-BUILD = "Steady · the face outline and the line where one face lies over another no longer shake with the detector (landmarks smoothed in the face's own frame, a face going behind another filtered) · TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.212"
++BUILD = "TruePerson · each person's gender as confirmed in the app's Detect step is used again: a face that reads as the other gender on a clean front view (or looks like one that did) never gets that person's replacement, a person bound to such a face is let go and found again; the Space keeps the gender model's own certainty · Steady · the face outline and the line where one face lies over another no longer shake with the detector (landmarks smoothed in the face's own frame, a face going behind another filtered) · TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru -x __pycache__ -x SDOS-212_TruePerson.md v11.2.211_Steady/core_pipeline.py v11.2.212_TruePerson/core_pipeline.py
+--- v11.2.211_Steady/core_pipeline.py	2026-11-15 18:49:46.887332297 +0000
++++ v11.2.212_TruePerson/core_pipeline.py	2026-11-18 01:30:03.146540255 +0000
+@@ -2359,6 +2359,12 @@
+                 use_gpu = False
+                 target = "cpu"
+                 _fa = _mk_fa(prov, -1)
++    # v11.2.212 (SDOS-212): keep the gender model's own score on each face (the gender gate reads how sure it is)
++    try:
++        if _E._install_gender_score(_fa):
++            logging.info("gender model: its score kept on each face (gender gate, SDOS-212)")
++    except Exception as _ge:
++        logging.debug("gender score not installed: %s", _ge)
+ 
+     # THE weights are not a pinned dependency. Everything else this build runs
+     # on is frozen in requirements.txt; inswapper_128.onnx is fetched from
+@@ -3292,6 +3298,22 @@
+     return sorted(_as_face_list(faces), key=lambda f: _xyxy(f)[0])
+ 
+ 
++def _parse_person_gender(v):
++    """settings.person_gender (the app sends one entry per slot: 0 = woman, 1 = man, null = not known - the letter shown under each
++    Detect face, which the user can tap to correct) -> [0 / 1 / None] x 4. v11.2.141 used it; it was lost when the engine was
++    rebuilt on 11.2.92, and v11.2.212 uses it again (SDOS-212)."""
++    try:
++        import json
++        if isinstance(v, str):
++            v = json.loads(v) if v.strip() else []
++        out = []
++        for x in list(v or [])[:4]:
++            out.append(int(x) if (x in (0, 1) and not isinstance(x, bool)) or str(x) in ("0", "1") else None)
++        return out + [None] * (4 - len(out))
++    except Exception:
++        return [None] * 4
++
++
+ def _keep_n_faces(faces, tracker, n, refs=None):
+     """Keep N faces: picked identities first, then overlap, then area."""
+     faces = _as_face_list(faces)
+@@ -5998,7 +6020,16 @@
+                 _src_gender[idx] = _E._det_gender(sf)
+             except Exception:
+                 _src_gender[idx] = None
+-        _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_src_gender)
++        # v11.2.212 (SDOS-212): the gender of each PERSON, as the user confirmed it in the app's Detect step (settings.person_gender),
++        # is what a slot looks for - as in v11.2.141 - and the gender gate refuses a face that reads as the other one on a clean view.
++        # Where the app gave none, the replacement photo's gender steers as in 11.2.211 (never a gate: a swap across genders is allowed).
++        _pg = _parse_person_gender(cfg.get("person_gender"))
++        _person_gender = {idx: _pg[idx] for idx in smap.keys() if idx < len(_pg) and _pg[idx] in (0, 1)}
++        _slot_gender = {idx: _person_gender.get(idx, _src_gender.get(idx)) for idx in smap.keys()}
++        _tracker = _E.MultiFaceTracker(sorted(smap.keys()), slot_gender=_slot_gender, person_gender=_person_gender)
++        logging.info("people's genders from the app (0=F 1=M): %s · gender gate %s · replacement photos: %s",
++                     _person_gender or "none", "on" if (_person_gender and bool(int(_E._P.get("id_gender_gate", 1)))) else "off",
++                     _src_gender)
+         _FRONT_MEM.clear(); _FRONT_NOW.clear()
+         _HH.reset()                                        # v11.2.210
+         for _sk_ in _E.SIDE_STATS:
+@@ -8711,6 +8742,10 @@
+                     int(_hs.get("frames", 0)), int(_hs.get("entered", 0)), int(_hs.get("ref", 0)),
+                     int(_hs.get("coast", 0)), int(_hs.get("handed", 0)), int(_hs.get("lost", 0)), int(_hs.get("jumped", 0)),
+                     int(_E.SIDE_STATS.get("frames", 0)), int(_E.SIDE_STATS.get("held", 0)), int(_E.SIDE_STATS.get("outline", 0)))
++            if getattr(_tk, "person_gender", None):
++                logging.info("GENDER: faces refused for a person because they read (or looked) like the other gender %d; "
++                             "bound people let go for it %d", int(getattr(_tk, "gender_refused_n", 0) or 0),
++                             int(getattr(_tk, "gender_unbound_n", 0) or 0))
+             logging.info("ID-WHY refusals per slot: %s", {k: dict(v) for k, v in sorted((getattr(_tk, "why_counts", None) or {}).items())})
+             # v11.2.209 (SDOS-209): the identity decisions of this job, in plain words
+             try:
+@@ -9415,7 +9450,7 @@
+     return "cpu" if ("cpu only" in s or s.strip() == "cpu") else "gpu"
+ 
+ 
+-def submit_video(s1, s2, s3, s4, vid, secs, fps, res, quality, enhancer, swap_n, det_n, det_int, password, refs, trim_start, trim_end, face_mode, enhance_scope, device_mode, face_enhance=False, request: gr.Request = None, smooth_motion: str = "Fast (blend)", patches=None, skin_tone=None):
++def submit_video(s1, s2, s3, s4, vid, secs, fps, res, quality, enhancer, swap_n, det_n, det_int, password, refs, trim_start, trim_end, face_mode, enhance_scope, device_mode, face_enhance=False, request: gr.Request = None, smooth_motion: str = "Fast (blend)", patches=None, skin_tone=None, person_gender=None):
+     if vid is None:
+         return "❌ Upload a target video", _hist_html(), gr.update(choices=_get_done_choices()), _video_progress_html(), _device_status_text()
+     if s1 is None and s2 is None and s3 is None and s4 is None:
+@@ -9479,7 +9514,8 @@
+                use_gpu=use_gpu,
+                smooth_motion=(smooth_motion or "Fast (blend)"),
+                patches=patches or None,
+-               skin_tone=skin_tone or None)                      # v11.2.205 (SDOS-205)
++               skin_tone=skin_tone or None,                      # v11.2.205 (SDOS-205)
++               person_gender=_parse_person_gender(person_gender) if person_gender is not None else None)   # v11.2.212 (SDOS-212)
+ 
+     try:
+         _save_ui_session(
+diff -ru -x __pycache__ -x SDOS-212_TruePerson.md v11.2.211_Steady/phoenix_api_adapter.py v11.2.212_TruePerson/phoenix_api_adapter.py
+--- v11.2.211_Steady/phoenix_api_adapter.py	2026-11-15 14:53:07.610492469 +0000
++++ v11.2.212_TruePerson/phoenix_api_adapter.py	2026-11-18 01:30:03.147233292 +0000
+@@ -96,6 +96,7 @@
+         "det_int", "password", "trim_start", "trim_end", "face_mode",
+         "enhance_scope", "device_mode", "smooth_motion", "target_refs",
+         "face_enhance", "skin_tone",
++        "person_gender",                                     # v11.2.212: the app's M / F per person (Detect)
+     }
+     return {k: s[k] for k in allowed if k in s}
+ 
+@@ -617,6 +618,7 @@
+         smooth_motion=defaults.get("smooth_motion") or "Fast (blend)",
+         patches=patches or None,
+         skin_tone=_skin_setting(defaults.get("skin_tone")),
++        person_gender=defaults.get("person_gender"),         # v11.2.212 (SDOS-212)
+     )
+ 
+     message = str(result[0]) if result else ""
+diff -ru -x __pycache__ -x SDOS-212_TruePerson.md v11.2.211_Steady/swap_engine.py v11.2.212_TruePerson/swap_engine.py
+--- v11.2.211_Steady/swap_engine.py	2026-11-15 19:50:24.132469645 +0000
++++ v11.2.212_TruePerson/swap_engine.py	2026-11-18 02:07:57.711951522 +0000
+@@ -62,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.211-steady"
++ENGINE_VERSION = "aequus-1.2.212-trueperson"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -224,6 +224,23 @@
+     "trk_virgin_guard": 1,
+     "trk_virgin_gender_calls": 12,
+     "trk_virgin_yaw": 0.34,          # a front view: the nose under this far off the eye midpoint (in eye distances)
++    # v11.2.212 (SDOS-212): each person's gender as the user confirmed it in the app's Detect step (settings.person_gender). Read
++    # only on a CLEAN view - front (id_gender_yaw), apart from every other face, a firm detection - where the gender model was never
++    # confidently wrong in the tests (0 of ~900 face-frames); while two faces touch it is (a woman read as a man on up to 4 of 34
++    # frames: the man's face is in her crop), so those frames never count.
++    "id_gender_gate": 1,             # 0 = 11.2.211 (the app's genders are only used to steer, as before)
++    "id_gender_bind": 0.88,          # a face read on a clean view as the other gender with this probability is not this person
++    "id_gender_yaw": 0.34,           # clean view: front
++    "id_gender_det": 0.50,           # clean view: detection score
++    "id_gender_minw": 48,            # clean view: face width (px)
++    "id_gender_mem_sim": 0.45,       # a face that looks like (ArcFace) one already read as the other gender is not this person either
++    "id_gender_agree": 0.70,         # (a clean reading of this person's gender this likely overrides that memory)
++    "id_gender_decay": 0.90,         # the evidence on a bound person: decayed sum of log-odds over clean views...
++    "id_gender_unbind": 9.0,         # ...at this much against (about 3 clean frames) the person is unbound and found again
++    "id_gender_own_sim": 0.40,       # (the bound person's face: where expected AND this like their learnt look, more than anyone else's)
++    "id_gender_found": 0.95,         # found by gender: the only person of that gender, and the only face on screen read as it...
++    "id_gender_found_calls": 3,      # ...on this many detections in a row (clean views, this probable)...
++    "id_gender_found_ref": 0.10,     # ...and not unlike their own Detect picture (a picture sim under this: someone else)
+     "trk_ref_stale_other": 0.30,     # ...but never a face that another person's picture matches this well
+     "occ_flow": 1.0,                # last frame's cut moves with the object (optical flow inside the face crop) before smoothing
+     "occ_instant": 1.0,             # a cut opens at once where the colour test AND the occlusion model both see the object
+@@ -1062,7 +1079,8 @@
+                  "occ_prev_g",                  # v11.2.206: last frame's face crop (grey, 128 px) for the cut's motion
+                  "occ_face_ref",                # v11.2.206: how often the occlusion model saw face at each pixel lately
+                  "occn_core",                   # v11.2.206: the mouth rule's cut alone, smoothed as in 11.2.205 (eating rule)
+-                 "side_seg", "side_age")        # v11.2.210: the last face map that was this face's own, in a side-view kiss
++                 "side_seg", "side_age",        # v11.2.210: the last face map that was this face's own, in a side-view kiss
++                 "g_contra", "g_bad", "g_veto_call")   # v11.2.212: evidence against the person's gender, faces read as the other one
+ 
+     def __init__(self, slot=0):
+         self.slot = slot
+@@ -3466,6 +3484,59 @@
+     return AlignedCompositor(swapper).run(work, orig, face, src_face, **kw)
+ 
+ 
++def _install_gender_score(fa):
++    """v11.2.212 (SDOS-212): keep the gender model's own score on each face (face['gender_s'], with P(male) = 1 / (1 + e^(-2 s))):
++    insightface keeps only the argmax, so a 0.51 and a 0.999 reading looked the same. The same computation as insightface 0.7.3's
++    Attribute.get (one model run); anything unexpected falls back to the original method. Returns True when installed."""
++    try:
++        m = (getattr(fa, "models", None) or {}).get("genderage")
++        if m is None or getattr(m, "_phx_gender_s", False):
++            return False
++        orig = m.get
++        from insightface.utils import face_align as _fal
++
++        def _get(img, face):
++            try:
++                b = face.bbox
++                w, h = (b[2] - b[0]), (b[3] - b[1])
++                center = (b[2] + b[0]) / 2, (b[3] + b[1]) / 2
++                _scale = m.input_size[0] / (max(w, h) * 1.5)
++                aimg, _M = _fal.transform(img, center, m.input_size[0], _scale, 0)
++                blob = cv2.dnn.blobFromImage(aimg, 1.0 / m.input_std, tuple(aimg.shape[0:2][::-1]),
++                                             (m.input_mean, m.input_mean, m.input_mean), swapRB=True)
++                pred = m.session.run(m.output_names, {m.input_name: blob})[0][0]
++                if len(pred) != 3:
++                    return orig(img, face)
++                gender = np.argmax(pred[:2])
++                age = int(np.round(pred[2] * 100))
++                face["gender"] = gender
++                face["age"] = age
++                face["gender_s"] = float(pred[1] - pred[0]) / 2.0
++                return gender, age
++            except Exception:
++                return orig(img, face)
++        m.get = _get
++        m._phx_gender_s = True
++        return True
++    except Exception as e:
++        log.debug("gender score not installed: %s", e)
++        return False
++
++
++def _gender_p_male(face):
++    """v11.2.212: P(male) from the gender model's own score, or None (no score kept for this face)."""
++    try:
++        s = face.get("gender_s") if hasattr(face, "get") else getattr(face, "gender_s", None)
++    except Exception:
++        s = getattr(face, "gender_s", None)
++    if s is None:
++        return None
++    try:
++        return float(1.0 / (1.0 + math.exp(-2.0 * float(s))))
++    except Exception:
++        return None
++
++
+ def _det_gender(face):
+     """InsightFace buffalo: 0 = female, 1 = male. Always a Python int or None."""
+     if face is None:
+@@ -3647,10 +3718,18 @@
+       them and trust motion instead.
+     """
+ 
+-    def __init__(self, slots, slot_gender=None):
++    def __init__(self, slots, slot_gender=None, person_gender=None):
+         self.tracks = {s: TrackState(s) for s in slots}
+-        # 0 = female, 1 = male, None = unknown (from the replacement photo)
++        # 0 = female, 1 = male, None = unknown (v11.2.212: the person's own, from the app, where the user confirmed it; else the
++        # replacement photo's, as before)
+         self.slot_gender = {s: slot_gender.get(s) if slot_gender else None for s in slots}
++        # v11.2.212 (SDOS-212): the genders the user confirmed in the app's Detect step - the only ones the gender gate trusts
++        self.person_gender = {s: (person_gender or {}).get(s) for s in slots if (person_gender or {}).get(s) in (0, 1)}
++        self.gender_refused_n = 0    # pairings refused: a clean view of the face reads as the other gender (or it looks like one that did)
++        self.gender_unbound_n = 0    # bound people let go: their face read as the other gender on clean views
++        self.gender_found_n = 0      # people found by their gender (the only one of it, read clean on id_gender_found_calls detections)
++        self._g_logged = set()
++        self._gf_cand = {}
+         # Relative-admission bookkeeping (SDOS-078). _rel_pend[slot] is the last
+         # detection that was a candidate for rescue: (bbox, consecutive count,
+         # call number). A rescue needs trk_rel_confirm consecutive, spatially
+@@ -3673,6 +3752,127 @@
+                          "rel_no_margin": 0, "rel_below_floor": 0}
+                      for s in slots}
+ 
++    def _clean_male_p(self, j, faces):
++        """v11.2.212: P(male) of face j when its view is clean - front, apart from every other face, a firm detection of a fair
++        size - else None (the gender model is not trusted there)."""
++        f = faces[j]
++        p = _gender_p_male(f)
++        if p is None:
++            return None
++        try:
++            if float(getattr(f, "det_score", 0.0) or 0.0) < float(_P.get("id_gender_det", 0.5)):
++                return None
++            b = np.asarray(f.bbox, np.float32).reshape(-1)
++            if float(b[2] - b[0]) < float(_P.get("id_gender_minw", 48)):
++                return None
++            yo = _yaw_offset(getattr(f, "kps", None))
++            if yo is None or yo >= float(_P.get("id_gender_yaw", 0.34)):
++                return None
++            for j2, f2 in enumerate(faces):
++                if j2 != j and (_iou(f.bbox, f2.bbox) > 0.02 or _cdist_norm(f.bbox, f2.bbox) < 0.55):
++                    return None
++        except Exception:
++            return None
++        return p
++
++    def _gender_prepare(self, faces, slots):
++        """v11.2.212 (SDOS-212): which (slot, face) pairs the person's own gender rules out, as an n x m table (None when the user
++        gave no gender). A face is not slot s's person when (a) on a clean view it reads as the other gender with id_gender_bind or
++        more, or (b) it looks like (ArcFace id_gender_mem_sim) a face that did so for this slot - unless it reads as the right gender
++        now. A face where the slot's bound person is expected that reads as the other gender adds to the evidence against the
++        binding; at id_gender_unbind the person is let go and found again (identity and memory as for a new person). On such a
++        frame the slot's predicted face is not painted either (carry)."""
++        if not self.person_gender or not bool(int(_P.get("id_gender_gate", 1))):
++            return None
++        n, m = len(slots), len(faces)
++        clean = [self._clean_male_p(j, faces) for j in range(m)]
++        thr = float(_P.get("id_gender_bind", 0.88))
++        agree = float(_P.get("id_gender_agree", 0.70))
++        msim = float(_P.get("id_gender_mem_sim", 0.45))
++        dec = float(_P.get("id_gender_decay", 0.90))
++        unb = float(_P.get("id_gender_unbind", 9.0))
++        out = [[False] * m for _ in range(n)]
++        for i, s in enumerate(slots):
++            G = self.person_gender.get(s)
++            if G not in (0, 1):
++                continue
++            tr = self.tracks[s]
++            bad = list(getattr(tr, "g_bad", None) or [])
++            for j in range(m):
++                p = clean[j]
++                pc = None if p is None else (p if G == 0 else 1.0 - p)
++                if pc is not None and pc >= thr:
++                    out[i][j] = True
++                    continue
++                if bad and (pc is None or (1.0 - pc) < agree):
++                    e = getattr(faces[j], "normed_embedding", None)
++                    if e is not None:
++                        ev = np.asarray(e, np.float32).reshape(-1)
++                        if max(float(np.dot(ev, b)) for b in bad) >= msim:
++                            out[i][j] = True
++            # the bound person's own face (where the track expects it, AND looking like the person bound - their learnt look - more
++            # than like anyone else bound), read on a clean view. Where it is expected is not enough: while she is hidden behind him,
++            # the only face found where she was is his, and his gender is no evidence against her binding (found on the hug clip).
++            if not (tr.established and tr.match_bbox is not None):
++                continue
++            look = self._look(s)
++            if look is None:
++                continue
++            others = [lk for lk in (self._look(s2) for s2 in slots if s2 != s) if lk is not None]
++            osim = float(_P.get("id_gender_own_sim", 0.40))
++            own = []
++            for j in range(m):
++                if clean[j] is None or not (_iou(tr.match_bbox, faces[j].bbox) >= 0.3
++                                            or _cdist_norm(tr.match_bbox, faces[j].bbox) < 0.5):
++                    continue
++                e = getattr(faces[j], "normed_embedding", None)
++                if e is None:
++                    continue
++                ev = np.asarray(e, np.float32).reshape(-1)
++                ev = ev / (float(np.linalg.norm(ev)) + 1e-6)
++                cs = float(np.dot(ev, look)) if ev.size == look.size else -1.0
++                if cs < osim or any(ev.size == lk.size and float(np.dot(ev, lk)) >= cs for lk in others):
++                    continue
++                own.append(j)
++            if not own:
++                continue
++            j = max(own, key=lambda jj: _iou(tr.match_bbox, faces[jj].bbox))
++            pc = clean[j] if G == 0 else 1.0 - clean[j]
++            lo = float(np.clip(math.log(max(1e-4, pc) / max(1e-4, 1.0 - pc)), -6.0, 6.0))
++            tr.g_contra = dec * float(getattr(tr, "g_contra", 0.0) or 0.0) + lo
++            if pc < thr:
++                continue
++            tr.g_veto_call = self._call_n
++            e = getattr(faces[j], "normed_embedding", None)
++            if e is not None:
++                ev = np.asarray(e, np.float32).reshape(-1)
++                if not bad or max(float(np.dot(ev, b)) for b in bad) < 0.8:
++                    tr.g_bad = (bad + [ev / (float(np.linalg.norm(ev)) + 1e-6)])[-6:]
++            if self._has_id(s) and tr.g_contra >= unb:
++                tr.emb = None
++                tr.id_lock = None
++                tr.hits = 0
++                tr.g_contra = 0.0
++                self.gender_unbound_n += 1
++                logging.info("person %s: bound to a face that reads as a %s on clean views (P %.2f) - let go, to be found again",
++                             s + 1 if isinstance(s, int) else s, "man" if G == 0 else "woman", pc)
++        return out
++
++    def _look(self, s):
++        """v11.2.212: the learnt look of slot s (its identity lock, else its running embedding), unit length; None if not bound."""
++        t = self.tracks[s]
++        v = getattr(t, "id_lock", None)
++        if v is None:
++            v = t.emb
++        if v is None:
++            return None
++        try:
++            v = np.asarray(v, np.float32).reshape(-1)
++            n = float(np.linalg.norm(v))
++            return v / n if n > 1e-6 else None
++        except Exception:
++            return None
++
+     def _has_id(self, s):
+         t = self.tracks[s]
+         return getattr(t, "id_lock", None) is not None or t.emb is not None
+@@ -4108,6 +4308,7 @@
+              or self.tracks[s_].emb is not None
+              or (refs.get(s_) if refs else None) is not None)
+             for s_ in slots]
++        gref = self._gender_prepare(faces, slots)            # v11.2.212 (SDOS-212)
+ 
+         for i, s in enumerate(slots):
+             tr = self.tracks[s]
+@@ -4197,6 +4398,8 @@
+                         if skip:
+                             continue
+ 
++                if gref is not None and gref[i][j]:
++                    continue                                 # v11.2.212: not this person (the gender the user confirmed)
+                 w_id, w_iou, w_d = _P["trk_w_id"], _P["trk_w_iou"], _P["trk_w_dist"]
+                 if tr.crossing and tr.established:
+                     w_id, w_iou, w_d = 0.18, 0.55, 0.27
+@@ -4239,9 +4442,18 @@
+             for i in unresolved:
+                 pick = None
+                 ref = refs.get(slots[i]) if refs else None
++                _lv = leftovers
++                if gref is not None:                         # v11.2.212: never a face the person's gender rules out...
++                    _lv = [j for j in leftovers if not gref[i][j]]
++                    _G = self.person_gender.get(slots[i])
++                    if ref is None and _G in (0, 1):         # ...and with no Detect picture, one read as their gender first
++                        def _agrees(j, _G=_G):
++                            p_ = self._clean_male_p(j, faces)
++                            return 1 if (p_ is not None and (p_ if _G == 1 else 1.0 - p_) >= float(_P.get("id_gender_agree", 0.70))) else 0
++                        _lv = sorted(_lv, key=lambda j: -_agrees(j))
+                 if ref is not None:
+                     best = _PICK_FLOOR
+-                    for j in leftovers:
++                    for j in _lv:
+                         if j in used_j:
+                             continue
+                         sim = ref_sim[i][j]
+@@ -4255,7 +4467,7 @@
+                             continue
+                         best, pick = sim, j
+                 if pick is None and ref is None:
+-                    for j in leftovers:
++                    for j in _lv:
+                         if j in used_j:
+                             continue
+                         emb = getattr(faces[j], "normed_embedding", None)
+@@ -4360,7 +4572,10 @@
+                 pick_i = None
+                 best_rs = -1.0
+                 any_ref = False
+-                for i in list(empty_i):
++                _cands = [i for i in empty_i if not (gref is not None and gref[i][j])]    # v11.2.212
++                if not _cands:
++                    continue
++                for i in list(_cands):
+                     r = refs.get(slots[i]) if refs else None
+                     if r is None:
+                         continue
+@@ -4375,14 +4590,14 @@
+                         best_rs, pick_i = rs, i
+                 if pick_i is None and not any_ref:
+                     got_g = _det_gender(faces[j])
+-                    pool = list(empty_i)
++                    pool = list(_cands)
+                     if len(self.tracks) >= 2 and got_g in (0, 1):
+                         matched = [
+-                            i for i in empty_i
++                            i for i in _cands
+                             if self.slot_gender.get(slots[i]) == got_g
+                         ]
+                         wrong = [
+-                            i for i in empty_i
++                            i for i in _cands
+                             if self.slot_gender.get(slots[i]) in (0, 1)
+                             and self.slot_gender.get(slots[i]) != got_g
+                         ]
+@@ -4392,7 +4607,7 @@
+                         # disagrees on gender. A wrong tag was leaving the
+                         # man original for the whole clip.
+                         if not pool:
+-                            pool = list(empty_i)
++                            pool = list(_cands)
+                     if pool:
+                         pick_i = pool[0]
+                 if pick_i is None:
+@@ -4403,6 +4618,52 @@
+                 logging.info("late-join slot %s ← face (ref_sim=%.2f locked=%.2f)",
+                              slots[pick_i], best_rs, mx)
+ 
++        # v11.2.212 (SDOS-212): found by gender. The person the user marked as the only woman (or the only man) is the one face on
++        # screen read as a woman on a clean view, if it is not someone already found and not unlike her own Detect picture, on
++        # id_gender_found_calls detections in a row. Each part of a split starts with nobody found: a poor Detect picture for that
++        # part no longer leaves her unpainted until the elimination rule below (about 45 sightings).
++        _gf_ok = set()
++        if gref is not None:
++            _vals = list(self.person_gender.values())
++            _claimed_g = set(pairing.values())
++            for i, s_ in enumerate(slots):
++                G = self.person_gender.get(s_)
++                if G not in (0, 1) or pairing.get(i) is not None or self._has_id(s_) or _vals.count(G) != 1:
++                    continue
++                _same, _cands = 0, []
++                for j in range(m):
++                    p_ = self._clean_male_p(j, faces)
++                    if p_ is None:
++                        continue
++                    pa = p_ if G == 1 else 1.0 - p_
++                    if pa >= 0.5:
++                        _same += 1
++                    if j not in _claimed_g and not gref[i][j] and pa >= float(_P.get("id_gender_found", 0.95)):
++                        _cands.append(j)
++                if len(_cands) != 1 or _same != 1:
++                    continue
++                j = _cands[0]
++                _e = getattr(faces[j], "normed_embedding", None)
++                if _e is None:
++                    continue
++                _locks = [x for x in ((getattr(self.tracks[s2], "id_lock", None) if getattr(self.tracks[s2], "id_lock", None) is not None
++                                       else self.tracks[s2].emb) for s2 in slots if s2 != s_) if x is not None]
++                if any(_cos_emb(_e, x) >= 0.45 for x in _locks):
++                    continue
++                _r = refs.get(s_) if refs else None
++                if _r is not None and ref_sim[i][j] < float(_P.get("id_gender_found_ref", 0.10)):
++                    continue
++                if self._in_a_row(self._gf_cand, s_, faces[j].bbox) >= int(_P.get("id_gender_found_calls", 3)):
++                    pairing[i] = j
++                    _claimed_g.add(j)
++                    _gf_ok.add(i)
++                    self.gender_found_n += 1
++                    if ("found", s_) not in self._g_logged:
++                        self._g_logged.add(("found", s_))
++                        logging.info("person %s: found by gender - the only %s, read as one on a clean view (picture sim %.2f)",
++                                     s_ + 1 if isinstance(s_, int) else s_, "woman" if G == 0 else "man",
++                                     ref_sim[i][j] if _r is not None else -1.0)
++
+         # v11.2.208 / v11.2.209 (SDOS-209): the person whose Detect picture matches nobody. Found by elimination only on
+         # evidence (_virgin_evidence): one face left over, confident, of a size with the others, unlike everyone found and
+         # every other picture - and the other people identified in this very frame (or a front view of the right gender) on
+@@ -4451,7 +4712,7 @@
+         if n >= 2 and bool(int(_P.get("trk_virgin_guard", 1))):
+             for i, s_ in enumerate(slots):
+                 j = pairing.get(i)
+-                if j is None or i in _fb_ok or self._has_id(s_):
++                if j is None or i in _fb_ok or i in _gf_ok or self._has_id(s_):
+                     continue
+                 _r = refs.get(s_) if refs else None
+                 if (_r is not None and ref_sim[i][j] >= _PICK_FLOOR
+@@ -4511,6 +4772,19 @@
+                     if swp > cur + 0.08:
+                         pairing[i], pairing[i2] = j2, j
+ 
++        # v11.2.212 (SDOS-212): whatever path paired them, never a face the person's own gender rules out
++        if gref is not None:
++            for i in list(pairing.keys()):
++                j = pairing.get(i)
++                if j is not None and gref[i][j]:
++                    pairing.pop(i, None)
++                    self.gender_refused_n += 1
++                    s_ = slots[i]
++                    if s_ not in self._g_logged:
++                        self._g_logged.add(s_)
++                        logging.info("person %s: a face that reads (or looked) like a %s was not given their replacement", s_ + 1 if isinstance(s_, int) else s_,
++                                     "man" if self.person_gender.get(s_) == 0 else "woman")
++
+         # ---- hysteresis: veto flips that are not sustained ----------------
+         # "Changed" is decided GEOMETRICALLY, never by python object identity:
+         # detections are fresh objects every frame, so an identity test would
+@@ -4701,6 +4975,8 @@
+             # v11.1.9: frozen after leaving frame — do not offer for paste.
+             if getattr(tr, "_paste_frozen", False):
+                 continue
++            if getattr(tr, "g_veto_call", None) == self._call_n:     # v11.2.212: its face was just read as the other gender
++                continue
+             pf = tr.predicted_face()
+             if pf is not None:
+                 out[s] = pf

@@ -1,0 +1,40 @@
+11.2.211 against 11.2.212, the whole job at Ultra (bench_pipeline.py), man-woman clips (make_mw.py; public sample photo, synthetic).
+Slot 1 = the woman, slot 2 = the man; pg=0,1 = the app's genders. swapsrc=1: each person gets the other gender's photo.
+Identity scored against the replacement each person SHOULD get (rescore212.sh, identity_check.py with IDC_INTENDED).
+
+== b211_mwcrosspart_noref (intended: A photo A, B photo B)
+A (left at start): own replacement = photo A | identity on 36 frames (under 70 % visible: 32): correct 0, MIX-UP 36, unclear 0 | painting on 50 frames (base 0 % paint over the face): REVERT 0 [], weak 0 []
+B (right at start, in front): own replacement = photo B | identity on 68 frames (under 70 % visible: 0): correct 0, MIX-UP 68, unclear 0 | painting on 68 frames (base 96 % paint over the face): REVERT 0 [], weak 0 []
+== g212_mwcrosspart_noref (intended: A photo A, B photo B)
+A (left at start): own replacement = photo A | identity on 36 frames (under 70 % visible: 32): correct 36, MIX-UP 0, unclear 0 | painting on 50 frames (base 0 % paint over the face): REVERT 0 [], weak 0 []
+B (right at start, in front): own replacement = photo B | identity on 68 frames (under 70 % visible: 0): correct 68, MIX-UP 0, unclear 0 | painting on 68 frames (base 96 % paint over the face): REVERT 0 [], weak 0 []
+== b211_xg_crosspart_noref (intended: A photo B, B photo A)
+A (left at start): own replacement = photo B | identity on 36 frames (under 70 % visible: 32): correct 0, MIX-UP 36, unclear 0 | painting on 50 frames (base 0 % paint over the face): REVERT 0 [], weak 0 []
+B (right at start, in front): own replacement = photo A | identity on 68 frames (under 70 % visible: 0): correct 0, MIX-UP 68, unclear 0 | painting on 68 frames (base 96 % paint over the face): REVERT 0 [], weak 0 []
+== g212_xg_crosspart_noref (intended: A photo B, B photo A)
+A (left at start): own replacement = photo B | identity on 36 frames (under 70 % visible: 32): correct 36, MIX-UP 0, unclear 0 | painting on 50 frames (base 0 % paint over the face): REVERT 0 [], weak 0 []
+B (right at start, in front): own replacement = photo A | identity on 68 frames (under 70 % visible: 0): correct 68, MIX-UP 0, unclear 0 | painting on 68 frames (base 96 % paint over the face): REVERT 0 [], weak 0 []
+== b211_mwcrosspart_ref (intended: A photo A, B photo B)
+A (left at start): own replacement = photo A | identity on 36 frames (under 70 % visible: 32): correct 36, MIX-UP 0, unclear 0 | painting on 50 frames (base 0 % paint over the face): REVERT 0 [], weak 0 []
+B (right at start, in front): own replacement = photo B | identity on 68 frames (under 70 % visible: 0): correct 68, MIX-UP 0, unclear 0 | painting on 68 frames (base 96 % paint over the face): REVERT 0 [], weak 0 []
+== g212_mwcrosspart_ref (intended: A photo A, B photo B)
+A (left at start): own replacement = photo A | identity on 36 frames (under 70 % visible: 32): correct 36, MIX-UP 0, unclear 0 | painting on 50 frames (base 0 % paint over the face): REVERT 0 [], weak 0 []
+B (right at start, in front): own replacement = photo B | identity on 68 frames (under 70 % visible: 0): correct 68, MIX-UP 0, unclear 0 | painting on 68 frames (base 96 % paint over the face): REVERT 0 [], weak 0 []
+== b211_mwkissb_noref (first-frames mapping = the intended one: kissb A photo B / B photo A; hug A photo A / B photo B)
+A (left at start): own replacement = photo B | identity on 57 frames (under 70 % visible: 63): correct 57, MIX-UP 0, unclear 0 | painting on 120 frames (base 86 % paint over the face): REVERT 2 [63, 64], weak 8 [58, 59, 60, 61, 62, 65, 66, 67]
+B (right at start, in front): own replacement = photo A | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 98 % paint over the face): REVERT 0 [], weak 0 []
+== g212_mwkissb_noref (first-frames mapping = the intended one: kissb A photo B / B photo A; hug A photo A / B photo B)
+A (left at start): own replacement = photo B | identity on 57 frames (under 70 % visible: 63): correct 57, MIX-UP 0, unclear 0 | painting on 120 frames (base 86 % paint over the face): REVERT 2 [63, 64], weak 8 [58, 59, 60, 61, 62, 65, 66, 67]
+B (right at start, in front): own replacement = photo A | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 98 % paint over the face): REVERT 0 [], weak 0 []
+== b211_mwkissb_ref2 (first-frames mapping = the intended one: kissb A photo B / B photo A; hug A photo A / B photo B)
+A (left at start): own replacement = photo B | identity on 57 frames (under 70 % visible: 63): correct 57, MIX-UP 0, unclear 0 | painting on 120 frames (base 86 % paint over the face): REVERT 2 [63, 64], weak 8 [58, 59, 60, 61, 62, 65, 66, 67]
+B (right at start, in front): own replacement = photo A | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 98 % paint over the face): REVERT 0 [], weak 0 []
+== g212_mwkissb_ref2 (first-frames mapping = the intended one: kissb A photo B / B photo A; hug A photo A / B photo B)
+A (left at start): own replacement = photo B | identity on 57 frames (under 70 % visible: 63): correct 57, MIX-UP 0, unclear 0 | painting on 120 frames (base 86 % paint over the face): REVERT 2 [63, 64], weak 8 [58, 59, 60, 61, 62, 65, 66, 67]
+B (right at start, in front): own replacement = photo A | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 98 % paint over the face): REVERT 0 [], weak 0 []
+== b211_mwhug_ref (first-frames mapping = the intended one: kissb A photo B / B photo A; hug A photo A / B photo B)
+A (left at start): own replacement = photo A | identity on 37 frames (under 70 % visible: 83): correct 36, MIX-UP 0, unclear 1 | painting on 96 frames (base 94 % paint over the face): REVERT 3 [47, 48, 49], weak 7 [42, 43, 44, 45, 46, 74, 75]
+B (right at start, in front): own replacement = photo B | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 91 % paint over the face): REVERT 0 [], weak 0 []
+== g212_mwhug_ref (first-frames mapping = the intended one: kissb A photo B / B photo A; hug A photo A / B photo B)
+A (left at start): own replacement = photo A | identity on 37 frames (under 70 % visible: 83): correct 36, MIX-UP 0, unclear 1 | painting on 96 frames (base 94 % paint over the face): REVERT 3 [47, 48, 49], weak 7 [42, 43, 44, 45, 46, 74, 75]
+B (right at start, in front): own replacement = photo B | identity on 120 frames (under 70 % visible: 0): correct 120, MIX-UP 0, unclear 0 | painting on 120 frames (base 91 % paint over the face): REVERT 0 [], weak 0 []
