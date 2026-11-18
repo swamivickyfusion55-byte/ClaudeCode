@@ -1,0 +1,380 @@
+diff -ru -x source.zip Phoenix_APK_Builder_1.2.62_PhnxNames/README.md Phoenix_APK_Builder_1.2.63_MergeRedo/README.md
+--- Phoenix_APK_Builder_1.2.62_PhnxNames/README.md	2026-11-15 10:05:46.937107187 +0000
++++ Phoenix_APK_Builder_1.2.63_MergeRedo/README.md	2026-11-18 01:14:37.536266523 +0000
+@@ -8,10 +8,23 @@
+ pinned: false
+ ---
+ 
+-# Phoenix APK Builder 1.2.62 (Space control: status, Pause, Restart / Resume for each Space)
++# Phoenix APK Builder 1.2.63 (a split is merged after Redo part)
+ 
+ Upload these six files: `Dockerfile`, `app.py`, `build.sh`, `gradle.properties`, `README.md`, `source.zip`. The page title must
+-say Phoenix Mobile 1.2.62. versionCode is **182**.
++say Phoenix Mobile 1.2.63. versionCode is **183**.
++
++**1.2.63 - after Redo part, the split is merged:**
++- **History keeps every part of a video not merged yet.** It kept the newest 50 entries only: the first parts of a split
++  were pushed out by the jobs and the redone part after them, and the merge waited for ever.
++- **Auto-merge merges the split the finished part belongs to** (it merged only the first mergeable split in History).
++- **Merged again after a redo**, as a new file `Phoenix_merged_<group>_2.mp4` (the old name handed back the old video).
++- **Each part's file is checked before joining.** A moved part is found again by its name; a deleted one is marked
++  **Missing** with Redo part, and the message names it. Refresh no longer removes such a part.
++- A redone part and its old copy are never joined twice; Redo part tapped twice runs the part once.
++- Replaced, Lost and Missing entries no longer keep a Space busy or get watched again at start.
++- Everything else as 1.2.62.
++
++## 1.2.62 (Space control: status, Pause, Restart / Resume for each Space)
+ 
+ **1.2.62 - each Space's status, and Pause / Restart in the app:**
+ - **Status everywhere.** The dot on each Space number at the top shows its state on Hugging Face:
+diff -ru -x source.zip Phoenix_APK_Builder_1.2.62_PhnxNames/app.py Phoenix_APK_Builder_1.2.63_MergeRedo/app.py
+--- Phoenix_APK_Builder_1.2.62_PhnxNames/app.py	2026-11-15 10:05:46.940107239 +0000
++++ Phoenix_APK_Builder_1.2.63_MergeRedo/app.py	2026-11-18 01:14:44.698294364 +0000
+@@ -10,7 +10,7 @@
+ import gradio as gr
+ 
+ ROOT = os.environ.get("PHOENIX_ROOT", "/workspace")
+-VER = "1.2.62"
++VER = "1.2.63"
+ APK = f"{ROOT}/PhnxMobile-{VER}-debug.apk"
+ SHA = f"{ROOT}/PhnxMobile-{VER}-debug.sha256"
+ INFO = f"{ROOT}/PhnxMobile-{VER}-install-info.txt"
+@@ -105,7 +105,7 @@
+ 
+     started = time.time()
+     header = [
+-        "=== Phoenix Mobile 1.2.62 build ===",
++        "=== Phoenix Mobile 1.2.63 build ===",
+         _env_report(),
+         "",
+         "=== Launching build.sh ===",
+@@ -162,7 +162,7 @@
+     if apk_out is None:
+         yield (
+             log,
+-            "**Build reported success but PhnxMobile-1.2.62-debug.apk was not produced.** "
++            "**Build reported success but PhnxMobile-1.2.63-debug.apk was not produced.** "
+             "An older APK is not offered. A phone with 1.2.49 would call that a downgrade and say the package is invalid.",
+             None,
+             None,
+@@ -185,10 +185,10 @@
+             info = fh.read().strip()
+     except OSError:
+         pass
+-    if info and ("1.2.62" not in info or "versionCode 182" not in info):
++    if info and ("1.2.63" not in info or "versionCode 183" not in info):
+         yield (
+             log,
+-            "**Not offering this file.** It is not versionCode 182 (1.2.62). "
++            "**Not offering this file.** It is not versionCode 183 (1.2.63). "
+             "Installing an older build over the copy on the phone is what the phone calls an invalid package.\n\n```\n"
+             + info + "\n```",
+             None,
+@@ -297,12 +297,12 @@
+     yield "\n".join(lines)
+ 
+ 
+-with gr.Blocks(title="Phoenix Mobile 1.2.62 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
++with gr.Blocks(title="Phoenix Mobile 1.2.63 Builder", css=CSS, theme=gr.themes.Soft()) as demo:
+     gr.HTML(
+-        "<div id='phx-head'><h1>Phoenix Mobile 1.2.62</h1>"
+-        "<p>versionCode 182. New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
++        "<div id='phx-head'><h1>Phoenix Mobile 1.2.63</h1>"
++        "<p>versionCode 183. After Redo part the split is merged (History keeps every part of a video not merged yet; a moved part is found again, a deleted one is marked Missing). New look: a calm light theme, dark text on light, one blue accent. Redo part works again (cuts the part again if needed); a job a Space lost shows Lost. Skin tone step (brighten or darken a chosen person, Preview with Before / After; needs Space v11.2.205). "
+         "Tap draws a free shape on the dark patch, at most 4 square inches. "
+-        "<a href='/phoenix-apk'>Download PhnxMobile-1.2.62-debug.apk</a>.</p></div>"
++        "<a href='/phoenix-apk'>Download PhnxMobile-1.2.63-debug.apk</a>.</p></div>"
+     )
+ 
+     with gr.Row():
+@@ -380,7 +380,7 @@
+     def phoenix_apk(request: Request):
+         path = _official_apk()
+         if path is None:
+-            raise HTTPException(status_code=404, detail="No complete PhnxMobile-1.2.62-debug.apk yet. Press Build APK first.")
++            raise HTTPException(status_code=404, detail="No complete PhnxMobile-1.2.63-debug.apk yet. Press Build APK first.")
+         size = os.path.getsize(path)
+         name = os.path.basename(path)
+         common = {
+diff -ru -x source.zip Phoenix_APK_Builder_1.2.62_PhnxNames/build.sh Phoenix_APK_Builder_1.2.63_MergeRedo/build.sh
+--- Phoenix_APK_Builder_1.2.62_PhnxNames/build.sh	2026-11-15 10:05:46.939886339 +0000
++++ Phoenix_APK_Builder_1.2.63_MergeRedo/build.sh	2026-11-18 01:12:45.688970224 +0000
+@@ -5,7 +5,7 @@
+ cd "$ROOT/source"
+ # The file name follows the app version, so the page and the APK cannot disagree.
+ VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+-VER="${VER:-1.2.62}"
++VER="${VER:-1.2.63}"
+ 
+ echo "=== Phoenix v$VER static release audit ==="
+ python3 -u tools/audit/m3_audit.py .
+diff -ru -x source.zip Phoenix_APK_Builder_1.2.62_PhnxNames/src/CHANGELOG.md Phoenix_APK_Builder_1.2.63_MergeRedo/src/CHANGELOG.md
+--- Phoenix_APK_Builder_1.2.62_PhnxNames/src/CHANGELOG.md	2026-11-15 10:05:46.937186833 +0000
++++ Phoenix_APK_Builder_1.2.63_MergeRedo/src/CHANGELOG.md	2026-11-18 01:14:37.534709818 +0000
+@@ -1,3 +1,36 @@
++# v1.2.63 - a split is merged after Redo part
++
++- **Asked:** "when the video processing stops, stating it is not visible, and you redo it, after redo the merge doesn't happen".
++- **Causes found in 1.2.62 (PhoenixViewModel.kt):**
++  - History kept the newest **50** entries. The parts of a split, the jobs after them and the redone part pushed the oldest
++    parts of the same video out of History; the merge then waited for parts it could no longer see ("Merge waits for all n
++    parts").
++  - The automatic merge after a part finished merged only when this part's split was the **first** mergeable one in History.
++    Any other split left complete but unmerged (its merge had failed once, or Auto-merge was off then) blocked it.
++  - A split merged once was never merged again, and a new merge would have been saved under the old file name - which hands
++    back the **old** merged video.
++  - **Refresh** removed a finished part whose file had been moved or deleted, so its card and its Redo part button vanished.
++  - At start the app watched the old job of a replaced part again; it came back as "Lost" (or, had the Space kept it, as a
++    second copy of that part).
++- **Changes:**
++  - `SplitLogic.kt` (new, plain Kotlin): for each part number the newest finished entry is joined (a redone part replaces the
++    lost one; two finished copies are joined once); a split is merged again when a part was redone after its merge, as a new
++    file (`Phoenix_merged_<group>_2.mp4`); History keeps the newest 50 entries **and every entry of a split not merged yet**
++    (at most 300).
++  - The automatic merge after a part finishes checks that part's own split.
++  - Before joining, every part's file is checked. A moved part is found again by its name; a deleted one is marked
++    **Missing** ("put it back in Movies/Phoenix, or tap Redo part") and the message names the part. Refresh marks such a part
++    Missing instead of removing it.
++  - Replaced, Lost and Missing entries do not keep a Space busy, and are not watched again at start.
++  - Redo part tapped twice on the same part does not start it twice.
++  - A failed merge says the parts differ (codec or size, e.g. made with different settings or Space versions).
++- **Checked here:** `SplitLogicTest.kt` (16 checks: a redone part completes the split, joined in order and once; another
++  unmerged split does not block it; merged, then a part redone: merged again under a new name; lost / missing parts hold the
++  merge and are named; History keeps an open split's parts past 50 and still drops the rest; 300 cap) - all pass with the real
++  Kotlin 2.0.21 compiler. All sources compile with no new error except references to Android types the sandbox has no
++  definitions for; the new file-check expressions were compiled and run against stand-ins for those types.
++- **Not checked here:** a Gradle / Android build and the app on a phone (the APK Builder is the real build).
++
+ # v1.2.62 - each Space's status; Pause and Restart / Resume per Space
+ 
+ - **Asked:** "add option of pause and restart space in the frontend app itself, pause and restart button against each space",
+diff -ru -x source.zip Phoenix_APK_Builder_1.2.62_PhnxNames/src/app/build.gradle.kts Phoenix_APK_Builder_1.2.63_MergeRedo/src/app/build.gradle.kts
+--- Phoenix_APK_Builder_1.2.62_PhnxNames/src/app/build.gradle.kts	2026-11-15 10:05:46.937354686 +0000
++++ Phoenix_APK_Builder_1.2.63_MergeRedo/src/app/build.gradle.kts	2026-11-18 01:12:45.686842473 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.swamitech.phoenix2"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 182
+-        versionName = "1.2.62"
++        versionCode = 183
++        versionName = "1.2.63"
+         // 1.2.56: 64-bit ARM phones only. The APK carried four copies of ONNX Runtime and the native lib (arm64, armv7,
+         // x86, x86_64); three were never used on a phone, and the 92 MB download kept breaking off half way - a cut-off
+         // APK is what the phone calls "package appears to be invalid".
+diff -ru -x source.zip Phoenix_APK_Builder_1.2.62_PhnxNames/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt Phoenix_APK_Builder_1.2.63_MergeRedo/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt
+--- Phoenix_APK_Builder_1.2.62_PhnxNames/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-15 10:05:46.937683627 +0000
++++ Phoenix_APK_Builder_1.2.63_MergeRedo/src/app/src/main/java/com/swamitech/phoenix/PhoenixViewModel.kt	2026-11-18 01:12:45.682052426 +0000
+@@ -74,7 +74,8 @@
+         /** A history entry in one of these states is not using its Space (1.2.29: Cancelled/Error/Downloading added). */
+         val TERMINAL_STATUSES = setOf(
+             "Done", "Failed", "Monitoring stopped", "Replaced", "Cancelled", "Canceled", "Error", "Stopped", "Expired",
+-            "Interrupted", "Downloading", "Merged"
++            "Interrupted", "Downloading", "Merged",
++            "Lost", "Missing"                                         // 1.2.63: neither is using its Space
+         )
+         private const val PREFS = "phoenix_history"
+         private const val HISTORY_KEY = "items"
+@@ -2215,45 +2216,93 @@
+         }
+     }
+ 
+-    fun mergeableGroupId(): String? {
+-        val groups = history.mapNotNull { it.groupId }.distinct()
+-        return groups.firstOrNull { gid ->
+-            val parts = history.filter { it.groupId == gid }
+-            val n = parts.maxOfOrNull { it.partCount } ?: 0
+-            n >= 2 && parts.count { it.status == "Done" && !it.uri.isNullOrBlank() } >= n &&
+-                history.none { it.groupId == gid && it.kind == "Merged" && it.status == "Done" }
+-        }
++    /** 1.2.63: the fields of History the split logic reads (SplitLogic, plain Kotlin and tested on its own). */
++    private fun splitParts(list: List<HistoryItem> = history): List<SplitLogic.Part> =
++        list.map { SplitLogic.Part(it.id, it.kind, it.status, it.uri, it.groupId, it.partIndex, it.partCount, it.createdAt) }
++
++    fun mergeableGroupId(): String? = SplitLogic.newestMergeable(splitParts())
++
++    /** 1.2.63: two parts finishing together each asked for the same merge. */
++    private val mergingGroups = java.util.Collections.synchronizedSet(mutableSetOf<String>())
++
++    private fun uriReadable(uri: String?): Boolean = !uri.isNullOrBlank() && runCatching {
++        getApplication<Application>().contentResolver.openFileDescriptor(Uri.parse(uri), "r")?.use { true } ?: false
++    }.getOrDefault(false)
++
++    /**
++     * 1.2.63: every finished part of [gid] must still be readable on this phone. One that was moved is found again by its
++     * file name (anywhere in the phone's videos); one that was deleted is marked Missing, so its card shows Redo part.
++     * A part marked Missing earlier whose file is back counts as finished again. Returns the part numbers (1-based) missing.
++     */
++    private fun checkPartFiles(gid: String): List<Int> {
++        val gone = mutableListOf<Int>()
++        history.filter { it.groupId == gid && it.kind == "Video" && it.status in setOf("Done", "Missing") && !it.uri.isNullOrBlank() }
++            .forEach { h ->
++                if (uriReadable(h.uri)) {
++                    if (h.status == "Missing") updateHistory(h.id, status = "Done", eta = "Done")
++                    return@forEach
++                }
++                val found = runCatching { existingVideoUri(h.name) }.getOrNull()?.takeIf { uriReadable(it.toString()) }
++                if (found != null) {
++                    updateHistory(h.id, uri = found.toString(), status = "Done", eta = "Done")
++                } else {
++                    updateHistory(h.id, status = "Missing", eta = "File moved or deleted - put it back in Movies/Phoenix, or tap Redo part")
++                    gone.add(h.partIndex + 1)
++                }
++            }
++        return gone.distinct().sorted()
+     }
+ 
+     fun mergeSplitGroup(groupId: String? = mergeableGroupId()) {
+-        val gid = groupId ?: run { status = "No completed split group to merge"; return }
+-        val parts = history.filter { it.groupId == gid && it.kind == "Video" }
+-            .sortedBy { it.partIndex }
+-        val n = parts.maxOfOrNull { it.partCount } ?: 0
+-        val ready = parts.filter { it.status == "Done" && !it.uri.isNullOrBlank() }
+-        if (n < 2 || ready.size < n) {
+-            status = "Merge waits for all $n parts. ${ready.size} ready."
++        val gid = groupId ?: run {
++            // say what is missing in the newest split that is not merged yet
++            val open = history.mapNotNull { it.groupId }.distinct().map { SplitLogic.plan(splitParts(), it) }
++                .firstOrNull { it.count >= 2 && !it.merged }
++            status = if (open == null) "No completed split group to merge"
++            else "Merge waits for part ${open.missing.joinToString(", ") { (it + 1).toString() }} of ${open.count}. ${open.chosen.size} ready."
++            return
++        }
++        if (!mergingGroups.add(gid)) {
++            status = "These parts are being merged already"
+             return
+         }
+         viewModelScope.launch(guard + Dispatchers.IO) {
+             try {
++                val gone = checkPartFiles(gid)
++                val plan = SplitLogic.plan(splitParts(), gid)
++                val n = plan.count
++                if (gone.isNotEmpty()) {
++                    status = "Part ${gone.joinToString(", ")} of $n is no longer on this phone (moved or deleted). " +
++                        "Put it back in Movies/Phoenix, or tap Redo part on its card."
++                    return@launch
++                }
++                if (n < 2 || plan.missing.isNotEmpty()) {
++                    status = "Merge waits for part ${plan.missing.joinToString(", ") { (it + 1).toString() }} of $n. ${plan.chosen.size} ready."
++                    return@launch
++                }
+                 setFarm("Merge", 90)
+                 val dest = File(getApplication<Application>().cacheDir, "phoenix_merge_${System.currentTimeMillis()}.mp4")
+-                val ok = VideoConcat.concat(getApplication(), ready.map { Uri.parse(it.uri) }, dest) { done, total ->
++                val ok = VideoConcat.concat(getApplication(), plan.chosen.map { Uri.parse(it.uri) }, dest) { done, total ->
+                     val pct = 90 + ((done * 9) / total.coerceAtLeast(1))
+                     setFarm("Merge $done/$total", pct)
+                 }
+                 if (!ok) {
++                    safeDelete(dest)
+                     setFarm("Merge failed", farmPercent)
+-                    status = "Merge failed — parts may differ in codec. Save parts from History and join in an editor."
++                    status = "Merge failed - the parts differ (codec or size: were they made with different settings or Space versions?). " +
++                        "Save the parts from History and join them in an editor, or redo the odd part."
+                     return@launch
+                 }
+-                val published = publishResult(dest, "Phoenix_merged_${gid}.mp4")
++                // a merge after a part was redone is a NEW file: the old name would hand back the old merged video
++                val name = SplitLogic.mergedName(splitParts(), gid)
++                val published = publishResult(dest, name)
+                 safeDelete(dest)
+                 resultUri = published
++                history.filter { it.groupId == gid && it.kind == "Merged" && it.status == "Done" }
++                    .forEach { updateHistory(it.id, status = "Replaced", eta = "Merged again after a part was redone") }
+                 addHistory(
+                     HistoryItem(
+-                        "MERGE-${System.currentTimeMillis()}", "Merged", "Phoenix_merged_${gid}.mp4",
++                        "MERGE-${System.currentTimeMillis()}", "Merged", name,
+                         published.toString(), "Done", System.currentTimeMillis(),
+                         "Merged", "", null, 1f, "Done", gid, 0, n
+                     )
+@@ -2263,6 +2312,8 @@
+                 toast("Merged video saved to Movies/Phoenix")
+             } catch (e: Throwable) {
+                 status = "Merge failed: ${e.message ?: e.javaClass.simpleName}"
++            } finally {
++                mergingGroups.remove(gid)
+             }
+         }
+     }
+@@ -2675,7 +2726,8 @@
+                     persistHistoryNow()
+                     status = "Complete — ${history.find { it.id == localId }?.spaceLabel ?: "Phoenix Space"} result saved"
+                     val item = history.find { it.id == localId }
+-                    if (options.autoMergeSplits && item?.groupId != null && mergeableGroupId() == item.groupId) {
++                    // 1.2.63: this part's own group (1.2.62 merged only when it was the first mergeable group in History)
++                    if (options.autoMergeSplits && item?.groupId != null && SplitLogic.mergeable(splitParts(), item.groupId)) {
+                         mergeSplitGroup(item.groupId)
+                     }
+                     return
+@@ -2853,7 +2905,8 @@
+             it.kind == "Video" &&
+                 !it.remoteJobId.isNullOrBlank() &&
+                 it.status != "Done" &&
+-                it.status != "Monitoring stopped"
++                it.status != "Monitoring stopped" &&
++                it.status !in setOf("Replaced", "Lost", "Missing")      // 1.2.63: a replaced part watched again came back as "Lost" or as a second copy
+         }.take(MAX_SPACES)
+         resumable.forEach { resumeOne(it) }
+         syncRunning()
+@@ -3152,6 +3205,15 @@
+             status = "Redo part is only for one piece of a split."
+             return
+         }
++        // 1.2.63: a second tap while the part is already running again would have made two copies of it
++        val again = history.any {
++            it.id != localId && it.kind == "Video" && it.groupId == item.groupId && it.partIndex == item.partIndex &&
++                it.createdAt > item.createdAt && it.status !in TERMINAL_STATUSES
++        }
++        if (again) {
++            status = "Part ${item.partIndex + 1} is already running again - see its newer card."
++            return
++        }
+         if (listOf(face1, face2, face3, face4).all { it == null }) {
+             status = "Put the same replacement faces in the slots, then tap Redo part."
+             updateHistory(localId, eta = "Put the same replacement faces in the slots, then tap Redo part")
+@@ -3280,7 +3342,16 @@
+         syncRunning()
+     }
+ 
+-    private fun addHistory(item: HistoryItem) { synchronized(historyLock) { history = (listOf(item) + history).take(50); persistHistory() } }
++    private fun addHistory(item: HistoryItem) {
++        synchronized(historyLock) {
++            // 1.2.63: the newest 50 as before, and besides them every entry of a split not merged yet (at most 300 in all):
++            // 1.2.62 dropped the oldest parts of a video when more jobs and a redone part came after them
++            val all = listOf(item) + history
++            val keep = SplitLogic.trim(splitParts(all)).map { it.id }.toSet()
++            history = all.filter { it.id in keep }
++            persistHistory()
++        }
++    }
+     private fun frameNote(r: JSONObject, message: String): String {
+         val now = sequenceOf("frame", "frames_done", "frame_index", "processed_frames")
+             .map { r.optInt(it, -1) }.firstOrNull { it >= 0 }
+@@ -3317,7 +3388,24 @@
+         o.optInt("origStartPct", -1),
+         o.optInt("origEndPct", -1)
+     )
+-    private fun cleanupHistoryMetadata() { synchronized(historyLock) { history = history.filter { it.uri == null || runCatching { getApplication<Application>().contentResolver.openAssetFileDescriptor(Uri.parse(it.uri), "r") != null }.getOrDefault(false) }; persistHistory() } }
++    private fun cleanupHistoryMetadata() {
++        synchronized(historyLock) {
++            val readable = { u: String -> runCatching { getApplication<Application>().contentResolver.openAssetFileDescriptor(Uri.parse(u), "r")?.use { true } ?: false }.getOrDefault(false) }
++            // 1.2.63: a part of a split that is not merged yet is not removed when its file is gone - it is marked Missing, so
++            // its card stays with Redo part (1.2.62 removed it, and the merge then waited for it for ever)
++            val parts = splitParts()
++            val open = history.mapNotNull { it.groupId }.distinct().filter { g -> SplitLogic.plan(parts, g).let { it.count >= 2 && !it.merged } }.toSet()
++            history = history.mapNotNull { h ->
++                when {
++                    h.uri == null || readable(h.uri) -> h
++                    h.kind == "Video" && h.groupId != null && h.groupId in open ->
++                        h.copy(status = "Missing", eta = "File moved or deleted - put it back in Movies/Phoenix, or tap Redo part")
++                    else -> null
++                }
++            }
++            persistHistory()
++        }
++    }
+ 
+     // Kept at the END of the class on purpose: Kotlin runs property initialisers and init{} blocks in the
+     // order they are written, and the job watchers started here use properties declared far above
+Only in Phoenix_APK_Builder_1.2.63_MergeRedo/src/app/src/main/java/com/swamitech/phoenix: SplitLogic.kt
