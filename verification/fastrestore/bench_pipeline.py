@@ -276,6 +276,8 @@ for tn, m in fa.models.items():
 # --- the job ----------------------------------------------------------------------------------
 clip = WORK + "/clip.mp4"; shutil.copy(os.path.join(HERE, KW.get("clip", "clip90.mp4")), clip)
 src = {0: WORK + "/s0.jpg", 1: WORK + "/s1.jpg"}; shutil.copy(HERE + "/src_a.jpg", src[0]); shutil.copy(HERE + "/src_b.jpg", src[1])
+if KW.get("swapsrc") == "1":     # v11.2.212: each person gets the OTHER replacement photo (a swap across genders: the photo's
+    shutil.copy(HERE + "/src_b.jpg", src[0]); shutil.copy(HERE + "/src_a.jpg", src[1])   # gender is not the person's)
 if KW.get("one"): src = {0: src[0]}
 jid = "BENCH" + LABEL[:3].upper().replace("-", "0")
 if os.environ.get("BENCH_UNIQUE_JID"):
