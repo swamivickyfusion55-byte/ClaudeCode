@@ -1,0 +1,8 @@
+(compare_outputs.py: every output frame and paste mask, 11.2.211 against 11.2.212)
+b211_smooch vs g212_smooch: frames 120/120, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+b211_mwcross_ref vs g212_mwcross_ref: frames 120/120, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+b211_mwhug_ref vs g212_mwhug_ref: frames 120/120, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+b211_mwkissb_noref vs g212_mwkissb_noref: frames 120/120, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+b211_mwkissb_ref2 vs g212_mwkissb_ref2: frames 120/120, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+b211_xg_kissb_noref vs g212_xg_kissb_noref: frames 120/120, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+b211_mwcrosspart_ref vs g212_mwcrosspart_ref: frames 68/68, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000

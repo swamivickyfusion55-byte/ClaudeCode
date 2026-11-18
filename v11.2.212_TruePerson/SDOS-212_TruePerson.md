@@ -94,26 +94,28 @@ network. With no genders from the app (an older app, or a person left unknown) t
 `bench_pipeline.py` (the real job) on each clip, then `identity_check.py` on the output video: each person's face cut at their
 true position, ArcFace against both replacement photos, counted on the frames where at least 70 % of the face is visible. Scored
 against the replacement each person **should** get (`IDC_INTENDED`). The app's genders given (woman = slot 1, man = slot 2) in
-every run.
+every run but the last.
 
 | clip | Detect pictures | photos | 11.2.211 | 11.2.212 |
 |---|---|---|---|---|
 | **a later part of a split: opens in the middle of a crossing, the woman 22 % visible** | none | woman's on her, man's on him | **wrong on every frame**: she has the man's replacement (36 of 36), he the woman's (68 of 68) | **right on every frame** (36 of 36, 68 of 68) |
 | the same part, photos across genders (she gets the man's face, he the woman's) | none | across | **wrong on every frame** (36 of 36, 68 of 68) | **right on every frame** (36 of 36, 68 of 68) |
 | the same part | both | as above | right on every frame | right on every frame |
-| side kiss | none | woman's on her, man's on him | right (57 and 120 frames) | the same |
-| side kiss | both | as above | right | the same |
-| hug (she goes behind him) | both | as above | right; 3 frames of her unpainted at the deepest point | **the same output** (every count equal) |
+| side kiss | none | woman's on her, man's on him | right (57 and 120 frames) | **the same video, pixel for pixel** |
+| side kiss | both | as above | right | **the same video** |
+| side kiss | none | across | right | **the same video** |
+| the whole crossing | both | woman's on her, man's on him | right (72 and 120 frames) | **the same video** |
+| hug (she goes behind him) | both | as above | right; 3 frames of her unpainted at the deepest point | **the same video** |
+| two people kissing (`smooch`), **no genders from the app** | - | as the older bench | right | **the same video** |
 
 The first two rows are your report: the man with the woman's face and the woman with the man's, for a whole part. In 11.2.211 a
 part that opens with one of them barely visible binds the first person to the face that is there (no Detect picture to say
 otherwise), and every later frame agrees with that binding. In 11.2.212 the man is never given the woman's replacement on a
 clean front view, so she is the one found.
 
-Still running when this pack was sent (results to follow in an update of this document): the whole crossing with pictures, the
-side kiss with photos across genders, and the regression run on the two-woman kiss clip without genders from the app (the
-11.2.211 decisions must be unchanged there). The gate does nothing without the app's genders, which `unit212` checks on the
-tracker directly.
+"The same video": every frame of the output and every paste mask equal to 11.2.211's (largest pixel difference 0), on all
+seven clips where 11.2.211 was right. 11.2.212 changes the result only where 11.2.211 had the wrong people, and nothing at all
+when the app sends no genders.
 
 ### 3.2 The tracker alone (`unit212.py`, stand-in faces, no models)
 
