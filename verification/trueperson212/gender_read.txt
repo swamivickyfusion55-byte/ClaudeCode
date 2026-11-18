@@ -1,0 +1,81 @@
+== mw_kiss (A=0 B=1)
+kiss_mw_kiss.mp4
+ person A (woman)
+  front view, not touching             40 face-frames | P(true gender) median 0.993, lowest 0.973 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              29 face-frames | P(true gender) median 0.846, lowest 0.119 | confidently WRONG (P(wrong) >= 0.88): 1 | wrong at >= 0.70: 5 | unsure: 5
+ person B (man)
+  front view, not touching             44 face-frames | P(true gender) median 0.999, lowest 0.998 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching         47 face-frames | P(true gender) median 0.999, lowest 0.998 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  touching the other face              29 face-frames | P(true gender) median 0.999, lowest 0.998 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+== mw_kissb (A=1 B=0)
+kiss_mw_kissb.mp4
+ person A (man)
+  front view, not touching             55 face-frames | P(true gender) median 0.985, lowest 0.883 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              61 face-frames | P(true gender) median 0.946, lowest 0.800 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+ person B (woman)
+  front view, not touching             59 face-frames | P(true gender) median 0.987, lowest 0.935 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              61 face-frames | P(true gender) median 0.982, lowest 0.951 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+== mw_cross (A=0 B=1)
+kiss_mw_cross.mp4
+ person A (woman)
+  front view, not touching             67 face-frames | P(true gender) median 0.993, lowest 0.459 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 2
+  turned (0.34+), not touching       no frames
+  touching the other face              20 face-frames | P(true gender) median 0.690, lowest 0.228 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 2 | unsure: 8
+ person B (man)
+  front view, not touching            100 face-frames | P(true gender) median 1.000, lowest 0.999 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              20 face-frames | P(true gender) median 1.000, lowest 0.999 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+== mw_hug (A=0 B=1)
+kiss_mw_hug.mp4
+ person A (woman)
+  front view, not touching             40 face-frames | P(true gender) median 0.968, lowest 0.724 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              34 face-frames | P(true gender) median 0.591, lowest 0.055 | confidently WRONG (P(wrong) >= 0.88): 4 | wrong at >= 0.70: 9 | unsure: 14
+ person B (man)
+  front view, not touching             77 face-frames | P(true gender) median 0.987, lowest 0.973 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching          9 face-frames | P(true gender) median 0.985, lowest 0.975 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  touching the other face              34 face-frames | P(true gender) median 0.985, lowest 0.969 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+== mw_kissdeg (A=0 B=1)
+kiss_mw_kissdeg.mp4
+ person A (woman)
+  front view, not touching             41 face-frames | P(true gender) median 0.991, lowest 0.906 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              22 face-frames | P(true gender) median 0.922, lowest 0.167 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 3 | unsure: 2
+ person B (man)
+  front view, not touching             51 face-frames | P(true gender) median 1.000, lowest 0.997 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching         47 face-frames | P(true gender) median 0.999, lowest 0.998 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  touching the other face              22 face-frames | P(true gender) median 0.999, lowest 0.998 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+== mw_kissbdeg (A=1 B=0)
+kiss_mw_kissbdeg.mp4
+ person A (man)
+  front view, not touching             55 face-frames | P(true gender) median 0.981, lowest 0.883 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              58 face-frames | P(true gender) median 0.943, lowest 0.709 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+ person B (woman)
+  front view, not touching             62 face-frames | P(true gender) median 0.989, lowest 0.926 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              58 face-frames | P(true gender) median 0.981, lowest 0.933 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+== mw_crossdeg (A=0 B=1)
+kiss_mw_crossdeg.mp4
+ person A (woman)
+  front view, not touching             67 face-frames | P(true gender) median 0.991, lowest 0.374 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 2
+  turned (0.34+), not touching       no frames
+  touching the other face              17 face-frames | P(true gender) median 0.599, lowest 0.295 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 1 | unsure: 8
+ person B (man)
+  front view, not touching            103 face-frames | P(true gender) median 1.000, lowest 0.999 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching       no frames
+  touching the other face              17 face-frames | P(true gender) median 1.000, lowest 0.999 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+== mw_hugdeg (A=0 B=1)
+kiss_mw_hugdeg.mp4
+ person A (woman)
+  front view, not touching             41 face-frames | P(true gender) median 0.945, lowest 0.640 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 1
+  turned (0.34+), not touching       no frames
+  touching the other face              34 face-frames | P(true gender) median 0.427, lowest 0.066 | confidently WRONG (P(wrong) >= 0.88): 3 | wrong at >= 0.70: 11 | unsure: 13
+ person B (man)
+  front view, not touching             77 face-frames | P(true gender) median 0.983, lowest 0.933 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  turned (0.34+), not touching          9 face-frames | P(true gender) median 0.986, lowest 0.970 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+  touching the other face              34 face-frames | P(true gender) median 0.981, lowest 0.964 | confidently WRONG (P(wrong) >= 0.88): 0 | wrong at >= 0.70: 0 | unsure: 0
+GREAD_DONE

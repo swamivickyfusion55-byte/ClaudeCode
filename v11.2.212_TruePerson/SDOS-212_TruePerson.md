@@ -48,14 +48,19 @@ with it.
 ### 1.4 What the gender model can and cannot be trusted with (measured, `gender_read.py`)
 
 The model's own certainty (insightface keeps only its yes / no; 11.2.212 keeps the score) on every detection of the four
-man-woman clips, each person matched by their true points:
+man-woman clips (five people of the sample photo: three women, two men), each also as a phone-quality copy (camera noise, blur,
+H.264 at crf 30) - 8 clips, each person matched by their true points. "Wrong" means the model gave the other gender this
+probability or more:
 
-| view of the face | face-frames | confidently wrong (P of the other gender 0.88 or more) |
-|---|---|---|
-| front, not touching the other face | about 900 | **0** |
-| touching the other face | 34 per person and clip | **up to 4** (the woman read as a man: the man's face is in her crop) |
+| view of the face | | face-frames | wrong at 0.88+ | wrong at 0.70+ | unsure (0.30-0.70) | lowest P of the true gender |
+|---|---|---|---|---|---|---|
+| front, not touching the other face | woman | 417 | **0** | **0** | 5 | 0.37 |
+| | man | 562 | **0** | **0** | 0 | 0.88 |
+| turned (nose 0.34+ eye distances off centre), not touching | man (no turned woman in the clips) | 112 | 0 | 0 | 0 | 0.97 |
+| touching the other face | woman | 275 | **8** (hug: 4 of 34, its phone copy 3 of 34; kiss 1 of 29) | 31 | 50 | 0.06 |
+| | man | 275 | 0 | 0 | 0 | 0.71 |
 
-(Per clip and view, with the phone-quality copies, in the update of this document - being re-run, see §3.3.)
+(`verification/trueperson212/gender_read.txt`, per clip.)
 
 So: on a clean view - front, not touching the other face, a firm detection of a fair size - it was never confidently wrong. While
 two faces touch it is: the woman read as a man with 0.88 or more on up to 4 of 34 frames, because the man's face is in her crop.
@@ -139,9 +144,7 @@ Every earlier suite on the 11.2.212 files: `unit211` 23, `unit210` 19, `unit209`
 (`verification/trueperson212/unit_suites.txt`). The occlusion, contact, eating and skin-tone paths are untouched by the change
 (it is in the identity step only).
 
-The gender model's readings per clip (§1.4) are being re-run on the four man-woman clips and their phone-quality copies; they
-will be in the update.
-
+The gender model's readings (§1.4): 8 clips, 1,641 face-frames.
 
 ## 4. What the log says now
 
@@ -161,7 +164,7 @@ end: `GENDER: faces refused ... N; bound people let go for it N`.
    contact or all profile gets no gender evidence; what the gate learnt on clean frames still holds there (the look memory), but
    a part that starts in contact and never parts is as in 11.2.211.
 4. **Faces the model gets wrong when clean** (strong make-up on a man, a woman with very short hair and a strong jaw, a child)
-   were not in the tests: 0 confident errors in ~900 clean face-frames of two people is not proof for every face. The
+   were not in the tests: 0 confident errors in 979 clean face-frames of five people is not proof for every face. The
    threshold (0.88, and 0.95 to find someone) is set so a borderline reading does nothing.
 5. Synthetic clips only; no footage was looked at. Whether your report is fully covered can only be seen on your videos.
 
