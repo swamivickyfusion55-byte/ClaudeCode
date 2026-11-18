@@ -1,0 +1,11 @@
+kiss_pkiss.mp4             faces   80 | yaw max  75.9 | |pitch| max   9.8 | |roll| max  11.8 | read as past profile (yaw 55+, both 40+): 0
+kiss_pkissdeg.mp4          faces   80 | yaw max  76.1 | |pitch| max  10.2 | |roll| max  11.1 | read as past profile (yaw 55+, both 40+): 0
+side1.mp4                  faces   20 | yaw max  67.3 | |pitch| max   7.3 | |roll| max   2.8 | read as past profile (yaw 55+, both 40+): 0
+prof_image02420_bg.mp4     faces   20 | yaw max  75.0 | |pitch| max   3.7 | |roll| max   4.9 | read as past profile (yaw 55+, both 40+): 0
+prof_image00475_bg.mp4     faces   20 | yaw max  62.7 | |pitch| max  50.5 | |roll| max  39.9 | read as past profile (yaw 55+, both 40+): 0
+prof_image00251_bg.mp4     faces   20 | yaw max  68.1 | |pitch| max  14.2 | |roll| max   5.1 | read as past profile (yaw 55+, both 40+): 0
+*.jpg                      faces   17 | yaw max  74.7 | |pitch| max  49.3 | |roll| max  39.2 | read as past profile (yaw 55+, both 40+): 0
+kiss_mw_hug.mp4            faces   66 | yaw max  49.7 | |pitch| max  21.3 | |roll| max  37.1 | read as past profile (yaw 55+, both 40+): 0
+kiss_smooch.mp4            faces   80 | yaw max  20.7 | |pitch| max  23.6 | |roll| max  25.2 | read as past profile (yaw 55+, both 40+): 0
+lick_choc.mp4              faces   50 | yaw max   2.7 | |pitch| max  24.6 | |roll| max  16.1 | read as past profile (yaw 55+, both 40+): 0
+obj_cup_cheek.mp4          faces   27 | yaw max   1.8 | |pitch| max  22.2 | |roll| max  14.8 | read as past profile (yaw 55+, both 40+): 0

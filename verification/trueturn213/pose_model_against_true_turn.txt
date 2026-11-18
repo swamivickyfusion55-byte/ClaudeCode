@@ -1,0 +1,48 @@
+render (true yaw, pitch 0) -> the 3D-landmark model's pitch / yaw / roll, and its time
+  yaw   +0: pose pitch   -2.3 yaw   +0.1 roll   +3.4  (51 ms)
+  yaw   +0: pose pitch   -2.3 yaw   +0.1 roll   +3.4  (47 ms)
+  yaw  +20: pose pitch   -1.1 yaw  +24.1 roll   +3.4  (42 ms)
+  yaw  -20: pose pitch   -2.7 yaw  -24.1 roll   +4.9  (49 ms)
+  yaw  +40: pose pitch   -4.1 yaw  +44.7 roll   -0.4  (52 ms)
+  yaw  -40: pose pitch   -7.2 yaw  -46.7 roll   +7.9  (42 ms)
+  yaw  +55: pose pitch   -7.5 yaw  +60.1 roll   -3.6  (41 ms)
+  yaw  -55: pose pitch  -18.7 yaw  -61.3 roll  +17.0  (44 ms)
+  yaw  +62: pose pitch  -12.9 yaw  +67.4 roll   -9.0  (46 ms)
+  yaw  -62: pose pitch  -23.1 yaw  -67.2 roll  +21.4  (53 ms)
+  yaw  +68: pose pitch  -21.3 yaw  +72.3 roll  -16.7  (59 ms)
+  yaw  -68: pose pitch  -27.2 yaw  -71.3 roll  +26.4  (38 ms)
+  yaw  +72: pose pitch  -27.0 yaw  +74.5 roll  -22.2  (60 ms)
+  yaw  -72: pose pitch  -31.9 yaw  -75.2 roll  +31.3  (53 ms)
+  yaw  +76: pose pitch  -29.8 yaw  +77.7 roll  -25.1  (43 ms)
+  yaw  -76: pose pitch  -39.7 yaw  -79.0 roll  +38.9  (33 ms)
+  yaw  +80: pose pitch  -36.5 yaw  +80.5 roll  -32.0  (43 ms)
+  yaw  -80: pose pitch  -42.7 yaw  -81.6 roll  +41.6  (46 ms)
+  yaw  +85: pose pitch  -35.0 yaw  +83.8 roll  -29.1  (52 ms)
+  yaw  -85: pose pitch  -44.8 yaw  -84.3 roll  +45.0  (44 ms)
+  yaw  +90: pose pitch  -44.9 yaw  +84.2 roll  -38.8  (39 ms)
+  yaw  -90: pose pitch  -50.4 yaw  -86.3 roll  +50.7  (34 ms)
+  yaw +100: pose pitch  -66.4 yaw  +86.7 roll  -58.3  (50 ms)
+  yaw -100: pose pitch  -43.1 yaw  -88.2 roll  +43.2  (40 ms)
+  yaw +110: not detected
+  yaw -110: pose pitch  -33.3 yaw  -89.3 roll  +32.8  (42 ms)
+  yaw +120: not detected
+  yaw -120: pose pitch  -55.5 yaw  -80.0 roll  +53.9  (46 ms)
+  yaw +135: not detected
+  yaw -135: not detected
+AFLW2000 samples (annotated yaw)
+  image00050.jpg true yaw   +0.9 pitch   -4.7 | model yaw   +1.3 pitch   -5.8
+  image00081.jpg true yaw  +17.9 pitch   +4.5 | model yaw  -19.9 pitch   +1.8
+  image00251.jpg true yaw  -54.7 pitch   +7.0 | model yaw  +68.6 pitch  +12.8
+  image00430.jpg true yaw   +4.7 pitch  +34.4 | model yaw   -8.7 pitch  +28.3
+  image00475.jpg true yaw  +65.6 pitch  +40.0 | model yaw  -62.6 pitch  +49.3
+  image00514.jpg true yaw   -5.3 pitch  +30.7 | model yaw   +2.4 pitch  +26.4
+  image00516.jpg true yaw  -35.7 pitch   -1.0 | model yaw  +36.8 pitch   -9.8
+  image01038.jpg true yaw  +11.1 pitch  +35.9 | model yaw   -3.3 pitch  +30.0
+  image01322.jpg true yaw   -5.4 pitch  -13.6 | model yaw   +5.8 pitch  -19.3
+  image02283.jpg true yaw  -14.1 pitch   +2.5 | model yaw  +20.7 pitch   +1.3
+  image02420.jpg true yaw  +70.9 pitch  -10.3 | model yaw  -74.7 pitch   +1.7
+  image02545.jpg true yaw  +11.0 pitch  -31.0 | model yaw  -10.1 pitch  -28.9
+  image02616.jpg true yaw  +38.0 pitch  -13.5 | model yaw  -41.1 pitch   -2.7
+  image03324.jpg true yaw  -10.9 pitch  +17.3 | model yaw   +7.8 pitch   +5.5
+  image03614.jpg true yaw  +17.6 pitch   +0.3 | model yaw  -19.4 pitch   -4.7
+  image04331.jpg true yaw  +45.5 pitch  +12.3 | model yaw  -37.9 pitch  +11.1

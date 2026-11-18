@@ -1,0 +1,13 @@
+share of the visible face changed by the swap, by the head's true turn (mean over the frames in the band; frames)
+turn       | 11.2.212       | 11.2.213      
+  0- 45 deg |  0.32 ( 45)     |  0.32 ( 45)    
+ 45- 60 deg |  0.29 (  9)     |  0.29 (  9)    
+ 60- 70 deg |  0.26 (  6)     |  0.26 (  6)    
+ 70- 76 deg |  0.25 (  4)     |  0.20 (  4)    
+ 76- 80 deg |  0.24 (  4)     |  0.12 (  4)    
+ 80- 85 deg |  0.25 (  3)     |  0.05 (  3)    
+ 85- 90 deg |  0.25 (  4)     |  0.01 (  4)    
+ 90-100 deg |  0.24 ( 19)     |  0.00 ( 19)    
+100-181 deg |  0.22 ( 16)     |  0.00 ( 16)    
+11.2.212: largest frame-to-frame change of the share 0.03; changes over 0.15: 0
+11.2.213: largest frame-to-frame change of the share 0.08; changes over 0.15: 0

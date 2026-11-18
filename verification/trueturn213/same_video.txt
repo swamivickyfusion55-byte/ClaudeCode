@@ -1,0 +1,9 @@
+(compare_outputs.py: every output frame and paste mask, 11.2.212 against 11.2.213; the whole job at Ultra)
+q212_02420 vs q213_02420: frames 60/60, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+q212_00475 vs q213_00475: frames 60/60, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+q212_00251 vs q213_00251: frames 60/60, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+r212_pkiss vs r212b_pkiss: frames 120/120, largest pixel difference 37, frames differing 120, paste masks largest difference 0.0000
+r212b_pkiss vs r213_pkiss: frames 120/120, largest pixel difference 33, frames differing 120, paste masks largest difference 0.0000
+g212_smooch vs g213_smooch: frames 120/120, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+l212_choc vs l213_choc: frames 150/150, largest pixel difference 0, frames differing 0, paste masks largest difference 0.0000
+(r212_pkiss vs r212b_pkiss: the same 11.2.212 run twice - the profile-kiss job differs from run to run over the whole frame, about 1 level on average, while its paste masks are equal)

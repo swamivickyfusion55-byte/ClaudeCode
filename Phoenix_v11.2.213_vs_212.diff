@@ -1,0 +1,284 @@
+diff -ru -x __pycache__ -x SDOS-213_TrueTurn.md v11.2.212_TruePerson/config.py v11.2.213_TrueTurn/config.py
+--- v11.2.212_TruePerson/config.py	2026-11-18 01:30:13.832275526 +0000
++++ v11.2.213_TrueTurn/config.py	2026-11-18 04:28:45.422087702 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.212"
+-BUILD = "TruePerson · each person's gender as confirmed in the app's Detect step is used again: a face that reads as the other gender on a clean front view (or looks like one that did) never gets that person's replacement, a person bound to such a face is let go and found again; the Space keeps the gender model's own certainty · Steady · the face outline and the line where one face lies over another no longer shake with the detector (landmarks smoothed in the face's own frame, a face going behind another filtered) · TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.213"
++BUILD = "TrueTurn · a head turned so far away that only a sliver of the face shows (beyond ~80 deg) is no longer painted with a face drawn at a less turned angle: the replacement gives way smoothly to the person's own face, read by the 3D-landmark model of the face pack · TruePerson · each person's gender as confirmed in the app's Detect step is used again: a face that reads as the other gender on a clean front view (or looks like one that did) never gets that person's replacement, a person bound to such a face is let go and found again; the Space keeps the gender model's own certainty · Steady · the face outline and the line where one face lies over another no longer shake with the detector (landmarks smoothed in the face's own frame, a face going behind another filtered) · TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru -x __pycache__ -x SDOS-213_TrueTurn.md v11.2.212_TruePerson/core_pipeline.py v11.2.213_TrueTurn/core_pipeline.py
+--- v11.2.212_TruePerson/core_pipeline.py	2026-11-18 01:30:03.146540255 +0000
++++ v11.2.213_TrueTurn/core_pipeline.py	2026-11-18 04:38:23.571993326 +0000
+@@ -1857,6 +1857,9 @@
+         "guard": float(np.clip(guard, 0.0, 1.0)),
+         "src": src,
+         "track": track,
++        # v11.2.213 (SDOS-213): how much of the replacement this head's turn allows (1 = all; 0 = turned beyond what the swap
++        # can draw: the person's own face). Applied on top of the paint's own fade, at paint time.
++        "turn_w": _turn_w_of(face, track),
+         # The last box the detector actually reported for this identity. The
+         # smoothed/predicted bbox lags and stalls, so it is useless for asking
+         # "was this face on its way out of frame?" - this is not.
+@@ -1874,6 +1877,17 @@
+     }
+ 
+ 
++def _turn_w_of(face, track):
++    """v11.2.213: the turn weight for a record - the track's smoothed reading, else this detection's own."""
++    try:
++        y = getattr(track, "turn_yaw", None) if track is not None else None
++        if y is None:
++            y = getattr(face, "_turn_yaw", None)
++        return float(_E.turn_weight(y))
++    except Exception:
++        return 1.0
++
++
+ def _geom_lerp(a, b, t):
+     """Blend two geometry records. ``t`` in [0,1], 0 = a, 1 = b."""
+     t = float(np.clip(t, 0.0, 1.0))
+@@ -1886,6 +1900,7 @@
+         out["lmk"] = b["lmk"] if t >= 0.5 else a["lmk"]
+     out["alpha"] = float(a["alpha"] * (1.0 - t) + b["alpha"] * t)
+     out["guard"] = float(a["guard"] * (1.0 - t) + b["guard"] * t)
++    out["turn_w"] = float(a.get("turn_w", 1.0) * (1.0 - t) + b.get("turn_w", 1.0) * t)      # v11.2.213
+     out["src"] = b["src"] if t >= 0.5 else a["src"]
+     out["track"] = b["track"] if t >= 0.5 else a["track"]
+     out["det"] = bool(a.get("det")) and bool(b.get("det"))
+@@ -2365,6 +2380,14 @@
+             logging.info("gender model: its score kept on each face (gender gate, SDOS-212)")
+     except Exception as _ge:
+         logging.debug("gender score not installed: %s", _ge)
++    # v11.2.213 (SDOS-213): the head's turn (3D-landmark model of the same pack): a head turned beyond what the swap can draw
++    try:
++        if _E.turn_model_load(_fa):
++            logging.info("turn model loaded: a head turned beyond what the swap can draw gives way to its own face (SDOS-213)")
++        else:
++            logging.warning("turn model (1k3d68.onnx) not found in the face model pack - heads turned far away are painted as in 11.2.212")
++    except Exception as _te:
++        logging.debug("turn model not loaded: %s", _te)
+ 
+     # THE weights are not a pinned dependency. Everything else this build runs
+     # on is frozen in requirements.txt; inswapper_128.onnx is fetched from
+@@ -3298,6 +3321,49 @@
+     return sorted(_as_face_list(faces), key=lambda f: _xyxy(f)[0])
+ 
+ 
++_TURN_STATS = {"read": 0, "frames_given_back": 0, "frames_partly": 0, "past": 0}
++
++
++def _turn_read(img, f, tr):
++    """v11.2.213 (SDOS-213): read the head's turn on a detection - before the landmark gate, so a detection the gate drops (the
++    5 points of a head turned far away are not trusted) still tells the track how far the head has turned - and keep it,
++    smoothed, on the track. Asked of the 3D-landmark model only for a face whose 5 points look turned (or whose track was turned):
++    a front or three-quarter face costs nothing."""
++    try:
++        if img is None or f is None or not bool(int(_E._P.get("turn_fade", 1))):
++            return
++        h = _E._yaw_offset(getattr(f, "kps", None))
++        if h is None:
++            return
++        prev = getattr(tr, "turn_yaw", None) if tr is not None else None
++        if h >= float(_E._P.get("turn_check", 0.40)) or (prev is not None and prev >= 45.0):
++            r = _E.turn_pose(img, f)
++            if r is None:
++                return
++            y, nod, tilt = r
++            _TURN_STATS["read"] += 1
++            # past profile: a head already turned past turn_lo whose nod and tilt now both read wild has turned on, away from
++            # the camera - the model shows it as a 62-75 deg turn, which would bring the replacement back (SDOS-213 §1.3)
++            pp = float(_E._P.get("turn_past_pr", 40.0))
++            if (prev is not None and prev >= float(_E._P.get("turn_lo", 78.0)) and y >= 55.0 and nod >= pp and tilt >= pp):
++                y = 90.0
++                _TURN_STATS["past"] = int(_TURN_STATS.get("past", 0)) + 1
++        else:
++            y = 0.0
++        try:
++            f._turn_yaw = float(y)
++        except Exception:
++            pass
++        if tr is not None:
++            if prev is None:
++                tr.turn_yaw = float(y)
++            else:
++                a = float(_E._P.get("turn_ema_up", 0.70)) if y > prev else float(_E._P.get("turn_ema_down", 0.50))
++                tr.turn_yaw = float(prev + a * (float(y) - prev))
++    except Exception as e:
++        logging.debug("turn read skipped: %s", e)
++
++
+ def _parse_person_gender(v):
+     """settings.person_gender (the app sends one entry per slot: 0 = woman, 1 = man, null = not known - the letter shown under each
+     Detect face, which the user can tap to correct) -> [0 / 1 / None] x 4. v11.2.141 used it; it was lost when the engine was
+@@ -6032,6 +6098,8 @@
+                      _src_gender)
+         _FRONT_MEM.clear(); _FRONT_NOW.clear()
+         _HH.reset()                                        # v11.2.210
++        for _tk_ in _TURN_STATS:                           # v11.2.213
++            _TURN_STATS[_tk_] = 0
+         for _sk_ in _E.SIDE_STATS:
+             _E.SIDE_STATS[_sk_] = 0
+         _ARC_STATS.update(reused=0, frames=0, blocked=0)   # v11.2.203: per job
+@@ -6940,6 +7008,7 @@
+                                 if iou > best_iou:
+                                     best_iou, best_tr = iou, t
+                             tr_guess = best_tr
++                        _turn_read(frm, f, tr_guess)                # v11.2.213 (SDOS-213)
+                         if _kps_reliable(f, tr_guess):
+                             _reliable.append(f)
+                         else:
+@@ -8512,6 +8581,15 @@
+                         continue
+                     _use = dict(_use)
+                     _use["alpha"] = _a
++                    # v11.2.213 (SDOS-213): a head turned beyond what the swap can draw gives way to its own face - on top of the
++                    # paint's own fade, which is left as it is (the turn's reading is itself smoothed)
++                    _tw = float(_use.get("turn_w", 1.0) if _use.get("turn_w", 1.0) is not None else 1.0)
++                    if _tw < 0.999:
++                        _use["alpha"] = _a * _tw
++                        if _use["alpha"] <= 0.02:
++                            _TURN_STATS["frames_given_back"] += 1
++                            continue
++                        _TURN_STATS["frames_partly"] += 1
+                     if _r is None:
+                         _use["det"] = False
+                     _paint[slot] = _use
+@@ -8742,6 +8820,10 @@
+                     int(_hs.get("frames", 0)), int(_hs.get("entered", 0)), int(_hs.get("ref", 0)),
+                     int(_hs.get("coast", 0)), int(_hs.get("handed", 0)), int(_hs.get("lost", 0)), int(_hs.get("jumped", 0)),
+                     int(_E.SIDE_STATS.get("frames", 0)), int(_E.SIDE_STATS.get("held", 0)), int(_E.SIDE_STATS.get("outline", 0)))
++            logging.info("TURN: heads read for their turn %d times (past profile %d); frames where a head turned beyond what the "
++                         "swap can draw was given back to its own face %d, partly %d (SDOS-213)", int(_TURN_STATS.get("read", 0)),
++                         int(_TURN_STATS.get("past", 0)), int(_TURN_STATS.get("frames_given_back", 0)),
++                         int(_TURN_STATS.get("frames_partly", 0)))
+             if getattr(_tk, "person_gender", None):
+                 logging.info("GENDER: faces refused for a person because they read (or looked) like the other gender %d; "
+                              "bound people let go for it %d", int(getattr(_tk, "gender_refused_n", 0) or 0),
+diff -ru -x __pycache__ -x SDOS-213_TrueTurn.md v11.2.212_TruePerson/swap_engine.py v11.2.213_TrueTurn/swap_engine.py
+--- v11.2.212_TruePerson/swap_engine.py	2026-11-18 02:07:57.711951522 +0000
++++ v11.2.213_TrueTurn/swap_engine.py	2026-11-18 04:38:23.568781267 +0000
+@@ -62,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.212-trueperson"
++ENGINE_VERSION = "aequus-1.2.213-trueturn"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -242,6 +242,23 @@
+     "id_gender_found_calls": 3,      # ...on this many detections in a row (clean views, this probable)...
+     "id_gender_found_ref": 0.10,     # ...and not unlike their own Detect picture (a picture sim under this: someone else)
+     "trk_ref_stale_other": 0.30,     # ...but never a face that another person's picture matches this well
++    # v11.2.213 (SDOS-213): a head turned so far away that the swap cannot draw it. The swap model (inswapper_128) draws faces up
++    # to a strong profile; beyond about 78 deg it draws the replacement LESS turned than the head (an eye and the lips on the
++    # cheek: "pasted at the wrong angle"). The head's turn is read by insightface's 3D-landmark model (1k3d68, in the buffalo_l
++    # pack) on every detection that looks turned, smoothed on the track, and the replacement gives way to the person's own face
++    # between turn_lo and turn_hi (degrees as that model reads them: on the test head it reads 2-5 deg above the true turn up to
++    # 80 deg and tops out at 84-89 beyond 90; profile kisses read 72-76 and are not touched).
++    "turn_fade": 1,                  # 0 = 11.2.212
++    "turn_lo": 78.0,                 # the replacement starts to give way here...
++    "turn_hi": 86.0,                 # ...and is gone here (raised cosine between)
++    "turn_check": 0.40,              # the model is asked only when the 5 points' nose offset is this many eye distances (~38 deg+)
++    "turn_ema_up": 0.70,             # smoothing on the track: a reading more turned than the last counts this much...
++    "turn_ema_down": 0.50,           # ...a less turned one this much
++    "turn_past_pr": 40.0,            # past profile (the head turning on, away from the camera): the model then reads its nod AND
++                                     # its tilt both this wild (40-99 deg on the test head, 16-29 at a real 66-80 deg turn); for a
++                                     # head already turned past turn_lo such a reading is taken as 90 deg, not as the 62-75 deg
++                                     # turn it shows (a head seen for the first time is read as it shows: a real nodded 3/4 face
++                                     # can read so too)
+     "occ_flow": 1.0,                # last frame's cut moves with the object (optical flow inside the face crop) before smoothing
+     "occ_instant": 1.0,             # a cut opens at once where the colour test AND the occlusion model both see the object
+     "occ_snap": 1.0,                # the cut's edge follows the picture's own edges (guided filter in the face crop)
+@@ -1080,7 +1097,8 @@
+                  "occ_face_ref",                # v11.2.206: how often the occlusion model saw face at each pixel lately
+                  "occn_core",                   # v11.2.206: the mouth rule's cut alone, smoothed as in 11.2.205 (eating rule)
+                  "side_seg", "side_age",        # v11.2.210: the last face map that was this face's own, in a side-view kiss
+-                 "g_contra", "g_bad", "g_veto_call")   # v11.2.212: evidence against the person's gender, faces read as the other one
++                 "g_contra", "g_bad", "g_veto_call",   # v11.2.212: evidence against the person's gender, faces read as the other one
++                 "turn_yaw")                    # v11.2.213: the head's turn (3D-landmark model, smoothed), None = not read
+ 
+     def __init__(self, slot=0):
+         self.slot = slot
+@@ -3523,6 +3541,75 @@
+         return False
+ 
+ 
++_TURN = {"m": None}
++
++
++def turn_model_load(fa=None, path=None):
++    """v11.2.213 (SDOS-213): insightface's 3D-landmark model (1k3d68.onnx, in the buffalo_l pack the job already downloads; the job
++    does not load it for anything else) - read for the head's turn. True when loaded."""
++    if _TURN["m"] is not None:
++        return True
++    try:
++        import os
++        from insightface.model_zoo import model_zoo
++        p = path
++        d = getattr(fa, "model_dir", None)
++        if p is None and d:
++            c = os.path.join(d, "1k3d68.onnx")
++            p = c if os.path.exists(c) else None
++        if p is None or not os.path.exists(p):
++            return False
++        prov = ["CPUExecutionProvider"]
++        try:
++            prov = list(fa.det_model.session.get_providers()) or prov
++        except Exception:
++            pass
++        m = model_zoo.get_model(p, providers=prov)
++        if m is None or getattr(m, "taskname", "") != "landmark_3d_68":
++            return False
++        m.prepare(ctx_id=0 if "CUDAExecutionProvider" in prov else -1)
++        _TURN["m"] = m
++        return True
++    except Exception as e:
++        log.debug("turn model not loaded: %s", e)
++        return False
++
++
++def turn_pose(img, face):
++    """v11.2.213: (turn, nod, tilt) of the head in degrees as the 3D-landmark model reads them - turn as |yaw| (0 = facing the
++    camera, 90 = full profile; the model tops out near 85-89), nod and tilt as |pitch| and |roll| - or None."""
++    m = _TURN["m"]
++    if m is None or img is None or face is None:
++        return None
++    try:
++        from insightface.app.common import Face as _IFace
++        f = _IFace(bbox=np.asarray(face.bbox, np.float32).reshape(-1)[:4].copy())
++        m.get(img, f)
++        p = f.get("pose")
++        return None if p is None else (abs(float(p[1])), abs(float(p[0])), abs(float(p[2])))
++    except Exception:
++        return None
++
++
++def turn_yaw(img, face):
++    """v11.2.213: the head's turn alone (turn_pose), or None."""
++    r = turn_pose(img, face)
++    return None if r is None else r[0]
++
++
++def turn_weight(yaw):
++    """v11.2.213: how much of the replacement is painted at this turn: 1 up to turn_lo, 0 from turn_hi (raised cosine)."""
++    if yaw is None or not bool(int(_P.get("turn_fade", 1))):
++        return 1.0
++    lo, hi = float(_P.get("turn_lo", 78.0)), float(_P.get("turn_hi", 86.0))
++    y = float(yaw)
++    if y <= lo:
++        return 1.0
++    if y >= hi:
++        return 0.0
++    return float(0.5 + 0.5 * math.cos(math.pi * (y - lo) / (hi - lo)))
++
++
+ def _gender_p_male(face):
+     """v11.2.212: P(male) from the gender model's own score, or None (no score kept for this face)."""
+     try:
