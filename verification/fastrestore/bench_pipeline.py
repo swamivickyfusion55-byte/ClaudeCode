@@ -93,6 +93,21 @@ if os.environ.get("MASK_DUMP"):
         return m
     swap_engine.AlignedCompositor.build_mask = _bm
     atexit.register(lambda: np.savez_compressed(WORK + "/mask_dump.npz", m=np.array(_DUMP), slot=np.array([a for a, _, _, _ in _MS]), M=np.array([b for _, b, _, _ in _MS]), size=np.array([c for _, _, c, _ in _MS]), g=np.array([d for _, _, _, d in _MS])))
+if os.environ.get("CROP_DUMP"):
+    # v11.2.214: the aligned crops of chosen output frames: what the swap network drew (fake: after the face restorer if one runs),
+    # the footage's own crop (target), the paint mask and the colour-matched swap (toned) - CROP_DUMP=60,80 -> crop_dump.npz
+    import atexit as _ax3
+    _want = set(int(x) for x in os.environ["CROP_DUMP"].split(",") if x.strip())
+    _CD = {}; _o_cm = swap_engine.AlignedCompositor.colour_match
+    def _cm_dump(self, fake_bgr, target_bgr, mask, track=None, strength=1.0):
+        out = _o_cm(self, fake_bgr, target_bgr, mask, track=track, strength=strength)
+        g = int(getattr(cp, "_ORDER_NOW", [0])[0])
+        if g in _want:
+            for k_, v_ in (("fake", fake_bgr), ("target", target_bgr), ("mask", mask), ("toned", out)):
+                _CD["%d_%s" % (g, k_)] = np.array(v_).copy()
+        return out
+    swap_engine.AlignedCompositor.colour_match = _cm_dump
+    _ax3.register(lambda: np.savez_compressed(WORK + "/crop_dump.npz", **_CD))
 if os.environ.get("STAGE_DUMP"):
     # v11.2.210: what each rule of build_mask did to each face on each frame - the face's own outline, the cut for a face in
     # front (rivals), the colour test, the occlusion model, the eating rule - as the share of the crop kept, so a frame where

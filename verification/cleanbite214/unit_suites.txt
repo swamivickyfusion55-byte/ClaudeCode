@@ -1,0 +1,277 @@
+== unit214 (v11.2.213 against v11.2.214; the real occlusion net on the synthetic bar clips)
+PASS occ_net_raw(cache=False) (the erase, which runs in the swap workers): the net's map, and the shared memory of the last map untouched
+PASS occ_net_raw() as before: keeps the last map, and gives the same one back for the same crop
+PASS the bar through the outline gives a mask  [share 0.049]
+PASS it covers the whole bar inside the face outline (edge and the way out through the outline included)  [1.000]
+PASS it does not touch the mouth's cavity (an island the net half believes is face, 14 px from the bar)  [0.000]
+PASS nothing far from the bar is taken (within 15 px of it, or on its way out)
+PASS no face pixel away from the bar is taken
+PASS a face with an open mouth and no object: nothing is taken (None)
+PASS a hole inside the face outline that reaches no edge (a cavity): nothing is taken
+PASS a speck at the outline (under the minimum, short of the core): nothing is taken
+PASS an object in a crop that runs out of the frame (the border is smeared there): not taken
+PASS ... and in a crop inside the frame it is
+PASS without the edge and the way out (their settings at 0) the mask stops at the eroded outline and leaves the bar's rim  [0.594 against 1.000]
+PASS the net gives nothing: no mask (None)
+PASS a failing net never reaches the job (None)
+PASS obj_erase = 0 (11.2.213): the network gets the frame itself
+PASS with an object: a new frame, the input frame itself untouched
+PASS the object's colour is gone from the middle of its place (filled from around it, not left)  [red excess 0 (was 205)]
+PASS only the object's place and a little around it changed  [4219 px changed, mask 4218 px]
+PASS a region over the size limit (filled at a smaller size): the object is gone, only its place changed  [region 358 x 107 px, red excess 31]
+PASS the track remembers it (erase_prev)
+PASS not Ultra / Best, nothing cut before and no earlier erase: not even looked for (no cost)
+PASS not Ultra / Best, but the last frame's cut was big (over 2% of the crop): looked for
+PASS not Ultra / Best, an object was taken out on the last frame: looked for again (it holds)
+PASS two faces in contact (rivals): the contact rules decide, nothing taken
+PASS a partner in contact: nothing taken
+PASS a face turned beyond obj_erase_yaw (the nose far off the eyes' middle): nothing taken (the profile mask decides there)
+PASS a face turned a little: taken
+PASS no landmarks: nothing taken
+PASS no object found: the frame itself, and the track forgets (erase_prev False)
+PASS a failing mask never reaches the job (the frame itself)
+PASS no occlusion net loaded: the frame itself
+PASS build_mask: the object's place is cut from the paste (it was taken out of the network's input, so nothing is drawn there to show), the net's map shared, the cut 1% wider than the object  [mask there 0.91 -> 0.00]
+PASS ...and nothing else changes (away from it the mask is the same, nowhere is it larger)  [far max diff 0.00000, largest increase 0.00000]
+PASS obj_erase_cut = 0 (or obj_erase = 0): the mask of 11.2.213, the erase not asked
+PASS obj_erase = 0: not asked, the mask as without the cut
+PASS two faces in contact (rivals): the contact rules decide, the erase's cut stands aside
+PASS a partner touching: the erase's cut stands aside
+PASS a tier that does not erase (Fast, Balanced: face._erase_on False): the paste's cut is not asked either, the mask as in 11.2.213
+PASS a face nobody tagged (a path that does not know the tier): the paste's cut is not asked either (11.2.213)
+PASS a tier that erases (face._erase_on True): asked
+PASS a face turned beyond obj_erase_yaw: not asked
+PASS no object found: the mask as without the cut
+PASS a failing erase never reaches the mask (as without the cut)
+PASS run(erase_always=True) gives the swap network the erased frame, not the frame
+PASS run() with no flag and nothing cut before gives it the frame itself
+PASS run() has the erase_always flag, off by default
+PASS _swap_one asks for the erase at Ultra, Best and Optimized only (Fast and Balanced as in 11.2.213)
+PASS the job's key-swap loop (where the network really runs) hands it the erased frame at those tiers, with the contact rules (partners, rivals); the other tiers the frame itself
+PASS the job's composite of a cached swap (_reuse_one) tells the mask whether the tier erases (the cut follows the tier)
+PASS a real PredictedFace through _swap_one and _reuse_one at Ultra: tagged erase True, and the legacy path's flag True  [('run', True, True) | ('reuse', True, None)]
+PASS a real PredictedFace through _swap_one and _reuse_one at Best: tagged erase True, and the legacy path's flag True  [('run', True, True) | ('reuse', True, None)]
+PASS a real PredictedFace through _swap_one and _reuse_one at Optimized: tagged erase True, and the legacy path's flag True  [('run', True, True) | ('reuse', True, None)]
+PASS a real PredictedFace through _swap_one and _reuse_one at Balanced: tagged erase False, and the legacy path's flag False  [('run', False, False) | ('reuse', False, None)]
+PASS a real PredictedFace through _swap_one and _reuse_one at Fast: tagged erase False, and the legacy path's flag False  [('run', False, False) | ('reuse', False, None)]
+PASS the job resets and logs the erase counters
+PASS the version is 11.2.214  [v11.2.214]
+PASS the real occlusion net loads
+PASS real net, frames with an open mouth and NO object: nothing is taken  [[0, 0, 0]]
+PASS real net, a bar half in the open mouth (5 colours and angles): at least 95% of the bar inside the face outline is taken out (every frame)  [min 0.972, mean 0.997 over 9 frames]
+PASS real net: the open mouth's cavity (away from the bar) is not touched (under 5% on every frame)  [max 0.000, mean 0.000]
+all checks passed
+== unit213 (v11.2.212 against v11.2.214)
+PASS turn weight: 1 up to 78 deg (as the 3D-landmark model reads), smoothly to 0 at 86, 0 beyond  [[1.0, 1.0, 1.0, 1.0, 1.0, 0.85, 0.5, 0.15, 0.0, 0.0]]
+PASS turn_fade = 0: weight 1 at any turn (11.2.212)
+PASS a front face: the pose model is not asked (no cost), the track reads 0  [calls 0, yaw 0.0]
+PASS a turned face: asked, and the track follows a head turning away within 3 detections (0.7 a step)  [58.8, 81.7, weight 0.55]
+PASS after a strong turn the model is still asked when the 5 points look front (they are not trusted there)
+PASS turning back: the weight is back to 1 within 4 detections  [yaw 14.6]
+PASS past profile (a head already turned 84 deg reads 70 with nod 62 / tilt 55): kept as turned away, weight 0  [yaw 89.8]
+PASS ...but a head seen for the first time with such a reading is read as it shows (a real nodded 3/4 face): weight 1  [yaw 70.0]
+PASS ...and turning back (a plausible 70 deg reading) brings the replacement back within 2 detections  [yaw 75.0]
+PASS a new face turned away: its record allows none of the replacement  [0.0]
+PASS a carried / predicted face takes its track's turn (82 deg: half)  [0.500]
+PASS a face never read: weight 1 (as 11.2.212)
+PASS between two key frames the weight is interpolated like the paint's alpha  [0.750]
+PASS records without a weight (made elsewhere) count as 1
+PASS no reading (model missing or failed): the track has none, the weight stays 1
+PASS an error in the reading never reaches the job
+PASS the 3D-landmark model loads from the face pack (1k3d68.onnx)
+PASS rendered head: full replacement up to a 75 deg turn, none from 90 deg
+all checks passed
+== unit212 (v11.2.211 against v11.2.214)
+PASS no Detect pictures, the man on the left: 11.2.211 gives him the WOMAN's replacement (the report: a girl's face on a man)  [120 wrong of 120]
+PASS ...11.2.212 with the people's genders: each gets their own from the first frame, none wrong  [0 wrong, 120 right of 120]
+PASS a part opening on the woman alone, her picture poor (she reads more like the man's): 11.2.211 gives her the man's replacement  [80 wrong]
+PASS ...11.2.212: never (a clean front view of her reads as a woman)  [0 wrong, 118 right]
+PASS ...and she is found by her gender (the only woman, read clean) within 3 detections, not left unpainted  [hers from call 2; 78 of her 80 calls painted]
+PASS two women on screen and a poor picture: neither is found by gender (the picture or the elimination rule must decide)  [0 found by gender]
+PASS a woman unlike the woman's picture (a stranger), alone: not given her replacement  [0 calls painted]
+PASS bound to the wrong people: from the first clean front view on, neither wrong replacement is painted (not even carried)  [wrong on calls []]
+PASS ...and both are let go and found again: each with their own within 5 calls  [own from call 2, let go 2]
+PASS faces touching, the woman misread as a man: she keeps her replacement (contact readings are not used)  [0 calls without hers, 0 wrong]
+PASS a side view of the woman read as a man: she keeps her replacement  [30 of 30]
+PASS the man read once as a man: in contact (gender unreadable) he still never gets the woman's replacement  [0 wrong]
+PASS no genders from the app: every decision as in 11.2.211 (the gate is off)
+PASS id_gender_gate = 0: as 11.2.211 even with the genders given
+PASS the ordinary case (good pictures, both clean): every frame painted, none refused  [160 right of 160, 0 refused]
+PASS a hug: her hidden, his face alone where she was - she is NOT let go, and has hers the frame she is back  [let go 0, after: ['W', 'W', 'W', 'W'], wrong 0]
+PASS settings.person_gender is read as the app sends it (0 / 1 / null per slot; anything else is 'not known')  [[[0, 1, None, None], [1, None, 0, None], [0, 1, None, None], [None, None, None, None], [None, None, None, None], [1, None, None, None], [None, None, None, None]]]
+all checks passed
+== unit211 (v11.2.210 against v11.2.214)
+PASS a still face, noisy detector: the landmarks' jitter in the picture falls by 45 % or more  [1.65 px -> 0.87 px]
+PASS ...and they are nearer the true places than the raw detections are  [error 1.88 px -> 1.30 px]
+PASS a face moving 6 px a frame: the landmarks keep their place against the 5 points (no lag of their own; within 1 px)  [largest difference 0.00 px]
+PASS a face turning 1.2 deg a frame: the landmarks follow it (the 5 points are smoothed anyway; error against the true landmarks no larger than the points' own lag)  [landmark error up to 4.33 px]
+PASS a jaw that really drops (8 px of 112 in 3 frames): the landmarks reach 80 % of it within 4 frames of the end  [reached 99 % at frame 32 (the move ends at 28)]
+PASS without a detection (predict) the landmarks move with the 5 points  [points 3.40 px, landmarks 3.40 px]
+PASS lmk_smooth = 0: the landmarks are the detections as they are (11.2.210)
+PASS a thin strip along the face's own edge is not an object (11.2.210 cut it)  [cut 0 px (11.2.210: 3111 px)]
+PASS a spoon-sized blob at the mouth is still cut  [cut 4416 px of 3613]
+PASS a big piece over the cheek is still cut  [8009 px]
+PASS a piece cut on the last frame stays cut while it overlaps itself (the mouth rule's hysteresis)  [held 732 px, without the last frame 0 px]
+PASS with the new switches off the strip is cut as before and nothing is held (11.2.210)
+PASS steady motion (4 px a frame, a turn of 0.5 deg a frame, growing) passes without lag: centre within 0.5 px after 25 frames  [0.02 px]
+PASS a still face measured with white noise (1.2 px, 0.6 % size, 0.2 deg): centre and size noise fall by 15 % or more (all a filter with no lag can do)  [centre 1.46 -> 1.09 px, size 0.0055 -> 0.0041]
+PASS a head that turns round (4 px a frame to 4 px the other way in 16 frames) is followed within 3 px throughout  [largest error 2.5 px]
+PASS A behind B and moving against it, the frame-to-frame reading showing B's motion: it is not used - A goes on at its own speed (+6 px a frame, not B's -5)  [speed 6.0 px a frame]
+PASS   (hid_pass_noflow = 0: the reading moves A for the 6 frames it lasts, but only the position: afterwards it goes on at its own speed)  [speed 5.4 px a frame]
+PASS   (hid_weak_flow = 0 and hid_pass_noflow = 0, 11.2.210: dragged along with B, moving the other way)  [speed -4.7 px a frame]
+PASS after hid_lost frames (here 15) of nothing to follow, the carry is handed back over 6 frames and then ends  [carried on 20 of 39 frames, lost 1]
+PASS the detector finds A 90 px further on: handed over in steps (largest step under 35 px; 11.2.210 jumped 90 px at once)  [steps [21, 21, 21, 21]]
+PASS a carried face is cut less by the face in front (its outline dilated 0.06 of the crop, not 0.085): more of it painted  [4948 against 4733]
+PASS a face that is not carried: the cut as in 11.2.210  [4733 against 4733]
+PASS rival_dilate_hid = 0: a carried face is cut as in 11.2.210  [4577 against 4577]
+all checks passed
+== unit210 (v11.2.209 against v11.2.214)
+PASS the new switches off: v11.2.210's mask equals v11.2.209's on all 150 frames of the eating clip  [largest difference 0.00e+00]
+PASS a valid mask (0-1, finite) on every frame
+PASS the scoop on the lips: the replacement's lips stay on (0.80 or more of the lips not under it; v11.2.209 showed the footage's own)  [v11.2.210 0.91, v11.2.209 0.04]
+PASS between licks (the scoop under the lips): the lips fully the replacement's (0.95 or more; v11.2.209 faded them in and out)  [lowest: v11.2.210 0.96, v11.2.209 0.07]
+PASS the mouth does not change between the two people from one frame to the next (lips paint changes by under 0.15)  [largest change: v11.2.210 0.08, v11.2.209 0.40]
+PASS the scoop over the face is not painted over while it is on the lips (under 0.05)  [v11.2.210 0.00, v11.2.209 0.13]
+PASS ...nor while it rests on the chin, under the lips (under 0.15; v11.2.209 painted the chin over it)  [v11.2.210 0.03, v11.2.209 0.77]
+PASS with nothing at the mouth the lips are fully painted  [1.000]
+PASS the side-view clip's two faces are found apart and are side views (nose offset 0.45 or more)  [offsets 0.83, 0.93]
+PASS side-view partners, the face behind: no paint on the partner's side of the line  [largest paint there 0.000 (without the rule 0.000)]
+PASS side-view partners, the face behind: its own side painted as without a partner (within 3 %)  [18490 vs 18490]
+PASS side-view partners, the face behind: the occlusion model's cut is not run (it takes either face for the face there)  [calls with a partner 0, without 1]
+PASS side-view partners, the face in front: no paint on the partner's side of the line  [largest paint there 0.000 (without the rule 0.000)]
+PASS side-view partners, the face in front: its own side painted as without a partner (within 3 %)  [15768 vs 15768]
+PASS side-view partners, the face in front: the occlusion model's cut is not run (it takes either face for the face there)  [calls with a partner 0, without 1]
+PASS a front-view partner: the mask is as without the rule, and the occlusion model's cut runs  [largest difference 0.00e+00, calls 1]
+PASS the line between two faces of the same size lies midway: own side painted, the partner's not  [at own centre 1.00, midway 0.50, partner 0.00]
+PASS cover of an outline by one shifted half its width is 0.5; apart, 0
+PASS a least-squares similarity recovers a turn of 12 deg, a size change of 7 % and a shift exactly
+all checks passed
+== unit209
+PASS the woman alone, the man's Detect picture matching nobody (job DFA984A1): the male replacement is never put on her  [0 calls with the male replacement on her]
+PASS the woman alone, no Detect pictures: the male replacement is never put on her  [0 calls with the male replacement on her]
+PASS ...also when her side view is read as male (side views are not trusted for gender)  [0 calls]
+PASS both on screen, no pictures: the man gets the male replacement at once (as before)  [first at call 0, 0 wrong]
+PASS both on screen, the man's picture matching nobody: he is found by elimination after about 45 sightings (job C77E081B)  [first at call 45, 0 wrong]
+PASS ...also when his gender is read wrong: with the woman found in the same frame, he can only be the man  [first at call 45, 0 wrong]
+PASS ...but a weak detection (score 0.35: maybe not a face) is never taken this way  [first None]
+PASS ...nor with a third face on screen (the picture must decide then)  [first None]
+PASS the man alone after the woman left, facing the camera and read as male: found after a short check  [first at call 11]
+PASS the man alone in a side view: not taken on a guess; found at once when the woman is back in the picture  [alone: None, with her back: True]
+PASS the man alone, read as female: not taken on a guess; found at once when the woman is back  [alone: None, with her back: True]
+PASS a one-person job is not affected (the face is taken at once)
+PASS the first person of a two-person job is taken at once (as before)  [{0: True}]
+all checks passed
+== unit206 hand_eye (v11.2.205 against v11.2.214)
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.069 vs 0.937; the whole object 0.074 vs 0.930]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.25 %, worst frame 3.90 %]
+all checks passed
+== unit206 cup_cheek (v11.2.205 against v11.2.214)
+PASS switches off: v11.2.206's mask equals v11.2.205's on all 70 frames  [largest difference 0.00e+00]
+PASS switches on: a valid mask (0-1) on every frame
+PASS over the object where it covers the face (mean of the frames it is in): v11.2.206 paints at least 20 % less than v11.2.205  [0.004 vs 0.673; the whole object 0.055 vs 0.750]
+PASS the rest of the face is painted as by v11.2.205: under 1 % of it painted less on average, under 6 % on any frame  [mean 0.66 %, worst frame 1.94 %]
+all checks passed
+== unit205
+PASS the app's list [a1..a4]: slot index = position, 0 = unchanged
+PASS a dict of 1-based slot numbers ('1', 'slot2', '#3')
+PASS a JSON string
+PASS out of range is clipped to -1..1; NaN, text and slot 5 are ignored
+PASS nothing, junk or all zeros: off
+PASS 0: lightness and colour unchanged
+PASS brighter +30 %: mid-tones up, black stays black, white stays white, a little less saturated  [L 128 -> 143]
+PASS brighter +100 %: mid-tones up, black stays black, white stays white, a little less saturated  [L 128 -> 168]
+PASS darker -30 %: mid-tones down, order kept (no banding inversions), colour a little deeper  [L 128 -> 113]
+PASS darker -100 %: mid-tones down, order kept (no banding inversions), colour a little deeper  [L 128 -> 77]
+PASS toned keeps the hue (within 3 deg) and moves lightness the right way  [L 135 / 169 / 187]
+PASS no models (colour fallback): the chosen person's face and arm change, the other's do not  [face 22.0 arm 17.7 | other face 0.00 arm 0.00]
+PASS no models: the shirt and the wall are not changed  [shirt 0.00 wall 0.00]
+PASS the summary says which method ran  [SKIN-TONE: skin: face-colour model (unit test: no model); person: way from each face only (unit test: no model); 1 frames, 491 ms a frame (s]
+PASS a chosen person not found keeps their tone 12 frames, fading, then none (no sudden flash)  [21.0 20.0 18.0 17.0 15.0 13.0 ... 0.0]
+PASS a shot cut forgets the last place at once
+PASS nothing chosen: the frame is the same object, untouched
+PASS a broken record never stops the job (frame returned as is)
+PASS preview: a mask for the chosen person only, and its share  [{"2": 0.0312}]
+PASS the job settings keep skin_tone
+PASS the adapter turns it into a plain list of 4, or None when all natural
+PASS no Detect references: slots left to right (the job's own start)
+PASS with Detect references: each slot to its own person, whatever the position
+PASS one reference: that slot by identity, the other gets the remaining face
+PASS with the replacement faces (1 a woman, 2 a man), no references: #1 on the woman although she is on the right (as the job paired them on the layered scene)  [the replacement faces' gender]
+PASS a Detect reference outranks gender (#1 captured as the man)
+PASS without the replacement faces: left to right, and says so
+PASS two men, no references: the first man from the left gets #1 (the job pairs same-gender people at the clip's start)
+PASS submit_video takes skin_tone and puts it in the job
+PASS a job resumed after a restart still has its skin tone
+all checks passed
+== unit204
+PASS two faces apart (centres 1.7 face sizes): not contact
+PASS two faces 20 px apart, or overlapping: contact
+PASS frontal (offset 0.10) and 36 deg (0.34): not a side pose
+PASS about 45 deg (0.51) and 60 deg (0.9): side pose
+PASS the same 45 deg face rolled 30 deg (head tilted): still a side pose; a tilted frontal face is not
+PASS one of two faces in a side pose is enough
+PASS switches: smart_keys and side_key_h exist (0 / a higher value restore v11.2.203)
+all checks passed
+== unit176
+PASS 2 people: a whole face turned away (reads as nobody, ~0.13) is kept by elimination, never swapped  [15 of 15, 0 wrong]
+PASS two_elim 0: the v11.2.92 behaviour (that face is refused)  [0 of 15]
+PASS a sliver (its box 0.75 of its last width) is not taken by elimination  [0 of 15]
+PASS against its partner, a face whose points are marked unreliable (maybe a sliver) is not taken by elimination  [0 of 15]
+PASS away from its partner, a blurred whole face (points unreliable) is kept by elimination - a fast step  [15 of 15, 0 wrong]
+PASS a third face in the frame: elimination does not act  [0 of 15, 0 wrong]
+PASS in contact, a face missed for 60 frames is carried while its partner is seen (v11.2.92: 24)  [60 of 60 (contact_follow 0: 24)]
+PASS ...but when both are lost, the v11.2.92 limit stands (no face kept on a guess for long)  [24 of 60]
+PASS a fast step (60 px a frame): the face's points follow the detection (v11.2.92 trailed it)  [lag [0.0, 0.0, 0.0] px (fast_snap 0: [14.3, 15.2, 15.3] px)]
+PASS a still face with detector jitter is smoothed exactly as in v11.2.92  [frame-to-frame jitter 0.65 px out of 2.18 in (v11.2.92 0.65)]
+PASS against its partner, a face that shrank slowly to 0.76 of its width and reads as nobody is not taken by elimination  [0 of 10 taken]
+PASS a crossing: A comes out on the other side and is its own again within a few frames (not carried with B)  [back on call 31 (A reappears on call 30)]
+all checks passed
+== unit176_pipe
+PASS boxes the same size within 3 %: the face in front stays the same (v11.2.92 changed it on every frame)  [0 changes in 60 frames (v11.2.92 rule: 59)]
+PASS a face whose crop reads as its partner is behind, whatever the box size  [False]
+PASS ...and that holds through frames without an identity reading (bigger box, 49 frames)  [0 frames flipped]
+PASS a face not seen (carried on a guess) is never in front of one that is seen  [False]
+PASS the face behind is cut by the face in front, never the other way round  [behind cut by 1, front cut by 0]
+PASS no decision made (contact_follow 0): the v11.2.92 rule, the bigger box in front
+PASS first touch a near tie, then the other face clearly bigger: it is in front from that frame on  [[True, True, True, False, False, False, False, False, False, False]]
+PASS ...but once decided on a clear difference, one contrary frame does not change it  [[False, False, False, False, False, False, False, False, False, False, False, False, False]]
+PASS first touch a near tie, then the face in front shrinks steadily: it goes behind within 2 frames of becoming the smaller  [[True, True, True, True, True, True, True, False, False, False, False, False] (switch at 7; the smaller from index 6)]
+PASS ...while detector jitter that alternates every frame (+-6 % area) never switches it  [0 changes]
+PASS side-view kiss (points of both faces ~15 px apart, boxes apart): both faces kept and each given to its own person  [40 of 40 frames both kept, 40 both right, 0 wrong]
+PASS (without the box test - the points test only - the face behind was merged away or refused)  [0 of 40 both kept, 0 both right]
+PASS two boxes on one face (a cheek box, its centre inside the face's box) are not 'two faces'
+PASS a side-view pair (overlap 0.14, centres outside each other's box) is two faces
+all checks passed
+== unit203
+PASS two people far apart: ArcFace skipped on about 2 calls in 3, every face still given to its own person  [40 faces skipped, 20 embedded, 0 wrong assignments]
+PASS two people close (a kiss, a hug): ArcFace runs on every face  [0 skipped]
+PASS a third face in the picture: ArcFace runs on every face  [0 skipped]
+PASS arc_skip 0: every face embedded (v11.2.92)  [0 skipped]
+PASS a face that is not on its person's last box: no reuse
+PASS a new shot with the two people swapped: the skip relabels no later than without it  [wrong frames 1, last wrong 1 (no skip: 0, 0)]
+PASS with insightface's own Face objects the skip works too (normed_embedding comes from embedding)  [16 faces reused]
+PASS round trip: the decrypted file is identical (9.5 MB, 3 chunks)
+PASS the sealed file does not contain the plain bytes
+PASS a changed byte is refused
+PASS a cut file (last chunk missing) is refused
+PASS chunks in another order are refused
+PASS another secret cannot open it
+PASS saved inputs are sealed files (.enc)  [['face0.jpg.enc', 'face1.jpg.enc', 'patch0_frame.jpg.enc', 'patch0_mask.png.enc', 'resume.json', 'video.mp4.enc']]
+PASS the result-ZIP password is not saved
+PASS a restart decrypts the video, faces and patch frames into /tmp, identical to the originals  [/tmp/phoenix_resume/UNIT0203/video.mp4]
+PASS without the secret a sealed job cannot be resumed (and says so), nothing crashes
+PASS without the secret: kept as before (plain), still without the ZIP password  [['face0.jpg', 'face1.jpg', 'patch0_frame.jpg', 'patch0_mask.png', 'resume.json', 'video.mp4']]
+all checks passed
+== nofalse206 (v11.2.205 against v11.2.214)
+  t1.jpg face 0 (107 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 1 (100 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 2 (103 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 3 (94 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 4 (108 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+  t1.jpg face 5 (110 px wide): v11.2.206 cuts more than v11.2.205 on 0.00% of the face (worst frame), less on 0.00%
+PASS 6 face runs, nothing in front: the newer pack cuts no more of any face than v11.2.205 (at most 1 % of it, on its worst frame)  [worst 0.00% of a face]
+
+all checks passed
+UNITS_DONE

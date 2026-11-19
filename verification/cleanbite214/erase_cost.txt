@@ -1,0 +1,6 @@
+720p   frame 1280x720 face 301 px wide: erase 165 ms (net + mask 141 ms, the rest 24 ms)
+1080p  frame 1920x1080 face 451 px wide: erase 199 ms (net + mask 148 ms, the rest 51 ms)
+4K     frame 3840x2160 face 901 px wide: erase 227 ms (net + mask 135 ms, the rest 93 ms)
+720p   frame 1280x720 face 301 px wide: erase 156 ms (net + mask 139 ms, the rest 17 ms)
+1080p  frame 1920x1080 face 451 px wide: erase 210 ms (net + mask 141 ms, the rest 69 ms)
+4K     frame 3840x2160 face 901 px wide: erase 234 ms (net + mask 155 ms, the rest 79 ms)

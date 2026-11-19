@@ -1,0 +1,432 @@
+diff -ru -x __pycache__ -x SDOS-214_CleanBite.md v11.2.213_TrueTurn/config.py v11.2.214_CleanBite/config.py
+--- v11.2.213_TrueTurn/config.py	2026-11-18 04:28:45.422087702 +0000
++++ v11.2.214_CleanBite/config.py	2026-11-19 10:05:02.496601691 +0000
+@@ -275,8 +275,8 @@
+ DUR = [10, 20, 30, 60, 90, 120, 150, 180, 240, 300, 360]
+ FPS = [15, 24, 30, 40, 50, 60]
+ 
+-VERSION = "v11.2.213"
+-BUILD = "TrueTurn · a head turned so far away that only a sliver of the face shows (beyond ~80 deg) is no longer painted with a face drawn at a less turned angle: the replacement gives way smoothly to the person's own face, read by the 3D-landmark model of the face pack · TruePerson · each person's gender as confirmed in the app's Detect step is used again: a face that reads as the other gender on a clean front view (or looks like one that did) never gets that person's replacement, a person bound to such a face is let go and found again; the Space keeps the gender model's own certainty · Steady · the face outline and the line where one face lies over another no longer shake with the detector (landmarks smoothed in the face's own frame, a face going behind another filtered) · TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
++VERSION = "v11.2.214"
++BUILD = "CleanBite · an object at the mouth (an ice cream bar half in the open mouth) is taken out of the picture the swap network is given and put back over its result: the lips are drawn behind it, no second lip outline hugging it, the lower lip not lost · TrueTurn · a head turned so far away that only a sliver of the face shows (beyond ~80 deg) is no longer painted with a face drawn at a less turned angle: the replacement gives way smoothly to the person's own face, read by the 3D-landmark model of the face pack · TruePerson · each person's gender as confirmed in the app's Detect step is used again: a face that reads as the other gender on a clean front view (or looks like one that did) never gets that person's replacement, a person bound to such a face is let go and found again; the Space keeps the gender model's own certainty · Steady · the face outline and the line where one face lies over another no longer shake with the detector (landmarks smoothed in the face's own frame, a face going behind another filtered) · TrueTouch · two faces touching: a face partly behind another is placed by its own visible part (no shrinking, sliding or revert), side-view kisses painted each on its own side; eating: the replacement's lips stay on and the food is cut tightly, all of it · SureID · a person not found yet is given a face only when the other person is identified in the same frame (or on a steady front view of the right gender): one face alone on screen never gets the other person's replacement; RefFallback (made sure) · SteadyID · two faces in contact: the face going behind is put behind as soon as it shrinks steadily (no frame of the other person's face); skin tone models load (GL libraries); OcclusionFlow · a hand, cup or phone over any part of the face is cut on the frame it arrives, the cut moves with it and has clean edges; SkinTone · brighten or darken the chosen people's skin, whole body (app 1.2.51 step 04, Preview); ContactKeys · Optimized only: every frame swapped in contact or a side pose over ~40 deg, two faces apart every 2nd frame; Ultra unchanged; the 11.2.92 swap with the 176-179 contact and fast-step fixes; saved uploads encrypted (Space secret PHOENIX_STORE_KEY), deleted after 24 hours"
+ VERSION_FULL = f"{VERSION} ({BUILD})"
+ 
+ @dataclass
+diff -ru -x __pycache__ -x SDOS-214_CleanBite.md v11.2.213_TrueTurn/core_pipeline.py v11.2.214_CleanBite/core_pipeline.py
+--- v11.2.213_TrueTurn/core_pipeline.py	2026-11-18 04:38:23.571993326 +0000
++++ v11.2.214_CleanBite/core_pipeline.py	2026-11-19 12:06:02.631256377 +0000
+@@ -1118,6 +1118,7 @@
+         pass
+     try:
+         _E.OCCNET_STATS.update({"frames": 0, "cut_frames": 0, "cut_area_sum": 0.0, "ms": 0.0, "wide": 0, "held": 0})
++        _E.ERASE_STATS.update({"frames": 0, "erased": 0, "area_sum": 0.0, "ms": 0.0, "cut": 0})          # v11.2.214
+     except Exception:
+         pass
+     try:
+@@ -3189,6 +3190,12 @@
+ _CM_STRENGTH = {"Fast": 0.70, "Balanced": 0.85, "Optimized": 0.90, "Best": 1.00, "Ultra": 1.00}
+ 
+ 
++# v11.2.214 (SDOS-214): the tiers that take an object at the mouth out of the swap network's input (and keep the paste off it): the swap
++# looks for one on every face it swaps (Optimized swaps every 2nd frame when faces are apart, so it pays for half as many looks). Fast and
++# Balanced are as in 11.2.213.
++_ERASE_TIERS = ("Ultra", "Best", "Optimized")
++
++
+ def _swap_one(work, orig, face, src_face, quality, alpha=1.0, *,
+               rivals=None, frame_ord=0, post=None):
+     """Swap and composite in ArcFace-aligned space. Returns (image, cached).
+@@ -3218,6 +3225,7 @@
+     track = getattr(face, "_track", None)
+     guard = float(getattr(face, "_occlusion_guard", 0.0) or 0.0)
+     strength = _CM_STRENGTH.get(str(quality), 1.0)
++    face._erase_on = str(quality) in _ERASE_TIERS          # v11.2.214: the mask's cut for the erased object follows the tier
+ 
+     if comp is not None:
+         try:
+@@ -3226,6 +3234,7 @@
+                 track=track, alpha=float(alpha),
+                 colour_strength=strength, occlusion_guard=guard,
+                 rivals=rivals, frame_ord=int(frame_ord), post=post,
++                erase_always=(str(quality) in _ERASE_TIERS),              # v11.2.214 (SDOS-214)
+             )
+             if ok:
+                 return out, True
+@@ -3256,6 +3265,7 @@
+     face._track = track
+     face._partners = partners            # v11.2.210: the faces touching this one, for the side-view rule of the mask
+     face._hid = bool(rec.get("hid"))     # ...and whether its position is the carried one (_HiddenHold)
++    face._erase_on = str(quality) in _ERASE_TIERS          # v11.2.214: the mask's cut for an object taken out of the network's input
+     try:
+         return comp.reuse(
+             work, orig, rec["kps"], face,
+@@ -8226,6 +8236,8 @@
+                         return None
+                 return _post
+ 
++            _erase_all = str(quality) in _ERASE_TIERS               # v11.2.214: these tiers look for an object at the mouth on every swap
++
+             def swap_frame(k):
+                 """Produce the aligned swap crop for every slot on key frame k.
+ 
+@@ -8275,7 +8287,18 @@
+                         if comp is None:
+                             raise RuntimeError(
+                                 "no compositor: the swapper model is not loaded")
+-                        fake, M = comp._raw_swap(frm, face, src)
++                        # v11.2.214 (SDOS-214): the network is given the face WITHOUT an object held at the mouth (the lips are then
++                        # drawn behind it, not around it); the paste, and the object's cut, are as before. Two faces in contact: the
++                        # contact rules decide (the erase stands aside, see AlignedCompositor._erase_objects).
++                        _rv, _frm_in = None, frm
++                        if _erase_all:
++                            try:
++                                face._partners = _partner_info(records, slot)
++                                _rv = _rival_landmarks(records, slot)
++                            except Exception:
++                                pass
++                            _frm_in = comp._erase_objects(frm, frm, face, rec.get("track"), _rv, True)
++                        fake, M = comp._raw_swap(_frm_in, face, src)
+                     except Exception as e:
+                         # debug level hid this completely at the default INFO
+                         # setting, so a job that swapped NOTHING looked exactly
+@@ -8820,6 +8843,13 @@
+                     int(_hs.get("frames", 0)), int(_hs.get("entered", 0)), int(_hs.get("ref", 0)),
+                     int(_hs.get("coast", 0)), int(_hs.get("handed", 0)), int(_hs.get("lost", 0)), int(_hs.get("jumped", 0)),
+                     int(_E.SIDE_STATS.get("frames", 0)), int(_E.SIDE_STATS.get("held", 0)), int(_E.SIDE_STATS.get("outline", 0)))
++            _es = _E.ERASE_STATS
++            logging.info("ERASE: an object at the mouth or chin was taken out of the swap's input (so the lips are drawn behind it, not around "
++                         "it) on %d of %d face-frames looked at (mean %.1f%% of the face crop); %.0f ms per face-frame looked at; the paste left it "
++                         "alone on %d composited frames (SDOS-214)",
++                         int(_es.get("erased", 0)), int(_es.get("frames", 0)),
++                         100.0 * float(_es.get("area_sum", 0.0)) / max(1, int(_es.get("erased", 0))),
++                         float(_es.get("ms", 0.0)) / max(1, int(_es.get("frames", 0))), int(_es.get("cut", 0)))
+             logging.info("TURN: heads read for their turn %d times (past profile %d); frames where a head turned beyond what the "
+                          "swap can draw was given back to its own face %d, partly %d (SDOS-213)", int(_TURN_STATS.get("read", 0)),
+                          int(_TURN_STATS.get("past", 0)), int(_TURN_STATS.get("frames_given_back", 0)),
+diff -ru -x __pycache__ -x SDOS-214_CleanBite.md v11.2.213_TrueTurn/swap_engine.py v11.2.214_CleanBite/swap_engine.py
+--- v11.2.213_TrueTurn/swap_engine.py	2026-11-18 04:38:23.568781267 +0000
++++ v11.2.214_CleanBite/swap_engine.py	2026-11-19 12:30:16.643020997 +0000
+@@ -62,7 +62,7 @@
+     "ENGINE_VERSION",
+ ]
+ 
+-ENGINE_VERSION = "aequus-1.2.213-trueturn"
++ENGINE_VERSION = "aequus-1.2.214-cleanbite"
+ 
+ log = logging.getLogger("swamitech.engine")
+ 
+@@ -254,6 +254,26 @@
+     "turn_check": 0.40,              # the model is asked only when the 5 points' nose offset is this many eye distances (~38 deg+)
+     "turn_ema_up": 0.70,             # smoothing on the track: a reading more turned than the last counts this much...
+     "turn_ema_down": 0.50,           # ...a less turned one this much
++    # v11.2.214 (SDOS-214): an object at the mouth or chin (an ice cream bar half in the open mouth, a cone, a spoon) is taken out of the picture
++    # the swap network is given, and put back over its result. The network copies an object it is shown and draws lips AROUND it - a
++    # second lip outline hugging the bar, the lower lip behind it drawn thin or lost - because it cannot tell the object from the mouth.
++    # Given the face without the object (inpainted from its surroundings) it draws the lips as it would for the open mouth alone, and
++    # the object - cut from the paint exactly as before - goes over them. Measured against the ideal (the swap of the object-free frame
++    # with the true object on top): the network's lips outside the bar are 25-50 % nearer to it.
++    "obj_erase": 1,                  # 0 = 11.2.213
++    "obj_erase_p": 0.05,             # the occlusion net's face probability under this = an object (the open mouth's cavity reads 0.1-1.0, a bar 0.00)
++    "obj_erase_min": 0.004,          # an object at least this share of the crop (smaller: nothing is changed)
++    "obj_erase_dilate": 0.02,        # taken out this much wider (share of the crop): the anti-aliased rim of the object
++    "obj_erase_edge_blur": 1.2,      # the sharper face map that finds the object's real edge (the deciding map is blurred: its edge sits inside the object) ...
++    "obj_erase_edge_p": 0.35,        # ... pixels it calls not face (under this) next to the object are the object's ...
++    "obj_erase_edge_px": 0.025,      # ... up to this far (share of the crop)
++    "obj_erase_reach": 0.16,         # the object between the eroded and the real face outline: along its own axis this far (share of the crop)
++    "obj_erase_radius": 0.012,       # the inpainting radius (share of the face's width)
++    "obj_erase_max_px": 480,         # a region to fill larger than this (px, longer side) is filled at this size (a 4K frame costs no more than a 720p one)
++    "obj_erase_yaw": 0.60,           # not on a face turned more than ~48 deg (the nose's offset from the eyes' middle in eye distances; the profile mask decides there), nor two faces in contact
++    "obj_erase_cut_dilate": 0.01,    # ... the cut is only this much wider than the object (share of the crop)
++    "obj_erase_cut": 1,              # the paste leaves the footage's own pixels where the object was taken out of the network's input (0 = only the mouth rule's cut)
++    "obj_erase_gate": 0.02,          # tiers other than Ultra / Best look for an object only when the last frame's cut was this big (share of the crop)
+     "turn_past_pr": 40.0,            # past profile (the head turning on, away from the camera): the model then reads its nod AND
+                                      # its tilt both this wild (40-99 deg on the test head, 16-29 at a real 66-80 deg turn); for a
+                                      # head already turned past turn_lo such a reading is taken as 90 deg, not as the 62-75 deg
+@@ -1098,7 +1118,8 @@
+                  "occn_core",                   # v11.2.206: the mouth rule's cut alone, smoothed as in 11.2.205 (eating rule)
+                  "side_seg", "side_age",        # v11.2.210: the last face map that was this face's own, in a side-view kiss
+                  "g_contra", "g_bad", "g_veto_call",   # v11.2.212: evidence against the person's gender, faces read as the other one
+-                 "turn_yaw")                    # v11.2.213: the head's turn (3D-landmark model, smoothed), None = not read
++                 "turn_yaw",                    # v11.2.213: the head's turn (3D-landmark model, smoothed), None = not read
++                 "erase_prev")                  # v11.2.214: an object was taken out of the swap's input on this face's last frame
+ 
+     def __init__(self, slot=0):
+         self.slot = slot
+@@ -1976,7 +1997,8 @@
+                  "embedding", "det_score", "predicted", "_track", "_slot",
+                  "_occlusion_guard", "_frame_shape",
+                  "_partners",     # v11.2.210: the other faces touching this one (5 points, outline, in front or not)
+-                 "_hid")          # v11.2.210: its position is carried by its visible part (core_pipeline._HiddenHold)
++                 "_hid",          # v11.2.210: its position is carried by its visible part (core_pipeline._HiddenHold)
++                 "_erase_on")     # v11.2.214: this tier takes an object at the mouth out of the network's input (then the mask's cut for it applies too)
+ 
+     def __init__(self, bbox, kps, lmk=None, emb=None, det_score=0.5):
+         self.bbox = np.asarray(bbox, np.float32).reshape(4).copy()
+@@ -2064,23 +2086,129 @@
+ PROFILE_STATS = {"frames": 0, "w_sum": 0.0}
+ 
+ 
+-def occ_net_raw(aligned_bgr):
++def occ_net_raw(aligned_bgr, cache=True):
+     """The occlusion net's own face map (256x256, 1 = face) for an aligned crop; None without the net.
+-    The last result is kept, so the profile mask and the mouth/chin rule share one forward pass per crop."""
++    The last result is kept, so the profile mask and the mouth/chin rule share one forward pass per crop. `cache=False` (the object
++    erase of v11.2.214, which runs in the swap workers on a crop of its own) neither reads nor writes that memory."""
+     sess = _OCCNET.get("sess")
+     if sess is None or aligned_bgr is None:
+         return None
+-    key = (aligned_bgr.shape, aligned_bgr.__array_interface__["data"][0], int(aligned_bgr[::7, ::5].sum()))
+-    if _OCCNET_RAW["key"] == key:
++    key = (aligned_bgr.shape, aligned_bgr.__array_interface__["data"][0], int(aligned_bgr[::7, ::5].sum())) if cache else None
++    if cache and _OCCNET_RAW["key"] == key:
+         return _OCCNET_RAW["m"]
+     W = 256
+     x = cv2.resize(aligned_bgr, (W, W), interpolation=cv2.INTER_LINEAR).astype(np.float32)[None] / 255.0
+     m = sess.run(None, {sess.get_inputs()[0].name: x})[0][0, :, :, 0]
+     m = np.clip(m, 0.0, 1.0).astype(np.float32)
+-    _OCCNET_RAW["key"], _OCCNET_RAW["m"] = key, m
++    if cache:
++        _OCCNET_RAW["key"], _OCCNET_RAW["m"] = key, m
+     return m
+ 
+ 
++ERASE_STATS = {"frames": 0, "erased": 0, "area_sum": 0.0, "ms": 0.0, "cut": 0}
++
++
++def _object_reach(out, m, mb, hull_e, outside=None):
++    """The whole of the object in the crop, from the part the face map is SURE about (`out`, inside the eroded outline): the swap
++    network draws an object on again from any piece of it that is left, and a rim left at the mask's edge feeds the fill with the
++    object's own colour. Two steps, both without touching the face:
++    1. its edge: the face map is blurred (it has to be, to decide), so its edge sits a few px inside the object. Grown by up to
++       obj_erase_edge_px over the pixels the sharper map (little blur) calls not face (under obj_erase_edge_p);
++    2. its way out: the part between the eroded and the real outline (the object passes through it, and the net's mouth rule stops at the
++       eroded one) - the object along its own axis, obj_erase_reach of the crop further, only over pixels the face map calls not face
++       and only outside the eroded outline (inside it nothing is added)."""
++    W = out.shape[0]
++    try:
++        ms = cv2.GaussianBlur(m, (0, 0), float(_P.get("obj_erase_edge_blur", 1.2)))
++        ok2 = ms < float(_P.get("obj_erase_edge_p", 0.35))
++        grown = out.copy()
++        ker = np.ones((3, 3), np.uint8)
++        for _ in range(max(0, int(round(float(_P.get("obj_erase_edge_px", 0.025)) * W)))):
++            grown = (cv2.dilate(grown.astype(np.uint8), ker) > 0) & (ok2 | grown)
++        ys, xs = np.nonzero(out)
++        L = int(round(float(_P.get("obj_erase_reach", 0.16)) * W))
++        if L >= 2 and len(xs) > 40:
++            pts = np.stack([xs, ys], 1).astype(np.float64)
++            c = pts.mean(0)
++            _, v = np.linalg.eigh(np.cov((pts - c).T))
++            ax = v[:, 1]                                                    # the long axis of the part inside the outline
++            kk = np.zeros((2 * L + 1, 2 * L + 1), np.uint8)
++            cv2.line(kk, (L - int(round(ax[0] * L)), L - int(round(ax[1] * L))), (L + int(round(ax[0] * L)), L + int(round(ax[1] * L))), 1, 1)
++            ext = (cv2.dilate(grown.astype(np.uint8), kk) > 0) & (mb < 0.3) & (hull_e == 0)
++            if outside is not None:
++                ext &= ~outside
++            grown |= ext
++        return grown
++    except Exception as ex:
++        log.debug("object reach skipped: %s", ex)
++        return out
++
++
++def object_erase_mask(aligned_bgr, pts_aligned, size, M=None, frame_wh=None, cache=False, dilate=None):
++    """v11.2.214 (SDOS-214): where an object held at the mouth or chin lies in this aligned crop, as (bool size x size, share of the crop),
++    or None. The pieces the mouth rule cuts (the occlusion net's "not face" inside the landmark outline, over the core of the lower face)
++    - but only where the net is SURE it is not face (obj_erase_p: an object reads 0.00 on its face map, the open mouth's cavity 0.1-1.0,
++    so the mouth is not touched), and only a piece that reaches the edge of the face outline (the cavity is an island inside it).
++    `cache` = share the net's last map with the mask rules (build_mask, whose own pass on this very crop is then not repeated); the erase
++    in the swap workers runs on a crop of its own and leaves that memory alone."""
++    sess = _OCCNET.get("sess")
++    if sess is None or aligned_bgr is None or pts_aligned is None:
++        return None
++    try:
++        W = 256
++        m = occ_net_raw(aligned_bgr, cache=cache)
++        if m is None:
++            return None
++        mb = cv2.GaussianBlur(m, (0, 0), float(_P.get("occ_net_blur", 3.0)))
++        hull = np.zeros((W, W), np.uint8)
++        pts = np.asarray(pts_aligned, np.float32) * (W / float(size))
++        cv2.fillConvexPoly(hull, cv2.convexHull(np.round(pts).astype(np.int32)), 1)
++        e = int(round(float(_P.get("occ_net_hull_erode", 0.08)) * W)) | 1
++        hull_e = cv2.erode(hull, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (e, e)))
++        obj = (mb < float(_P.get("obj_erase_p", 0.05))) & (hull_e > 0)
++        if not bool(obj.any()):
++            return None
++        yy, xx = np.mgrid[0:W, 0:W]
++        core = (np.abs(xx / float(W) - 0.5) < float(_P.get("occ_net_core_x", 0.17))) & (yy / float(W) >= float(_P.get("occ_net_core_y", 0.58)))
++        need = float(_P.get("occ_net_core_min", 0.002)) * W * W
++        edge = (hull_e > 0) & ~(cv2.erode(hull_e, np.ones((5, 5), np.uint8)) > 0)       # the eroded outline's own pixels
++        outside = None
++        if M is not None and frame_wh is not None:
++            IM = cv2.invertAffineTransform(np.asarray(M, np.float32).reshape(2, 3))
++            g = (np.arange(W, dtype=np.float32) + 0.5) * (size / float(W)) - 0.5
++            gx, gy = np.meshgrid(g, g)
++            ix = IM[0, 0] * gx + IM[0, 1] * gy + IM[0, 2]
++            iy = IM[1, 0] * gx + IM[1, 1] * gy + IM[1, 2]
++            outside = (ix < 0.5) | (iy < 0.5) | (ix > float(frame_wh[0]) - 1.5) | (iy > float(frame_wh[1]) - 1.5)
++            if bool(outside.any()):
++                outside = cv2.dilate(outside.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
++            else:
++                outside = None
++        n, lab = cv2.connectedComponents(obj.astype(np.uint8), connectivity=8)
++        out = np.zeros((W, W), bool)
++        for c in range(1, n):
++            comp = lab == c
++            if outside is not None and bool((comp & outside).any()):
++                continue
++            if float((comp & core).sum()) < need or not bool((comp & edge).any()):
++                continue
++            out |= comp
++        if not bool(out.any()):
++            return None
++        out = _object_reach(out, m, mb, hull_e, outside)
++        d = int(round(float(_P.get("obj_erase_dilate", 0.02) if dilate is None else dilate) * W)) | 1
++        out = cv2.dilate(out.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))) > 0
++        frac = float(out.mean())
++        if frac < float(_P.get("obj_erase_min", 0.004)):
++            return None
++        if size != W:
++            out = cv2.resize(out.astype(np.uint8), (size, size), interpolation=cv2.INTER_NEAREST) > 0
++        return out, frac
++    except Exception as ex:
++        log.debug("object erase mask skipped: %s", ex)
++        return None
++
++
+ def _yaw_offset(kps):
+     """The nose's sideways offset from the eye midpoint, roll-corrected, in eye distances (as profile_weight): frontal
+     0.0-0.25, 36-45 deg 0.34-0.51, 55-71 deg 0.76-1.48. None without points."""
+@@ -2857,6 +2985,80 @@
+         self.swapper = swapper
+         self._warned_no_M = False
+ 
++    # -- v11.2.214: the object taken out of the swap's input -----------------
++    def _erase_objects(self, work, orig, face, track, rivals, always):
++        """The frame the swap network is given: `work`, with an object at the mouth or chin inpainted from its surroundings (see
++        obj_erase); `work` itself when there is none, nothing to do for this face, or anything fails. The paste is not changed: the
++        object is cut from the paint as before, so it is the footage's own that shows over the result."""
++        t0 = time.perf_counter()
++        counted = False
++        try:
++            if float(_P.get("obj_erase", 0.0) or 0.0) <= 0.0 or _OCCNET.get("sess") is None:
++                return work
++            lmk, kps = getattr(face, "landmark_2d_106", None), getattr(face, "kps", None)
++            if lmk is None or kps is None or rivals or getattr(face, "_partners", None):
++                return work                                   # (two faces in contact: the contact rules decide)
++            yo = _yaw_offset(kps)
++            if yo is None or yo >= float(_P.get("obj_erase_yaw", 0.60)):
++                return work                                   # (a turned face: the profile mask decides)
++            prev = bool(getattr(track, "erase_prev", False)) if track is not None else False
++            if not always and not prev:
++                okn = getattr(track, "occn_keep", None) if track is not None else None
++                if okn is None or float((okn < 0.5).mean()) <= float(_P.get("obj_erase_gate", 0.02)):
++                    return work
++            M = estimate_norm(kps, 128)
++            if M is None:
++                return work
++            al = cv2.warpAffine(orig, M, (128, 128), borderMode=cv2.BORDER_REPLICATE)
++            res = object_erase_mask(al, _landmarks_to_aligned(lmk, M, 128), 128, M=M,
++                                    frame_wh=(int(orig.shape[1]), int(orig.shape[0])))
++            ERASE_STATS["frames"] += 1
++            counted = True
++            if track is not None:
++                track.erase_prev = res is not None
++            if res is None:
++                return work
++            mask, frac = res
++            ys, xs = np.nonzero(mask)
++            IM = cv2.invertAffineTransform(np.asarray(M, np.float32).reshape(2, 3))
++            cr = np.array([[xs.min(), ys.min()], [xs.max() + 1, ys.min()], [xs.min(), ys.max() + 1], [xs.max() + 1, ys.max() + 1]], np.float32)
++            fc = cr @ IM[:, :2].T + IM[:, 2]
++            Hh, Ww = work.shape[:2]
++            x0, y0 = int(max(0, np.floor(fc[:, 0].min()) - 8)), int(max(0, np.floor(fc[:, 1].min()) - 8))
++            x1, y1 = int(min(Ww, np.ceil(fc[:, 0].max()) + 8)), int(min(Hh, np.ceil(fc[:, 1].max()) + 8))
++            if x1 - x0 < 8 or y1 - y0 < 8:
++                return work
++            A = IM.copy()
++            A[:, 2] -= np.array([x0, y0], np.float32)
++            mr = cv2.warpAffine(mask.astype(np.uint8) * 255, A, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR)
++            mr = (mr > 127).astype(np.uint8) * 255
++            if not bool(mr.any()):
++                return work
++            bb = np.asarray(getattr(face, "bbox", [0, 0, 128, 128]), np.float32).reshape(-1)
++            rad = int(max(3, round(float(_P.get("obj_erase_radius", 0.012)) * max(float(bb[2] - bb[0]), 32.0))))
++            out = work.copy()
++            sub = np.ascontiguousarray(work[y0:y1, x0:x1])
++            # the network sees the face at 128 px, so a large frame (4K) is filled at a size that costs no more than a 720p one
++            sc = min(1.0, float(_P.get("obj_erase_max_px", 480)) / float(max(sub.shape[0], sub.shape[1])))
++            if sc < 0.97:
++                ss = cv2.resize(sub, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
++                ms = (cv2.resize(mr, (ss.shape[1], ss.shape[0]), interpolation=cv2.INTER_NEAREST) > 0).astype(np.uint8) * 255
++                up = cv2.resize(cv2.inpaint(ss, ms, max(3, int(round(rad * sc))), cv2.INPAINT_TELEA), (sub.shape[1], sub.shape[0]), interpolation=cv2.INTER_LINEAR)
++                filled = sub.copy()
++                filled[mr > 0] = up[mr > 0]
++            else:
++                filled = cv2.inpaint(sub, mr, rad, cv2.INPAINT_TELEA)
++            out[y0:y1, x0:x1] = filled
++            ERASE_STATS["erased"] += 1
++            ERASE_STATS["area_sum"] += float(frac)
++            return out
++        except Exception as ex:
++            log.debug("object erase skipped: %s", ex)
++            return work
++        finally:
++            if counted:
++                ERASE_STATS["ms"] += (time.perf_counter() - t0) * 1000.0
++
+     # -- inswapper interop ---------------------------------------------
+     def _raw_swap(self, img, face, src_face):
+         """Return (bgr_fake_128, M) or (None, None).
+@@ -3223,10 +3425,32 @@
+                     pass
+                 _K = nk if _K is None else _K * nk
+                 _nk_final = nk
++        # v11.2.214 (SDOS-214): where the object was taken out of the swap network's input, the footage's own pixels stay. The network no
++        # longer draws the object there, so the paste must not cover it: the mouth rule's cut stops at the eroded outline, and the object
++        # goes on through the band between that and the outline. The same rule, on this very crop (the net's map is shared, no second pass).
++        # (laid on AFTER the edge snap, and only 1% wider than the object: the snap would draw the edge onto the object's anti-aliased rim,
++        # and the network no longer draws the object there to hide a rim that is painted)
++        _erase_k = None
++        if (aligned_target is not None and pts is not None and _side is None and not rivals and not _partners
++                and bool(getattr(face, "_erase_on", False))
++                and float(_P.get("obj_erase", 0.0) or 0.0) > 0.0 and float(_P.get("obj_erase_cut", 0.0) or 0.0) > 0.0
++                and float(_P.get("occ_net", 0.0) or 0.0) > 0.0 and _OCCNET.get("sess") is not None):
++            try:
++                _yoe = _yaw_offset(getattr(face, "kps", None))
++                if _yoe is not None and _yoe < float(_P.get("obj_erase_yaw", 0.60)):
++                    _er = object_erase_mask(aligned_target, pts, size, M=M, frame_wh=frame_wh, cache=True,
++                                            dilate=float(_P.get("obj_erase_cut_dilate", 0.01)))
++                    if _er is not None:
++                        _erase_k = 1.0 - np.clip(cv2.GaussianBlur(_er[0].astype(np.float32), (0, 0), max(0.8, 0.006 * size)), 0.0, 1.0)
++                        ERASE_STATS["cut"] = ERASE_STATS.get("cut", 0) + 1
++            except Exception as _ee:
++                log.debug("object erase cut skipped: %s", _ee)
+         if _K is not None:
+             if float(_P.get("occ_snap", 0.0) or 0.0) > 0.0 and aligned_target is not None and float(_K.min()) < 0.98:
+                 _K = _occ_snap(_K, aligned_target, size)          # v11.2.206: a clean edge where the object crosses the face
+             mask = mask * _K
++        if _erase_k is not None:
++            mask = mask * _erase_k
+         if _nk_final is not None and len(_raw) >= 3 and getattr(_raw[2], "shape", None) == _nk_final.shape:
+             # the eating rule sees only the mouth rule's cut, smoothed exactly as in v11.2.205: a hand or cup on the cheek
+             # is not someone eating
+@@ -3424,7 +3648,7 @@
+     # -- one-shot -----------------------------------------------------------
+     def run(self, work, orig, face, src_face, *, track=None, alpha=1.0,
+             colour_strength=1.0, occlusion_guard=0.0, rivals=None,
+-            frame_ord=0, post=None):
++            frame_ord=0, post=None, erase_always=False):
+         """Swap `face` in `work` with `src_face`. Returns (image, ok).
+ 
+         The aligned result is cached on ``track`` so later frames can be
+@@ -3435,7 +3659,8 @@
+         instead of enhanced and unenhanced frames alternating at the swap
+         cadence and pulsing).
+         """
+-        fake, M = self._raw_swap(work, face, src_face)
++        # v11.2.214 (SDOS-214): the network is given the face without an object at the mouth; the paste (and the object's cut) is as before
++        fake, M = self._raw_swap(self._erase_objects(work, orig, face, track, rivals, erase_always), face, src_face)
+         if fake is None:
+             return work, False
+ 

@@ -1,0 +1,6 @@
+barh_choc.mp4 frames 45-105: mean abs error vs ideal outside the bar: frame 2.65 | pipe 1.77 | gt 2.08
+barh_cream.mp4 frames 45-105: mean abs error vs ideal outside the bar: frame 4.04 | pipe 1.89 | gt 2.04
+barh_strawberry.mp4 frames 45-105: mean abs error vs ideal outside the bar: frame 4.00 | pipe 1.89 | gt 2.03
+barv_strawberry.mp4 frames 45-105: mean abs error vs ideal outside the bar: frame 3.01 | pipe 1.40 | gt 1.76
+bar_cream.mp4 frames 45-105: mean abs error vs ideal outside the bar: frame 2.92 | pipe 1.47 | gt 1.83
+bar34_choc.mp4 frames 45-105: mean abs error vs ideal outside the bar: frame 2.46 | pipe 1.64 | gt 1.84

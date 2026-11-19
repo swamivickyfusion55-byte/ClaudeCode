@@ -1,0 +1,28 @@
+# The whole job at Ultra, 11.2.213 against 11.2.214: error against the ideal around the mouth (final_err.py), synthetic clips
+# ideal = the bar-free twin's job output with the true bar laid over it; error = mean grey-level difference over the lips' window, the bar left out
+## Cinematic (the bench default), frontal open mouth
+barh_choc.mp4: 115 frames with the bar in the picture
+  213            error vs ideal around the mouth: mean 3.93, worst frame 5.94 | bar changed near the lips: 0.021
+  214            error vs ideal around the mouth: mean 3.33, worst frame 5.41 | bar changed near the lips: 0.012
+barh_cream.mp4: 115 frames with the bar in the picture
+  213            error vs ideal around the mouth: mean 6.28, worst frame 8.64 | bar changed near the lips: 0.051
+  214            error vs ideal around the mouth: mean 3.61, worst frame 5.98 | bar changed near the lips: 0.054
+barh_strawberry.mp4: 115 frames with the bar in the picture
+  213            error vs ideal around the mouth: mean 6.16, worst frame 8.79 | bar changed near the lips: 0.350
+  214            error vs ideal around the mouth: mean 3.53, worst frame 5.91 | bar changed near the lips: 0.350
+## GPEN + Cinematic (the app's default enhancer)
+barh_choc.mp4: 115 frames with the bar in the picture
+  213            error vs ideal around the mouth: mean 4.26, worst frame 6.31 | bar changed near the lips: 0.023
+  214            error vs ideal around the mouth: mean 3.53, worst frame 5.73 | bar changed near the lips: 0.014
+## 38 deg turn, wide smile
+bar34_choc.mp4: 115 frames with the bar in the picture
+  213            error vs ideal around the mouth: mean 4.53, worst frame 6.13 | bar changed near the lips: 0.095
+  214            error vs ideal around the mouth: mean 3.40, worst frame 4.37 | bar changed near the lips: 0.049
+## phone-quality strawberry (noise, blur, crf 30)
+barh_strawberry_deg.mp4: 115 frames with the bar in the picture
+  213            error vs ideal around the mouth: mean 6.36, worst frame 9.07 | bar changed near the lips: 0.337
+  214            error vs ideal around the mouth: mean 3.82, worst frame 7.79 | bar changed near the lips: 0.333
+## Optimized tier (swaps every 2nd frame when apart), cream bar, ideal = 11.2.213 Optimized on the bar-free clip with the bar laid over
+barh_cream.mp4: 115 frames with the bar in the picture
+  213opt         error vs ideal around the mouth: mean 6.47, worst frame 10.79 | bar changed near the lips: 0.060
+  214opt         error vs ideal around the mouth: mean 3.79, worst frame 8.43 | bar changed near the lips: 0.071
